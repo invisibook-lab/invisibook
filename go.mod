@@ -1,4 +1,4 @@
-module github.com/invisbook-lab/invisbook
+module github.com/invisibook-lab/invisibook
 
 go 1.24.0
 
