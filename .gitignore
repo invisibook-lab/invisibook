@@ -1,7 +1,14 @@
 .idea
+
 # Rust build artifacts
 target/
 
 # Ignore Cargo.lock for libraries (kept for binaries only)
 # Uncomment if you want to ignore Cargo.lock
 #Cargo.lock
+
+# JavaScript/Node.js
+node_modules/
+
+# IDE
+.vscode/
