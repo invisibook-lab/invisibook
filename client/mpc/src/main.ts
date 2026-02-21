@@ -82,7 +82,7 @@ async function handleSubmitNumber() {
   step3.classList.add('hidden');
   step4.classList.remove('hidden');
 
-  const result = await app.mpcLargest(myNumber, progress => {
+  const { result, myValue } = await app.mpcLargest(myNumber, progress => {
     const percentage = Math.floor(progress * 100);
 
     // This allows it to start showing % when the MPC is actually started.
@@ -91,9 +91,28 @@ async function handleSubmitNumber() {
     }
   });
 
-  step4.classList.add('hidden');
-  step5.classList.remove('hidden');
-  resultValueElement.textContent = `Your number is ${result}!`;
+  // 根据比较结果执行不同的逻辑
+  if (result === 'smaller') {
+    // 如果自己的数字更小，发送给对方并将本地数字设为0
+    app.sendNumber(myValue);
+    myNumber = 0;
+    step4.classList.add('hidden');
+    step5.classList.remove('hidden');
+    resultValueElement.textContent = `Your order amount: 0.`;
+  } else if (result === 'larger') {
+    // 如果自己的数字更大，等待接收对方的数字，然后计算差值
+    progressText.innerText = 'Waiting for the other party\'s number...';
+    const otherNumber = await app.receiveNumber();
+    const difference = myValue - otherNumber;
+    step4.classList.add('hidden');
+    step5.classList.remove('hidden');
+    resultValueElement.textContent = `Your order amount: ${difference} `;
+  } else {
+    // 相等的情况
+    step4.classList.add('hidden');
+    step5.classList.remove('hidden');
+    resultValueElement.textContent = `Your order amount: 0.`;
+  }
 }
 
 hostBtn.addEventListener('click', handleHost);

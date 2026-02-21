@@ -7,6 +7,7 @@ export default class App {
   socket?: RtcPairSocket;
   party?: 'alice' | 'bob';
   msgQueue = new AsyncQueue<unknown>();
+  numberQueue = new AsyncQueue<unknown>(); // 用于接收数字消息的队列
 
   generateJoiningCode() {
     // 128 bits of entropy
@@ -23,6 +24,20 @@ export default class App {
     this.socket = socket;
 
     socket.on('message', (msg: unknown) => {
+      // 检查是否是数字传输消息
+      if (msg instanceof Uint8Array) {
+        try {
+          const text = new TextDecoder().decode(msg);
+          const data = JSON.parse(text);
+          if (data.type === 'number') {
+            this.numberQueue.push(data.value);
+            return; // 不推送到 MPC 消息队列
+          }
+        } catch (error) {
+          // 不是 JSON 消息，继续处理
+        }
+      }
+      
       // Using a message queue instead of passing messages directly to the MPC
       // protocol ensures that we don't miss anything sent before we begin.
       this.msgQueue.push(msg);
@@ -37,7 +52,7 @@ export default class App {
   async mpcLargest(
     value: number,
     onProgress?: (progress: number) => void,
-  ): Promise<string> {
+  ): Promise<{ result: 'larger' | 'smaller' | 'equal'; myValue: number }> {
     const { party, socket } = this;
 
     assert(party !== undefined, 'Party must be set');
@@ -96,11 +111,36 @@ export default class App {
       throw new Error('Unexpected output');
     }
 
-    return output.main === 0
-      ? 'equal'
-      : (output.main === 1 && party === 'alice') ||
-          (output.main === 2 && party === 'bob')
-        ? 'larger'
-        : 'smaller';
+    const result =
+      output.main === 0
+        ? 'equal'
+        : (output.main === 1 && party === 'alice') ||
+            (output.main === 2 && party === 'bob')
+          ? 'larger'
+          : 'smaller';
+
+    return { result, myValue: value };
+  }
+
+  /**
+   * 发送数字给对方
+   */
+  sendNumber(value: number): void {
+    const { socket } = this;
+    assert(socket !== undefined, 'Socket must be set');
+    
+    const message = JSON.stringify({ type: 'number', value });
+    socket.send(new TextEncoder().encode(message));
+  }
+
+  /**
+   * 等待接收对方的数字
+   */
+  async receiveNumber(): Promise<number> {
+    const value = await this.numberQueue.shift();
+    if (typeof value !== 'number') {
+      throw new Error('Received invalid number');
+    }
+    return value;
   }
 }
