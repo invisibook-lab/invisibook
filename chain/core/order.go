@@ -40,4 +40,36 @@ const (
 )
 
 type TradePair struct {
+	Token1 TokenID `json:"token1"`
+	Token2 TokenID `json:"token2"`
+}
+
+func (tp TradePair) String() string {
+	return string(tp.Token1) + "/" + string(tp.Token2)
+}
+
+func (t TradeType) String() string {
+	switch t {
+	case Buy:
+		return "BUY"
+	case Sell:
+		return "SELL"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+func (s OrderStat) String() string {
+	switch s {
+	case Pending:
+		return "Pending"
+	case Matched:
+		return "Matched"
+	case Done:
+		return "Done"
+	case Cancelled:
+		return "Cancelled"
+	default:
+		return "Unknown"
+	}
 }
