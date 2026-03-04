@@ -1,18 +1,30 @@
 package core
 
-import "math/big"
+import (
+	"math/big"
+
+	"github.com/go-playground/validator/v10"
+)
+
+// Validator is the shared validator instance for struct tag validation.
+var Validator = validator.New()
 
 type Order struct {
-	ID      OrderID    `json:"id"`
-	Type    TradeType  `json:"type"`
+	ID      OrderID    `json:"id"      validate:"required"`
+	Type    TradeType  `json:"type"    validate:"oneof=0 1"`
 	Subject TradePair  `json:"subject"`
 	Price   *big.Int   `json:"price,omitempty"`
-	Amount  CipherText `json:"amount"`
-	Status  OrderStat  `json:"status"`
+	Amount  CipherText `json:"amount"  validate:"required"`
+	Status  OrderStat  `json:"status"  validate:"oneof=0 1 2 3"`
+}
+
+// Validate checks all struct tag constraints on the Order.
+func (o *Order) Validate() error {
+	return Validator.Struct(o)
 }
 
 func (o *Order) Id() OrderID {
-	return ""
+	return o.ID
 }
 
 func (o *Order) Length() uint64 {
@@ -27,7 +39,7 @@ type (
 )
 
 const (
-	Buy = iota
+	Buy TradeType = iota
 	Sell
 )
 
@@ -39,8 +51,8 @@ const (
 )
 
 type TradePair struct {
-	Token1 TokenID `json:"token1"`
-	Token2 TokenID `json:"token2"`
+	Token1 TokenID `json:"token1" validate:"required"`
+	Token2 TokenID `json:"token2" validate:"required"`
 }
 
 func (tp TradePair) String() string {
