@@ -80,7 +80,6 @@ func sampleOrders() []core.Order {
 			Subject: core.TradePair{Token1: "BTC", Token2: "USDT"},
 			Price:   big.NewInt(64500),
 			Amount:  mockCipherText("1"),
-			Targets: []core.OrderID{"ord-0003"},
 			Status:  core.Matched,
 		},
 		{

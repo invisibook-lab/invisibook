@@ -8,7 +8,6 @@ type Order struct {
 	Subject TradePair  `json:"subject"`
 	Price   *big.Int   `json:"price,omitempty"`
 	Amount  CipherText `json:"amount"`
-	Targets []OrderID  `json:"targets,omitempty"`
 	Status  OrderStat  `json:"status"`
 }
 

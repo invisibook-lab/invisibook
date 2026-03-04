@@ -158,13 +158,5 @@ func (m model) renderDetail(order core.Order) string {
 	}
 	b.WriteString(fmt.Sprintf("Status:      %s", statusStr))
 
-	if len(order.Targets) > 0 {
-		targets := make([]string, len(order.Targets))
-		for i, t := range order.Targets {
-			targets[i] = string(t)
-		}
-		b.WriteString(fmt.Sprintf("\nTargets:     [%s]", strings.Join(targets, ", ")))
-	}
-
 	return detailBorderStyle.Render(b.String())
 }
