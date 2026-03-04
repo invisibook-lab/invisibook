@@ -6,7 +6,7 @@ A privacy-preserving order book where trade amounts are encrypted. Only the orde
 
 ## Prerequisites
 
-- **Go 1.24+** – [install](https://go.dev/dl/)
+- **Rust 1.74+** – [install](https://www.rust-lang.org/tools/install)
 - **Make**
 
 ## Build
