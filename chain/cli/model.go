@@ -105,11 +105,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // contextSuggestions returns position-aware suggestions:
-//   pos 0 (action):  buy / sell
-//   pos 1 (token_1): token names
-//   pos 2 (price):   no suggestions (user types a number)
-//   pos 3 (amount):  no suggestions (user types a number)
-//   pos 4 (token_2): token names
+//
+//	pos 0 (action):  buy / sell
+//	pos 1 (token_1): token names
+//	pos 2 (price):   no suggestions (user types a number)
+//	pos 3 (amount):  no suggestions (user types a number)
+//	pos 4 (token_2): token names
 func contextSuggestions(value string) []string {
 	parts := strings.Split(value, " ")
 	pos := len(parts) - 1 // index of the word being typed
