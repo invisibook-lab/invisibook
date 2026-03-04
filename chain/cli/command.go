@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/invisibook-lab/invisibook/core"
@@ -13,7 +14,7 @@ import (
 func (m model) handleCommand(input string) model {
 	parts := strings.Fields(input)
 	if len(parts) != 5 {
-		m.message = "✗ 格式错误! 用法: buy/sell {token_1} {amount_1} {token_2} {amount_2}"
+		m.message = "✗ Invalid format! Usage: buy/sell {token_1} {amount_1} {token_2} {amount_2}"
 		m.isError = true
 		return m
 	}
@@ -24,6 +25,7 @@ func (m model) handleCommand(input string) model {
 	token2 := core.TokenID(strings.ToUpper(parts[3]))
 	amount2Str := parts[4]
 
+	// validate action
 	var tradeType core.TradeType
 	switch action {
 	case "buy":
@@ -31,14 +33,22 @@ func (m model) handleCommand(input string) model {
 	case "sell":
 		tradeType = core.Sell
 	default:
-		m.message = "✗ 未知操作! 请使用 buy 或 sell"
+		m.message = "✗ Unknown action! Please use buy or sell"
 		m.isError = true
 		return m
 	}
 
+	// validate amount_1 is a number
+	if _, err := strconv.ParseFloat(amount1Str, 64); err != nil {
+		m.message = "✗ amount_1 must be a number!"
+		m.isError = true
+		return m
+	}
+
+	// validate amount_2 (price) is a number
 	price := new(big.Int)
 	if _, ok := price.SetString(amount2Str, 10); !ok {
-		m.message = "✗ token_2 数量格式错误，请输入整数!"
+		m.message = "✗ amount_2 must be a number!"
 		m.isError = true
 		return m
 	}
@@ -56,13 +66,14 @@ func (m model) handleCommand(input string) model {
 	}
 
 	m.orders = append(m.orders, order)
+	m.ownOrderIDs[order.ID] = amount1Str // track own order with plain amount
 	sortOrders(m.orders)
 
-	typeName := "买入"
+	typeName := "BUY"
 	if tradeType == core.Sell {
-		typeName = "卖出"
+		typeName = "SELL"
 	}
-	m.message = fmt.Sprintf("✓ 订单已创建: %s %s/%s 报价 %s", typeName, token1, token2, amount2Str)
+	m.message = fmt.Sprintf("✓ Order created: %s %s/%s price %s", typeName, token1, token2, amount2Str)
 	m.isError = false
 	m.expanded = -1
 	return m

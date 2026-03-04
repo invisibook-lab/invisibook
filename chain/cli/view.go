@@ -14,15 +14,15 @@ func (m model) View() string {
 	var b strings.Builder
 
 	// ── Title ──
-	b.WriteString(titleStyle.Render("  📖  INVISIBOOK 订单薄  "))
+	b.WriteString(titleStyle.Render("  INVISIBOOK Order Book  "))
 	b.WriteString("\n\n")
 
 	if len(m.orders) == 0 {
-		b.WriteString(dimStyle.Render("  (暂无订单)\n"))
+		b.WriteString(dimStyle.Render("  (No orders)\n"))
 	} else {
 		// Header
 		header := fmt.Sprintf("  %-3s  %-6s  %-12s  %-14s  %s",
-			"#", "类型", "交易对", "报价", "数量(密文)")
+			"#", "Type", "Pair", "Price", "Amount")
 		b.WriteString(headerStyle.Render(header))
 		b.WriteString("\n")
 		b.WriteString(dimStyle.Render("  " + strings.Repeat("─", 66)))
@@ -53,11 +53,8 @@ func (m model) View() string {
 				priceStr = order.Price.String()
 			}
 
-			// amount (cipher)
-			amount := string(order.Amount)
-			if len(amount) > 22 {
-				amount = amount[:22] + "…"
-			}
+			// amount: show plain text for own orders, cipher for others
+			amount := m.displayAmount(order)
 
 			line := fmt.Sprintf("%s%-3d  %s  %-12s  %-14s  %s",
 				prefix, i+1, typeStr, pair, priceStr, amount)
@@ -90,14 +87,26 @@ func (m model) View() string {
 
 	// ── Input area ──
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("  ─── 输入命令 " + strings.Repeat("─", 51)))
+	b.WriteString(dimStyle.Render("  ─── Command " + strings.Repeat("─", 52)))
 	b.WriteString("\n  ")
 	b.WriteString(m.input.View())
 	b.WriteString("\n\n")
-	b.WriteString(hintStyle.Render("  ↑↓ 移动光标 │ Enter 展开详情 / 执行命令 │ Esc 退出"))
+	b.WriteString(hintStyle.Render("  Up/Down: navigate | Enter: expand / run command | Esc: quit"))
 	b.WriteString("\n")
 
 	return b.String()
+}
+
+// displayAmount returns the plain amount for own orders and cipher text for others.
+func (m model) displayAmount(order core.Order) string {
+	if plainAmt, ok := m.ownOrderIDs[order.ID]; ok {
+		return plainAmt
+	}
+	amount := string(order.Amount)
+	if len(amount) > 22 {
+		amount = amount[:22] + "..."
+	}
+	return amount
 }
 
 // ────────────────────── Detail Panel ──────────────────────
@@ -105,43 +114,43 @@ func (m model) View() string {
 func (m model) renderDetail(order core.Order) string {
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("订单 ID:     %s\n", order.ID))
+	b.WriteString(fmt.Sprintf("Order ID:    %s\n", order.ID))
 
-	typeStr := buyStyle.Render("买入 (BUY)")
+	typeStr := buyStyle.Render("BUY")
 	if order.Type == core.Sell {
-		typeStr = sellStyle.Render("卖出 (SELL)")
+		typeStr = sellStyle.Render("SELL")
 	}
-	b.WriteString(fmt.Sprintf("类型:        %s\n", typeStr))
-	b.WriteString(fmt.Sprintf("交易对:      %s\n", order.Subject.String()))
+	b.WriteString(fmt.Sprintf("Type:        %s\n", typeStr))
+	b.WriteString(fmt.Sprintf("Pair:        %s\n", order.Subject.String()))
 
 	priceStr := "-"
 	if order.Price != nil {
 		priceStr = order.Price.String()
 	}
-	b.WriteString(fmt.Sprintf("报价:        %s\n", priceStr))
-	b.WriteString(fmt.Sprintf("数量(密文):  %s\n", order.Amount))
+	b.WriteString(fmt.Sprintf("Price:       %s\n", priceStr))
+	b.WriteString(fmt.Sprintf("Amount:      %s\n", m.displayAmount(order)))
 
 	var statusStr string
 	switch order.Status {
 	case core.Pending:
-		statusStr = "⏳ 待处理"
+		statusStr = "Pending"
 	case core.Matched:
-		statusStr = "🔗 已匹配"
+		statusStr = "Matched"
 	case core.Done:
-		statusStr = "✅ 已完成"
+		statusStr = "Done"
 	case core.Cancelled:
-		statusStr = "❌ 已取消"
+		statusStr = "Cancelled"
 	default:
-		statusStr = "未知"
+		statusStr = "Unknown"
 	}
-	b.WriteString(fmt.Sprintf("状态:        %s", statusStr))
+	b.WriteString(fmt.Sprintf("Status:      %s", statusStr))
 
 	if len(order.Targets) > 0 {
 		targets := make([]string, len(order.Targets))
 		for i, t := range order.Targets {
 			targets[i] = string(t)
 		}
-		b.WriteString(fmt.Sprintf("\n匹配目标:    [%s]", strings.Join(targets, ", ")))
+		b.WriteString(fmt.Sprintf("\nTargets:     [%s]", strings.Join(targets, ", ")))
 	}
 
 	return detailBorderStyle.Render(b.String())

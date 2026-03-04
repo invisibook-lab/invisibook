@@ -14,4 +14,4 @@ node_modules/
 .vscode/
 
 # Go build binary
-chain/invisibook
+invisibook

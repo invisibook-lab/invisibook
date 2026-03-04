@@ -10,7 +10,7 @@ import (
 func main() {
 	p := tea.NewProgram(newModel(), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to start: %v\n", err)
 		os.Exit(1)
 	}
 }

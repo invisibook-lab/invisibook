@@ -12,13 +12,20 @@ import (
 // ────────────────────── Model ──────────────────────
 
 type model struct {
-	orders   []core.Order
-	cursor   int
-	expanded int // -1 = nothing expanded
-	input    textinput.Model
-	message  string
-	isError  bool
+	orders      []core.Order
+	ownOrderIDs map[core.OrderID]string // own order ID -> plain amount
+	cursor      int
+	expanded    int // -1 = nothing expanded
+	input       textinput.Model
+	message     string
+	isError     bool
 }
+
+// per-position suggestions for the command input.
+var (
+	actionSuggestions = []string{"buy", "sell"}
+	tokenSuggestions  = []string{"ETH", "BTC", "SOL", "USDT", "USDC", "DAI"}
+)
 
 func newModel() model {
 	ti := textinput.New()
@@ -28,15 +35,18 @@ func newModel() model {
 	ti.Width = 56
 	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7D56F4")).Bold(true)
 	ti.Prompt = "❯ "
+	ti.SetSuggestions(actionSuggestions)
+	ti.ShowSuggestions = true
 
 	orders := sampleOrders()
 	sortOrders(orders)
 
 	return model{
-		orders:   orders,
-		cursor:   0,
-		expanded: -1,
-		input:    ti,
+		orders:      orders,
+		ownOrderIDs: make(map[core.OrderID]string),
+		cursor:      0,
+		expanded:    -1,
+		input:       ti,
 	}
 }
 
@@ -87,5 +97,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// forward everything else to the text input
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+
+	// dynamically update suggestions based on current input context
+	m.input.SetSuggestions(contextSuggestions(m.input.Value()))
+
 	return m, cmd
+}
+
+// contextSuggestions returns position-aware suggestions:
+//   pos 0 (action):  buy / sell
+//   pos 1 (token_1): token names
+//   pos 2 (amount_1): no suggestions (user types a number)
+//   pos 3 (token_2): token names
+//   pos 4+ (amount_2): no suggestions
+func contextSuggestions(value string) []string {
+	parts := strings.Split(value, " ")
+	pos := len(parts) - 1 // index of the word being typed
+	prefix := ""
+	if pos > 0 {
+		prefix = strings.Join(parts[:pos], " ") + " "
+	}
+
+	var pool []string
+	switch pos {
+	case 0:
+		pool = actionSuggestions
+	case 1, 3:
+		pool = tokenSuggestions
+	default:
+		return nil // numbers – no suggestions
+	}
+
+	out := make([]string, 0, len(pool))
+	for _, s := range pool {
+		out = append(out, prefix+s)
+	}
+	return out
 }
