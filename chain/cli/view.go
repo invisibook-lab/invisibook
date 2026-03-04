@@ -21,11 +21,11 @@ func (m model) View() string {
 		b.WriteString(dimStyle.Render("  (No orders)\n"))
 	} else {
 		// Header
-		header := fmt.Sprintf("  %-3s  %-6s  %-12s  %-14s  %s",
-			"#", "Type", "Pair", "Price", "Amount")
+		header := fmt.Sprintf("  %-3s  %-10s  %-6s  %-12s  %-14s  %s",
+			"#", "OrderID", "Type", "Pair", "Price", "Amount")
 		b.WriteString(headerStyle.Render(header))
 		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  " + strings.Repeat("─", 66)))
+		b.WriteString(dimStyle.Render("  " + strings.Repeat("─", 76)))
 		b.WriteString("\n")
 
 		// Rows
@@ -37,6 +37,9 @@ func (m model) View() string {
 			if selected {
 				prefix = cursorStyle.Render(" ▶ ")
 			}
+
+			// order ID
+			orderID := string(order.ID)
 
 			// trade type
 			typeStr := buyStyle.Render("BUY ")
@@ -56,8 +59,8 @@ func (m model) View() string {
 			// amount: show plain text for own orders, cipher for others
 			amount := m.displayAmount(order)
 
-			line := fmt.Sprintf("%s%-3d  %s  %-12s  %-14s  %s",
-				prefix, i+1, typeStr, pair, priceStr, amount)
+			line := fmt.Sprintf("%s%-3d  %-10s  %s  %-12s  %-14s  %s",
+				prefix, i+1, orderID, typeStr, pair, priceStr, amount)
 
 			if selected {
 				b.WriteString(lipgloss.NewStyle().Bold(true).Render(line))
@@ -97,14 +100,14 @@ func (m model) View() string {
 	return b.String()
 }
 
-// displayAmount returns the plain amount for own orders and cipher text for others.
+// displayAmount returns the plain amount for own orders and cipher text (first 7 chars) for others.
 func (m model) displayAmount(order core.Order) string {
 	if plainAmt, ok := m.ownOrderIDs[order.ID]; ok {
 		return plainAmt
 	}
 	amount := string(order.Amount)
-	if len(amount) > 22 {
-		amount = amount[:22] + "..."
+	if len(amount) > 7 {
+		amount = amount[:7]
 	}
 	return amount
 }
