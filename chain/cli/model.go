@@ -29,7 +29,7 @@ var (
 
 func newModel() model {
 	ti := textinput.New()
-	ti.Placeholder = "buy/sell {token_1} {amount_1} {token_2} {amount_2}"
+	ti.Placeholder = "buy/sell {token_1} {price} {amount} {token_2}"
 	ti.Focus()
 	ti.CharLimit = 256
 	ti.Width = 56
@@ -107,9 +107,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // contextSuggestions returns position-aware suggestions:
 //   pos 0 (action):  buy / sell
 //   pos 1 (token_1): token names
-//   pos 2 (amount_1): no suggestions (user types a number)
-//   pos 3 (token_2): token names
-//   pos 4+ (amount_2): no suggestions
+//   pos 2 (price):   no suggestions (user types a number)
+//   pos 3 (amount):  no suggestions (user types a number)
+//   pos 4 (token_2): token names
 func contextSuggestions(value string) []string {
 	parts := strings.Split(value, " ")
 	pos := len(parts) - 1 // index of the word being typed
@@ -122,7 +122,7 @@ func contextSuggestions(value string) []string {
 	switch pos {
 	case 0:
 		pool = actionSuggestions
-	case 1, 3:
+	case 1, 4:
 		pool = tokenSuggestions
 	default:
 		return nil // numbers – no suggestions
