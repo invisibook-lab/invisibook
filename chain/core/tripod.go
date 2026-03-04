@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"math/big"
+	"net/http"
 
 	"gorm.io/gorm"
 
@@ -21,6 +22,7 @@ func NewOrderTri() *OrderTri {
 	tri := tripod.NewTripodWithName("order")
 	ot := &OrderTri{Tripod: tri, db: InitOrderDB("orders.db")}
 	ot.SetWritings(ot.SendOrder, ot.SettleOrder)
+	ot.SetReadings(ot.QueryOrders, ot.AllOrders)
 	return ot
 }
 
@@ -56,8 +58,7 @@ func (ot *OrderTri) SendOrder(ctx *context.WriteContext) error {
 		Status:  Pending,
 	}
 
-	// Insert into SQL
-	if err := ot.db.Create(orderToScheme(order)).Error; err != nil {
+	if err := InsertOrder(ot.db, order); err != nil {
 		return fmt.Errorf("failed to insert order: %w", err)
 	}
 
@@ -97,20 +98,72 @@ func (ot *OrderTri) SettleOrder(ctx *context.WriteContext) error {
 	}
 
 	for _, id := range req.OrderIDs {
-		var row OrderScheme
-		if err := ot.db.First(&row, "id = ?", string(id)).Error; err != nil {
+		order, err := GetOrder(ot.db, id)
+		if err != nil {
 			return fmt.Errorf("order %s not found: %w", id, err)
 		}
-		if OrderStat(row.Status) != Matched {
-			return fmt.Errorf("order %s is not in Matched status, current: %s", id, OrderStat(row.Status).String())
+		if order.Status != Matched {
+			return fmt.Errorf("order %s is not in Matched status, current: %s", id, order.Status.String())
 		}
-		if err := ot.db.Model(&OrderScheme{}).Where("id = ?", string(id)).Update("status", int(Done)).Error; err != nil {
+
+		// TODO: verify zk_proof of order settlement.
+
+		if err := UpdateOrderStatus(ot.db, id, Done); err != nil {
 			return fmt.Errorf("failed to settle order %s: %w", id, err)
 		}
 	}
 
 	ctx.EmitStringEvent("orders settled: %d orders", len(req.OrderIDs))
 	return nil
+}
+
+// ────────────────────── Reading: QueryOrders ──────────────────────
+
+// QueryOrdersRequest defines optional filter criteria for querying orders.
+// All fields are pointers — nil means "don't filter by this field".
+type QueryOrdersRequest struct {
+	ID     *OrderID   `json:"id,omitempty"`
+	Type   *TradeType `json:"type,omitempty"`
+	Token1 *TokenID   `json:"token1,omitempty"`
+	Token2 *TokenID   `json:"token2,omitempty"`
+	Status *OrderStat `json:"status,omitempty"`
+}
+
+// QueryOrders returns orders matching the given filter criteria.
+func (ot *OrderTri) QueryOrders(ctx *context.ReadContext) {
+	req := new(QueryOrdersRequest)
+	if err := ctx.BindJson(req); err != nil {
+		ctx.Json(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	filter := OrderFilter{
+		ID:     req.ID,
+		Type:   req.Type,
+		Token1: req.Token1,
+		Token2: req.Token2,
+		Status: req.Status,
+	}
+
+	orders, err := FindOrdersByFilter(ot.db, filter)
+	if err != nil {
+		ctx.Json(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	ctx.JsonOk(orders)
+}
+
+// ────────────────────── Reading: AllOrders ──────────────────────
+
+// AllOrders returns every order stored in the database.
+func (ot *OrderTri) AllOrders(ctx *context.ReadContext) {
+	orders, err := FindAllOrders(ot.db)
+	if err != nil {
+		ctx.Json(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	ctx.JsonOk(orders)
 }
 
 // ────────────────────── Matching Logic ──────────────────────
@@ -132,20 +185,13 @@ func (ot *OrderTri) matchOrder(order *Order) (*Order, error) {
 		counterType = Buy
 	}
 
-	// Query pending orders of the opposite side on the same pair (with a price)
-	var rows []OrderScheme
-	err := ot.db.Where(
-		"status = ? AND type = ? AND token1 = ? AND token2 = ? AND price != ''",
-		int(Pending), int(counterType),
-		string(order.Subject.Token1), string(order.Subject.Token2),
-	).Find(&rows).Error
+	candidates, err := FindPendingCounterOrders(ot.db, order.Subject, counterType)
 	if err != nil {
 		return nil, err
 	}
 
 	var bestMatch *Order
-	for _, r := range rows {
-		candidate := schemeToOrder(&r)
+	for _, candidate := range candidates {
 		if candidate.Price == nil {
 			continue
 		}
@@ -176,10 +222,10 @@ func (ot *OrderTri) matchOrder(order *Order) (*Order, error) {
 	order.Status = Matched
 	bestMatch.Status = Matched
 
-	if err := ot.db.Model(&OrderScheme{}).Where("id = ?", string(order.ID)).Update("status", int(Matched)).Error; err != nil {
+	if err := UpdateOrderStatus(ot.db, order.ID, Matched); err != nil {
 		return nil, err
 	}
-	if err := ot.db.Model(&OrderScheme{}).Where("id = ?", string(bestMatch.ID)).Update("status", int(Matched)).Error; err != nil {
+	if err := UpdateOrderStatus(ot.db, bestMatch.ID, Matched); err != nil {
 		return nil, err
 	}
 
