@@ -101,6 +101,7 @@ func (m model) View() string {
 }
 
 // displayAmount returns the plain amount for own orders and cipher text (first 7 chars) for others.
+// Used in the order book list view.
 func (m model) displayAmount(order core.Order) string {
 	if plainAmt, ok := m.ownOrderIDs[order.ID]; ok {
 		return plainAmt
@@ -110,6 +111,15 @@ func (m model) displayAmount(order core.Order) string {
 		amount = amount[:7]
 	}
 	return amount
+}
+
+// displayAmountFull returns the plain amount for own orders and full cipher text for others.
+// Used in the expanded detail panel.
+func (m model) displayAmountFull(order core.Order) string {
+	if plainAmt, ok := m.ownOrderIDs[order.ID]; ok {
+		return plainAmt
+	}
+	return string(order.Amount)
 }
 
 // ────────────────────── Detail Panel ──────────────────────
@@ -131,7 +141,7 @@ func (m model) renderDetail(order core.Order) string {
 		priceStr = order.Price.String()
 	}
 	b.WriteString(fmt.Sprintf("Price:       %s\n", priceStr))
-	b.WriteString(fmt.Sprintf("Amount:      %s\n", m.displayAmount(order)))
+	b.WriteString(fmt.Sprintf("Amount:      %s\n", m.displayAmountFull(order)))
 
 	var statusStr string
 	switch order.Status {
