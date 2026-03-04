@@ -42,30 +42,30 @@ func InitOrderDB(dsn string) *gorm.DB {
 // ────────────────────── CRUD Operations ──────────────────────
 
 // InsertOrder inserts a new order into the database.
-func InsertOrder(db *gorm.DB, order *Order) error {
-	return db.Create(orderToScheme(order)).Error
+func (ot *OrderTri) InsertOrder(order *Order) error {
+	return ot.db.Create(orderToScheme(order)).Error
 }
 
 // GetOrder retrieves a single order by ID.
-func GetOrder(db *gorm.DB, id OrderID) (*Order, error) {
+func (ot *OrderTri) GetOrder(id OrderID) (*Order, error) {
 	var row OrderScheme
-	if err := db.First(&row, "id = ?", string(id)).Error; err != nil {
+	if err := ot.db.First(&row, "id = ?", string(id)).Error; err != nil {
 		return nil, err
 	}
 	return schemeToOrder(&row), nil
 }
 
 // UpdateOrderStatus updates the status of an order by ID.
-func UpdateOrderStatus(db *gorm.DB, id OrderID, status OrderStat) error {
-	return db.Model(&OrderScheme{}).Where("id = ?", string(id)).Update("status", int(status)).Error
+func (ot *OrderTri) UpdateOrderStatus(id OrderID, status OrderStat) error {
+	return ot.db.Model(&OrderScheme{}).Where("id = ?", string(id)).Update("status", int(status)).Error
 }
 
 // FindPendingCounterOrders queries pending orders of the given type on the
 // specified pair that have a non-empty price. All parameters are passed via
 // GORM's parameterized placeholders to prevent SQL injection.
-func FindPendingCounterOrders(db *gorm.DB, pair TradePair, counterType TradeType) ([]*Order, error) {
+func (ot *OrderTri) FindPendingCounterOrders(pair TradePair, counterType TradeType) ([]*Order, error) {
 	var rows []OrderScheme
-	err := db.Where(
+	err := ot.db.Where(
 		"status = ? AND type = ? AND token1 = ? AND token2 = ? AND price != ''",
 		int(Pending), int(counterType),
 		string(pair.Token1), string(pair.Token2),
@@ -77,9 +77,9 @@ func FindPendingCounterOrders(db *gorm.DB, pair TradePair, counterType TradeType
 }
 
 // FindAllOrders returns every order in the database.
-func FindAllOrders(db *gorm.DB) ([]*Order, error) {
+func (ot *OrderTri) FindAllOrders() ([]*Order, error) {
 	var rows []OrderScheme
-	if err := db.Find(&rows).Error; err != nil {
+	if err := ot.db.Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return schemesToOrders(rows), nil
@@ -97,8 +97,8 @@ type OrderFilter struct {
 
 // FindOrdersByFilter queries orders matching the given filter criteria.
 // Every condition is applied via parameterized placeholders (防止 SQL 注入).
-func FindOrdersByFilter(db *gorm.DB, f OrderFilter) ([]*Order, error) {
-	query := db.Model(&OrderScheme{})
+func (ot *OrderTri) FindOrdersByFilter(f OrderFilter) ([]*Order, error) {
+	query := ot.db.Model(&OrderScheme{})
 
 	if f.ID != nil {
 		query = query.Where("id = ?", string(*f.ID))

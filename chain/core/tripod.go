@@ -58,7 +58,7 @@ func (ot *OrderTri) SendOrder(ctx *context.WriteContext) error {
 		Status:  Pending,
 	}
 
-	if err := InsertOrder(ot.db, order); err != nil {
+	if err := ot.InsertOrder(order); err != nil {
 		return fmt.Errorf("failed to insert order: %w", err)
 	}
 
@@ -98,7 +98,7 @@ func (ot *OrderTri) SettleOrder(ctx *context.WriteContext) error {
 	}
 
 	for _, id := range req.OrderIDs {
-		order, err := GetOrder(ot.db, id)
+		order, err := ot.GetOrder(id)
 		if err != nil {
 			return fmt.Errorf("order %s not found: %w", id, err)
 		}
@@ -108,7 +108,7 @@ func (ot *OrderTri) SettleOrder(ctx *context.WriteContext) error {
 
 		// TODO: verify zk_proof of order settlement.
 
-		if err := UpdateOrderStatus(ot.db, id, Done); err != nil {
+		if err := ot.UpdateOrderStatus(id, Done); err != nil {
 			return fmt.Errorf("failed to settle order %s: %w", id, err)
 		}
 	}
@@ -145,7 +145,7 @@ func (ot *OrderTri) QueryOrders(ctx *context.ReadContext) {
 		Status: req.Status,
 	}
 
-	orders, err := FindOrdersByFilter(ot.db, filter)
+	orders, err := ot.FindOrdersByFilter(filter)
 	if err != nil {
 		ctx.Json(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -158,7 +158,7 @@ func (ot *OrderTri) QueryOrders(ctx *context.ReadContext) {
 
 // AllOrders returns every order stored in the database.
 func (ot *OrderTri) AllOrders(ctx *context.ReadContext) {
-	orders, err := FindAllOrders(ot.db)
+	orders, err := ot.FindAllOrders()
 	if err != nil {
 		ctx.Json(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -185,7 +185,7 @@ func (ot *OrderTri) matchOrder(order *Order) (*Order, error) {
 		counterType = Buy
 	}
 
-	candidates, err := FindPendingCounterOrders(ot.db, order.Subject, counterType)
+	candidates, err := ot.FindPendingCounterOrders(order.Subject, counterType)
 	if err != nil {
 		return nil, err
 	}
@@ -222,10 +222,10 @@ func (ot *OrderTri) matchOrder(order *Order) (*Order, error) {
 	order.Status = Matched
 	bestMatch.Status = Matched
 
-	if err := UpdateOrderStatus(ot.db, order.ID, Matched); err != nil {
+	if err := ot.UpdateOrderStatus(order.ID, Matched); err != nil {
 		return nil, err
 	}
-	if err := UpdateOrderStatus(ot.db, bestMatch.ID, Matched); err != nil {
+	if err := ot.UpdateOrderStatus(bestMatch.ID, Matched); err != nil {
 		return nil, err
 	}
 
