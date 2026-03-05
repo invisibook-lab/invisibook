@@ -30,8 +30,8 @@ pub fn sort_orders(orders: &mut [Order]) {
     orders.sort_by(|a, b| match (a.price, b.price) {
         (None, None) => Ordering::Equal,
         (None, Some(_)) => Ordering::Greater, // None goes to end
-        (Some(_), None) => Ordering::Less,     // Some comes first
-        (Some(pa), Some(pb)) => pb.cmp(&pa),   // descending by price
+        (Some(_), None) => Ordering::Less,    // Some comes first
+        (Some(pa), Some(pb)) => pb.cmp(&pa),  // descending by price
     });
 }
 

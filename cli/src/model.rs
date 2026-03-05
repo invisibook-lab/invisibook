@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
+use invisibook_lib::orderbook;
+use invisibook_lib::types::*;
+
 use crate::command;
-use crate::orderbook;
-use crate::types::*;
 
 // ────────────────────── Text Input ──────────────────────
 

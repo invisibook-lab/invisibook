@@ -2,8 +2,6 @@
 
 A privacy-preserving order book where trade amounts are encrypted. Only the order creator can see the plain-text amount; everyone else sees the cipher.
 
-![demo](demo.gif)
-
 ## Prerequisites
 
 - **Rust 1.74+** – [install](https://www.rust-lang.org/tools/install)

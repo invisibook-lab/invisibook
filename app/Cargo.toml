@@ -1,9 +1,8 @@
 [package]
-name = "invisibook-cli"
+name = "invisibook-desktop"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ratatui = "0.29"
-crossterm = "0.28"
+dioxus = { version = "0.7", features = ["desktop"] }
 invisibook-lib = { path = "../lib" }

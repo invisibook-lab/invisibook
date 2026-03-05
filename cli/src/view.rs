@@ -3,7 +3,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::command;
 use crate::model::App;
-use crate::types::*;
+use invisibook_lib::types::*;
 
 // ────────────────────── Colors (matching Go lipgloss styles) ──────────────────────
 

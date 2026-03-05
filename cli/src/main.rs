@@ -1,7 +1,5 @@
 mod command;
 mod model;
-mod orderbook;
-mod types;
 mod view;
 
 use std::io;
