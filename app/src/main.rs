@@ -440,7 +440,7 @@ fn main() {
             Config::new()
                 .with_window(
                     WindowBuilder::new()
-                        .with_title("INVISIBOOK Desktop")
+                        .with_title("Invisibook")
                         .with_inner_size(LogicalSize::new(1060.0, 720.0))
                         .with_min_inner_size(LogicalSize::new(860.0, 520.0)),
                 )
