@@ -1,6 +1,6 @@
 # invisibook
 
-A privacy-preserving order book where trade amounts are encrypted. Only the order creator can see the plain-text amount; everyone else sees the cipher.
+A privacy-preserving order book built on pure cryptography — no TEE, no centralized infrastructure. Invisibook tackles the three hard problems of **privacy**, **censorship resistance**, and **price discovery** simultaneously, solving what traditional DEXs, CEXs, and dark pools cannot. Trade amounts are encrypted end-to-end: only the order creator can see the plain-text amount; everyone else sees the cipher.
 
 ## Prerequisites
 
