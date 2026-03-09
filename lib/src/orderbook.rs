@@ -40,13 +40,18 @@ pub fn compute_order_id(
 
 // ────────────────────── Cipher Mock ──────────────────────
 
-/// Simulates FHE encryption – returns a hex digest.
+/// Simulates FHE encryption – hashes the plaintext amount with Poseidon (BN254).
 pub fn mock_cipher_text(plaintext: &str) -> CipherText {
-    let mut hasher = Sha256::new();
-    hasher.update(plaintext.as_bytes());
-    let result = hasher.finalize();
-    let hex_str: String = result[..10].iter().map(|b| format!("{:02x}", b)).collect();
-    format!("0x{}", hex_str)
+    use ark_bn254::Fr;
+    use ark_ff::{BigInteger, PrimeField};
+    use light_poseidon::{Poseidon, PoseidonHasher};
+
+    let amount: u64 = plaintext.parse().unwrap_or(0);
+    let mut hasher = Poseidon::<Fr>::new_circom(1).unwrap();
+    let hash = hasher.hash(&[Fr::from(amount)]).unwrap();
+    let bytes = hash.into_bigint().to_bytes_be();
+    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    format!("0x{}", hex)
 }
 
 // ────────────────────── Order Helpers ──────────────────────

@@ -5,3 +5,6 @@ edition = "2021"
 
 [dependencies]
 sha2 = "0.10"
+light-poseidon = "0.2"
+ark-bn254 = "0.4"
+ark-ff = "0.4"
