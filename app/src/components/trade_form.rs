@@ -65,15 +65,19 @@ pub fn TradeForm(
         let t1 = token1.read().clone();
         let t2 = token2.read().clone();
 
+        let subject = TradePair {
+            token1: t1.clone(),
+            token2: t2.clone(),
+        };
+        let amount = orderbook::mock_cipher_text(&amount_str);
+        let id = orderbook::compute_order_id(trade_type, &subject, Some(price), &amount);
+
         let order = Order {
-            id: orderbook::next_order_id(),
+            id,
             trade_type,
-            subject: TradePair {
-                token1: t1.clone(),
-                token2: t2.clone(),
-            },
+            subject,
             price: Some(price),
-            amount: orderbook::mock_cipher_text(&amount_str),
+            amount,
             status: OrderStatus::Pending,
         };
 

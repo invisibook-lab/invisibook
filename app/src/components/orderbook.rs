@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use dioxus::prelude::*;
 
+use invisibook_lib::orderbook;
 use invisibook_lib::types::*;
 
 /// The left-side order book panel: table header + scrollable order rows.
@@ -83,6 +84,7 @@ fn render_rows(
                 };
 
                 let order_id = order.id.clone();
+                let short_id = orderbook::short_id(&order.id).to_string();
                 let type_str = order.trade_type.to_string();
                 let pair_str = order.subject.to_string();
                 let status_str = order.status.to_string();
@@ -102,7 +104,7 @@ fn render_rows(
                             }
                         },
                         span { "{i + 1}" }
-                        span { "{order_id}" }
+                        span { "{short_id}" }
                         span { class: "{type_class}", "{type_str}" }
                         span { "{pair_str}" }
                         span { "{price_str}" }
@@ -112,7 +114,7 @@ fn render_rows(
                     if is_expanded {
                         div { class: "detail-panel",
                             span { class: "detail-label", "Order ID" }
-                            span { class: "detail-value", "{order_id}" }
+                            span { class: "detail-value", "{short_id}" }
 
                             span { class: "detail-label", "Side" }
                             span { class: "detail-value {type_class}", "{type_str}" }

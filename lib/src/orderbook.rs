@@ -1,16 +1,41 @@
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 
 use crate::types::*;
 
 // ────────────────────── ID Generator ──────────────────────
 
-static ORDER_SEQ: AtomicI64 = AtomicI64::new(100); // sample orders use 0001‑0005
+/// Computes a deterministic order ID by SHA-256-hashing the order's immutable
+/// content fields.  The JSON layout must match the Go side exactly:
+///   {"type":<int>,"token1":"...","token2":"...","price":"...","amount":"..."}
+/// where `type` is 0 for Buy / 1 for Sell, and `price` is an empty string when
+/// no price is given.
+/// Returns the first 7 characters of an order ID for display purposes.
+pub fn short_id(id: &str) -> &str {
+    &id[..id.len().min(7)]
+}
 
-pub fn next_order_id() -> OrderID {
-    let id = ORDER_SEQ.fetch_add(1, AtomicOrdering::SeqCst) + 1;
-    format!("ord-{:04}", id)
+pub fn compute_order_id(
+    trade_type: TradeType,
+    subject: &TradePair,
+    price: Option<i64>,
+    amount: &CipherText,
+) -> OrderID {
+    let type_int = match trade_type {
+        TradeType::Buy => 0,
+        TradeType::Sell => 1,
+    };
+    let price_str = match price {
+        Some(p) => p.to_string(),
+        None => String::new(),
+    };
+    let json = format!(
+        r#"{{"type":{},"token1":"{}","token2":"{}","price":"{}","amount":"{}"}}"#,
+        type_int, subject.token1, subject.token2, price_str, amount
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(json.as_bytes());
+    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 // ────────────────────── Cipher Mock ──────────────────────
@@ -38,61 +63,18 @@ pub fn sort_orders(orders: &mut [Order]) {
 // ────────────────────── Sample Data ──────────────────────
 
 pub fn sample_orders() -> Vec<Order> {
+    let make = |trade_type: TradeType, t1: &str, t2: &str, price: i64, amt: &str, status: OrderStatus| {
+        let subject = TradePair { token1: t1.into(), token2: t2.into() };
+        let amount = mock_cipher_text(amt);
+        let id = compute_order_id(trade_type, &subject, Some(price), &amount);
+        Order { id, trade_type, subject, price: Some(price), amount, status }
+    };
+
     vec![
-        Order {
-            id: "ord-0001".into(),
-            trade_type: TradeType::Buy,
-            subject: TradePair {
-                token1: "ETH".into(),
-                token2: "USDT".into(),
-            },
-            price: Some(3500),
-            amount: mock_cipher_text("10"),
-            status: OrderStatus::Pending,
-        },
-        Order {
-            id: "ord-0002".into(),
-            trade_type: TradeType::Sell,
-            subject: TradePair {
-                token1: "ETH".into(),
-                token2: "USDT".into(),
-            },
-            price: Some(3600),
-            amount: mock_cipher_text("5"),
-            status: OrderStatus::Pending,
-        },
-        Order {
-            id: "ord-0003".into(),
-            trade_type: TradeType::Buy,
-            subject: TradePair {
-                token1: "BTC".into(),
-                token2: "USDT".into(),
-            },
-            price: Some(65000),
-            amount: mock_cipher_text("2"),
-            status: OrderStatus::Pending,
-        },
-        Order {
-            id: "ord-0004".into(),
-            trade_type: TradeType::Sell,
-            subject: TradePair {
-                token1: "BTC".into(),
-                token2: "USDT".into(),
-            },
-            price: Some(64500),
-            amount: mock_cipher_text("1"),
-            status: OrderStatus::Matched,
-        },
-        Order {
-            id: "ord-0005".into(),
-            trade_type: TradeType::Buy,
-            subject: TradePair {
-                token1: "SOL".into(),
-                token2: "USDT".into(),
-            },
-            price: Some(180),
-            amount: mock_cipher_text("50"),
-            status: OrderStatus::Pending,
-        },
+        make(TradeType::Buy,  "ETH", "USDT",  3500,  "10", OrderStatus::Pending),
+        make(TradeType::Sell, "ETH", "USDT",  3600,   "5", OrderStatus::Pending),
+        make(TradeType::Buy,  "BTC", "USDT", 65000,   "2", OrderStatus::Pending),
+        make(TradeType::Sell, "BTC", "USDT", 64500,   "1", OrderStatus::Matched),
+        make(TradeType::Buy,  "SOL", "USDT",   180,  "50", OrderStatus::Pending),
     ]
 }

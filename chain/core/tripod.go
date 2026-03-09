@@ -49,6 +49,11 @@ func (ot *OrderTri) SendOrder(ctx *context.WriteContext) error {
 		return err
 	}
 
+	// Validate that the client-submitted ID is the correct hash of the order content.
+	if expectedID := ComputeOrderID(req.Type, req.Subject, req.Price, req.Amount); req.ID != expectedID {
+		return fmt.Errorf("order ID mismatch: got %s, expected %s", req.ID, expectedID)
+	}
+
 	order := &Order{
 		ID:      req.ID,
 		Type:    req.Type,

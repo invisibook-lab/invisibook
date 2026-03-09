@@ -3,6 +3,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::command;
 use crate::model::App;
+use invisibook_lib::orderbook;
 use invisibook_lib::types::*;
 
 // ────────────────────── Colors (matching Go lipgloss styles) ──────────────────────
@@ -83,7 +84,7 @@ pub fn render_ui(f: &mut Frame, app: &App) {
 
             let line = Line::from(vec![
                 prefix,
-                Span::styled(format!("{:<3}  {:<10}  ", i + 1, order.id), row_style),
+                Span::styled(format!("{:<3}  {:<10}  ", i + 1, orderbook::short_id(&order.id)), row_style),
                 type_span,
                 Span::styled(
                     format!("  {:<12}  {:<14}  {}", order.subject, price_str, amount),
@@ -193,7 +194,7 @@ fn render_detail(app: &App, order: &Order) -> Vec<Line<'static>> {
     };
 
     // Order ID
-    result.push(bordered("Order ID:", order.id.clone()));
+    result.push(bordered("Order ID:", orderbook::short_id(&order.id).to_string()));
 
     // Type (with color)
     let type_label = "Type:       ";
