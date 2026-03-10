@@ -46,10 +46,20 @@ body {
 }
 
 .header-logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     font-size: 14px;
     font-weight: 700;
     letter-spacing: 1.5px;
     color: var(--gold);
+}
+
+.header-logo-img {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    object-fit: cover;
 }
 
 .header-pair {
