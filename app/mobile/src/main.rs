@@ -40,6 +40,10 @@ fn App() -> Element {
     };
 
     rsx! {
+        document::Meta {
+            name: "viewport",
+            content: "width=device-width, initial-scale=1.0, viewport-fit=cover"
+        }
         style { {CSS_MOBILE} }
         div { class: "app",
             Header { token1: t1, token2: t2 }

@@ -39,7 +39,7 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 12px 16px;
+    padding: calc(12px + env(safe-area-inset-top)) 16px 12px;
     background: var(--bg-card);
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
@@ -331,7 +331,8 @@ body {
 /* ── Bottom Tab Bar ── */
 .tab-bar {
     display: flex;
-    height: var(--tab-bar-height);
+    height: calc(var(--tab-bar-height) + env(safe-area-inset-bottom));
+    padding-bottom: env(safe-area-inset-bottom);
     background: var(--bg-card);
     border-top: 1px solid var(--border);
     flex-shrink: 0;
@@ -358,7 +359,7 @@ body {
 /* ── Status Toast (raised above tab bar) ── */
 .toast {
     position: fixed;
-    bottom: calc(var(--tab-bar-height) + 12px);
+    bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + 12px);
     left: 50%;
     transform: translateX(-50%);
     padding: 10px 20px;
