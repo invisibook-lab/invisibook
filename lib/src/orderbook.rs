@@ -40,18 +40,34 @@ pub fn compute_order_id(
 
 // ────────────────────── Cipher Mock ──────────────────────
 
-/// Simulates FHE encryption – hashes the plaintext amount with Poseidon (BN254).
+/// Simulates FHE encryption – hashes the plaintext amount.
+/// Uses Poseidon (BN254) on desktop; falls back to SHA-256 on Android (arm64
+/// ark-ff SIGSEGV workaround).
 pub fn mock_cipher_text(plaintext: &str) -> CipherText {
-    use ark_bn254::Fr;
-    use ark_ff::{BigInteger, PrimeField};
-    use light_poseidon::{Poseidon, PoseidonHasher};
+    #[cfg(not(target_os = "android"))]
+    {
+        use ark_bn254::Fr;
+        use ark_ff::{BigInteger, PrimeField};
+        use light_poseidon::{Poseidon, PoseidonHasher};
 
-    let amount: u64 = plaintext.parse().unwrap_or(0);
-    let mut hasher = Poseidon::<Fr>::new_circom(1).unwrap();
-    let hash = hasher.hash(&[Fr::from(amount)]).unwrap();
-    let bytes = hash.into_bigint().to_bytes_be();
-    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    format!("0x{}", hex)
+        let amount: u64 = plaintext.parse().unwrap_or(0);
+        let result = (|| -> Option<String> {
+            let mut hasher = Poseidon::<Fr>::new_circom(1).ok()?;
+            let hash = hasher.hash(&[Fr::from(amount)]).ok()?;
+            let bytes = hash.into_bigint().to_bytes_be();
+            Some(bytes.iter().map(|b| format!("{:02x}", b)).collect())
+        })();
+
+        if let Some(hex) = result {
+            return format!("0x{}", hex);
+        }
+    }
+
+    // Android (and Poseidon fallback): use SHA-256
+    let mut hasher = Sha256::new();
+    hasher.update(plaintext.as_bytes());
+    let bytes = hasher.finalize();
+    format!("0x{}", bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>())
 }
 
 // ────────────────────── Order Helpers ──────────────────────

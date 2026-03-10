@@ -7,7 +7,7 @@ use invisibook_lib::types::*;
 
 use crate::constants::TOKENS;
 
-/// The right-side trade panel: Buy/Sell tabs, pair selector, price/amount inputs, submit.
+/// The trade panel: Buy/Sell tabs, pair selector, price/amount inputs, submit.
 #[component]
 pub fn TradeForm(
     orders: Signal<Vec<Order>>,
@@ -82,11 +82,14 @@ pub fn TradeForm(
         };
 
         let order_id = order.id.clone();
-        orders.write().push(order);
+        {
+            let mut o = orders.write();
+            o.push(order);
+            orderbook::sort_orders(&mut *o);
+        }
         own_order_ids
             .write()
             .insert(order_id, amount_str.clone());
-        orderbook::sort_orders(&mut orders.write());
         expanded.set(None);
 
         message.set(Some((
@@ -106,12 +109,12 @@ pub fn TradeForm(
 
             // ── Buy / Sell Tabs ──
             div { class: "side-tabs",
-                button {
+                div {
                     class: if current_side == TradeType::Buy { "side-tab buy-active" } else { "side-tab" },
                     onclick: move |_| side.set(TradeType::Buy),
                     "Buy"
                 }
-                button {
+                div {
                     class: if current_side == TradeType::Sell { "side-tab sell-active" } else { "side-tab" },
                     onclick: move |_| side.set(TradeType::Sell),
                     "Sell"
@@ -182,6 +185,7 @@ pub fn TradeForm(
 
                 // Submit
                 button {
+                    r#type: "button",
                     class: if current_side == TradeType::Buy { "submit-btn buy" } else { "submit-btn sell" },
                     disabled: !can_submit,
                     onclick: on_submit,

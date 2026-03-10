@@ -1,7 +1,3 @@
-mod components;
-mod constants;
-mod style;
-
 use std::collections::HashMap;
 
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
@@ -9,11 +5,8 @@ use dioxus::prelude::*;
 
 use invisibook_lib::orderbook;
 use invisibook_lib::types::*;
-
-use components::{Header, OrderBook, Toast, TradeForm};
-use style::CSS;
-
-// ────────────────────── Entry Point ──────────────────────
+use invisibook_ui::components::{Header, OrderBook, Toast, TradeForm};
+use invisibook_ui::style::CSS;
 
 fn main() {
     dioxus::LaunchBuilder::desktop()
@@ -30,11 +23,8 @@ fn main() {
         .launch(App);
 }
 
-// ────────────────────── App Root ──────────────────────
-
 #[component]
 fn App() -> Element {
-    // ── Shared state ──
     let orders = use_signal(|| {
         let mut o = orderbook::sample_orders();
         orderbook::sort_orders(&mut o);
@@ -45,7 +35,6 @@ fn App() -> Element {
     let expanded = use_signal(|| None::<usize>);
     let message = use_signal(|| None::<(String, bool)>);
 
-    // ── Derive display pair from first order or default ──
     let (t1, t2) = {
         let list = orders.read();
         if let Some(first) = list.first() {
@@ -59,22 +48,10 @@ fn App() -> Element {
         style { {CSS} }
         div { class: "app",
             Header { token1: t1, token2: t2 }
-
             div { class: "main",
-                OrderBook {
-                    orders,
-                    own_order_ids,
-                    selected,
-                    expanded,
-                }
-                TradeForm {
-                    orders,
-                    own_order_ids,
-                    expanded,
-                    message,
-                }
+                OrderBook { orders, own_order_ids, selected, expanded }
+                TradeForm { orders, own_order_ids, expanded, message }
             }
-
             Toast { message }
         }
     }

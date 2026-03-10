@@ -1,8 +1,3 @@
-[package]
-name = "invisibook-desktop"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-dioxus = { version = "0.7", features = ["desktop"] }
-invisibook-lib = { path = "../lib" }
+[workspace]
+members = ["ui", "desktop", "mobile"]
+resolver = "2"

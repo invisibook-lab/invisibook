@@ -5,7 +5,7 @@ use dioxus::prelude::*;
 use invisibook_lib::orderbook;
 use invisibook_lib::types::*;
 
-/// The left-side order book panel: table header + scrollable order rows.
+/// The order book panel: table header + scrollable order rows.
 #[component]
 pub fn OrderBook(
     orders: Signal<Vec<Order>>,
@@ -21,13 +21,13 @@ pub fn OrderBook(
                     div { class: "empty-state", "No orders yet" }
                 } else {
                     div { class: "table-header",
-                        span { "#" }
-                        span { "Order ID" }
+                        span { class: "col-index", "#" }
+                        span { class: "col-id", "Order ID" }
                         span { "Side" }
                         span { "Pair" }
                         span { "Price" }
-                        span { "Amount" }
-                        span { "Status" }
+                        span { class: "col-amount", "Amount" }
+                        span { class: "col-status", "Status" }
                     }
                     {render_rows(&orders.read(), &own_order_ids.read(), &selected.read(), &expanded.read(), selected, expanded)}
                 }
@@ -103,13 +103,13 @@ fn render_rows(
                                 exp_signal.set(Some(i));
                             }
                         },
-                        span { "{i + 1}" }
-                        span { "{short_id}" }
+                        span { class: "col-index", "{i + 1}" }
+                        span { class: "col-id", "{short_id}" }
                         span { class: "{type_class}", "{type_str}" }
                         span { "{pair_str}" }
                         span { "{price_str}" }
-                        span { class: "{amt_class}", "{amt_text}" }
-                        span { class: "{status_class}", "{status_str}" }
+                        span { class: "col-amount {amt_class}", "{amt_text}" }
+                        span { class: "col-status {status_class}", "{status_str}" }
                     }
                     if is_expanded {
                         div { class: "detail-panel",

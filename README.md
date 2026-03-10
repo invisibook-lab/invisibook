@@ -10,12 +10,34 @@ A privacy-preserving order book built on pure cryptography — no TEE, no centra
 
 ## Build & Run
 
+### Desktop
+
 ```bash
-cd app
+cd app/desktop
 cargo run --release
 ```
 
-This compiles and launches the desktop app natively.
+### Mobile (iOS / Android)
+
+Mobile builds use [Dioxus CLI](https://dioxuslabs.com/learn/0.6/CLI/installation). Install it first:
+
+```bash
+cargo install dioxus-cli
+```
+
+**iOS** (requires macOS + Xcode):
+
+```bash
+cd app/mobile
+dx serve --platform ios
+```
+
+**Android** (requires Android SDK + NDK):
+
+```bash
+cd app/mobile
+dx serve --platform android
+```
 
 ## Usage
 
