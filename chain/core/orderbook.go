@@ -13,16 +13,16 @@ import (
 
 // ────────────────────── Tripod ──────────────────────
 
-type OrderTri struct {
+type OrderBook struct {
 	*tripod.Tripod
 	db *gorm.DB
 }
 
-func NewOrderTri() *OrderTri {
-	tri := tripod.NewTripodWithName("order")
-	ot := &OrderTri{Tripod: tri, db: InitOrderDB("orders.db")}
+func NewOrderBook() *OrderBook {
+	tri := tripod.NewTripodWithName("orderbook")
+	ot := &OrderBook{Tripod: tri, db: InitOrderDB("orders.db")}
 	ot.SetWritings(ot.SendOrder, ot.SettleOrder)
-	ot.SetReadings(ot.QueryOrders, ot.AllOrders)
+	ot.SetReadings(ot.QueryOrders)
 	return ot
 }
 
@@ -37,7 +37,7 @@ type SendOrderRequest struct {
 }
 
 // SendOrder creates a new order, stores it via SQL, and attempts to match it.
-func (ot *OrderTri) SendOrder(ctx *context.WriteContext) error {
+func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
 
 	req := new(SendOrderRequest)
@@ -90,7 +90,7 @@ type SettleOrderRequest struct {
 }
 
 // SettleOrder transitions matched orders to Done status.
-func (ot *OrderTri) SettleOrder(ctx *context.WriteContext) error {
+func (ot *OrderBook) SettleOrder(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
 
 	req := new(SettleOrderRequest)
@@ -135,7 +135,7 @@ type QueryOrdersRequest struct {
 }
 
 // QueryOrders returns orders matching the given filter criteria.
-func (ot *OrderTri) QueryOrders(ctx *context.ReadContext) {
+func (ot *OrderBook) QueryOrders(ctx *context.ReadContext) {
 	req := new(QueryOrdersRequest)
 	if err := ctx.BindJson(req); err != nil {
 		ctx.Json(http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -159,18 +159,6 @@ func (ot *OrderTri) QueryOrders(ctx *context.ReadContext) {
 	ctx.JsonOk(orders)
 }
 
-// ────────────────────── Reading: AllOrders ──────────────────────
-
-// AllOrders returns every order stored in the database.
-func (ot *OrderTri) AllOrders(ctx *context.ReadContext) {
-	orders, err := ot.FindAllOrders()
-	if err != nil {
-		ctx.Json(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	ctx.JsonOk(orders)
-}
-
 // ────────────────────── Matching Logic ──────────────────────
 
 // matchOrder finds a counterparty for the incoming order.
@@ -179,7 +167,7 @@ func (ot *OrderTri) AllOrders(ctx *context.ReadContext) {
 //	Sell → looks for pending Buy  orders where buy  price ≥ sell price (picks highest buy)
 //
 // If matched, both orders' Status is set to Matched via SQL UPDATE.
-func (ot *OrderTri) matchOrder(order *Order) (*Order, error) {
+func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
 	if order.Price == nil {
 		return nil, nil // cannot match without a price
 	}

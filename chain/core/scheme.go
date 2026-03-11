@@ -12,13 +12,14 @@ import (
 
 // OrderScheme is the flat SQL model for the orders table.
 type OrderScheme struct {
-	ID     string `gorm:"primaryKey;column:id"`
-	Type   int    `gorm:"column:type;index:idx_pair_type"`
-	Token1 string `gorm:"column:token1;index:idx_pair_type"`
-	Token2 string `gorm:"column:token2;index:idx_pair_type"`
-	Price  string `gorm:"column:price"`
-	Amount string `gorm:"column:amount"`
-	Status int    `gorm:"column:status;index"`
+	ID         string `gorm:"primaryKey;column:id"`
+	Type       int    `gorm:"column:type;index:idx_pair_type"`
+	Token1     string `gorm:"column:token1;index:idx_pair_type"`
+	Token2     string `gorm:"column:token2;index:idx_pair_type"`
+	Price      string `gorm:"column:price"`
+	Amount     string `gorm:"column:amount"`
+	Status     int    `gorm:"column:status;index"`
+	MatchOrder string `gorm:"column:match_order"`
 }
 
 func (OrderScheme) TableName() string {
@@ -42,12 +43,12 @@ func InitOrderDB(dsn string) *gorm.DB {
 // ────────────────────── CRUD Operations ──────────────────────
 
 // InsertOrder inserts a new order into the database.
-func (ot *OrderTri) InsertOrder(order *Order) error {
+func (ot *OrderBook) InsertOrder(order *Order) error {
 	return ot.db.Create(orderToScheme(order)).Error
 }
 
 // GetOrder retrieves a single order by ID.
-func (ot *OrderTri) GetOrder(id OrderID) (*Order, error) {
+func (ot *OrderBook) GetOrder(id OrderID) (*Order, error) {
 	var row OrderScheme
 	if err := ot.db.First(&row, "id = ?", string(id)).Error; err != nil {
 		return nil, err
@@ -56,14 +57,14 @@ func (ot *OrderTri) GetOrder(id OrderID) (*Order, error) {
 }
 
 // UpdateOrderStatus updates the status of an order by ID.
-func (ot *OrderTri) UpdateOrderStatus(id OrderID, status OrderStat) error {
+func (ot *OrderBook) UpdateOrderStatus(id OrderID, status OrderStat) error {
 	return ot.db.Model(&OrderScheme{}).Where("id = ?", string(id)).Update("status", int(status)).Error
 }
 
 // FindPendingCounterOrders queries pending orders of the given type on the
 // specified pair that have a non-empty price. All parameters are passed via
 // GORM's parameterized placeholders to prevent SQL injection.
-func (ot *OrderTri) FindPendingCounterOrders(pair TradePair, counterType TradeType) ([]*Order, error) {
+func (ot *OrderBook) FindPendingCounterOrders(pair TradePair, counterType TradeType) ([]*Order, error) {
 	var rows []OrderScheme
 	err := ot.db.Where(
 		"status = ? AND type = ? AND token1 = ? AND token2 = ? AND price != ''",
@@ -77,7 +78,7 @@ func (ot *OrderTri) FindPendingCounterOrders(pair TradePair, counterType TradeTy
 }
 
 // FindAllOrders returns every order in the database.
-func (ot *OrderTri) FindAllOrders() ([]*Order, error) {
+func (ot *OrderBook) FindAllOrders() ([]*Order, error) {
 	var rows []OrderScheme
 	if err := ot.db.Find(&rows).Error; err != nil {
 		return nil, err
@@ -97,7 +98,7 @@ type OrderFilter struct {
 
 // FindOrdersByFilter queries orders matching the given filter criteria.
 // Every condition is applied via parameterized placeholders (防止 SQL 注入).
-func (ot *OrderTri) FindOrdersByFilter(f OrderFilter) ([]*Order, error) {
+func (ot *OrderBook) FindOrdersByFilter(f OrderFilter) ([]*Order, error) {
 	query := ot.db.Model(&OrderScheme{})
 
 	if f.ID != nil {
