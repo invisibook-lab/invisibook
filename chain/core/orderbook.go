@@ -116,6 +116,10 @@ func (ot *OrderBook) SettleOrder(ctx *context.WriteContext) error {
 		if err := ot.UpdateOrderStatus(id, Done); err != nil {
 			return fmt.Errorf("failed to settle order %s: %w", id, err)
 		}
+
+		// TODO: update account balances after settlement.
+		// Requires Order to carry an owner address field so the Account tripod
+		// can credit the buyer with purchased tokens and the seller with payment.
 	}
 
 	ctx.EmitStringEvent("orders settled: %d orders", len(req.OrderIDs))
@@ -126,15 +130,18 @@ func (ot *OrderBook) SettleOrder(ctx *context.WriteContext) error {
 
 // QueryOrdersRequest defines optional filter criteria for querying orders.
 // All fields are pointers — nil means "don't filter by this field".
+// Limit and Offset provide pagination; Limit=0 means no limit.
 type QueryOrdersRequest struct {
 	ID     *OrderID   `json:"id,omitempty"`
 	Type   *TradeType `json:"type,omitempty"`
 	Token1 *TokenID   `json:"token1,omitempty"`
 	Token2 *TokenID   `json:"token2,omitempty"`
 	Status *OrderStat `json:"status,omitempty"`
+	Limit  int        `json:"limit,omitempty"`
+	Offset int        `json:"offset,omitempty"`
 }
 
-// QueryOrders returns orders matching the given filter criteria.
+// QueryOrders returns orders matching the given filter criteria with pagination.
 func (ot *OrderBook) QueryOrders(ctx *context.ReadContext) {
 	req := new(QueryOrdersRequest)
 	if err := ctx.BindJson(req); err != nil {
@@ -148,6 +155,8 @@ func (ot *OrderBook) QueryOrders(ctx *context.ReadContext) {
 		Token1: req.Token1,
 		Token2: req.Token2,
 		Status: req.Status,
+		Limit:  req.Limit,
+		Offset: req.Offset,
 	}
 
 	orders, err := ot.FindOrdersByFilter(filter)

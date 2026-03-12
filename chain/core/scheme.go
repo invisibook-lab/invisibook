@@ -88,15 +88,18 @@ func (ot *OrderBook) FindAllOrders() ([]*Order, error) {
 
 // OrderFilter holds optional filter criteria for querying orders.
 // All fields are pointers so that nil means "don't filter by this field".
+// Limit=0 means no limit; Offset=0 means start from beginning.
 type OrderFilter struct {
 	ID     *OrderID
 	Type   *TradeType
 	Token1 *TokenID
 	Token2 *TokenID
 	Status *OrderStat
+	Limit  int
+	Offset int
 }
 
-// FindOrdersByFilter queries orders matching the given filter criteria.
+// FindOrdersByFilter queries orders matching the given filter criteria with pagination.
 // Every condition is applied via parameterized placeholders (防止 SQL 注入).
 func (ot *OrderBook) FindOrdersByFilter(f OrderFilter) ([]*Order, error) {
 	query := ot.db.Model(&OrderScheme{})
@@ -116,12 +119,94 @@ func (ot *OrderBook) FindOrdersByFilter(f OrderFilter) ([]*Order, error) {
 	if f.Status != nil {
 		query = query.Where("status = ?", int(*f.Status))
 	}
+	if f.Offset > 0 {
+		query = query.Offset(f.Offset)
+	}
+	if f.Limit > 0 {
+		query = query.Limit(f.Limit)
+	}
 
 	var rows []OrderScheme
 	if err := query.Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return schemesToOrders(rows), nil
+}
+
+// ────────────────────── Account DB ──────────────────────
+
+// AccountScheme is the flat SQL model for the accounts table.
+// Primary key is (address, token) so each address can hold multiple tokens.
+type AccountScheme struct {
+	Address string `gorm:"primaryKey;column:address"`
+	Token   string `gorm:"primaryKey;column:token"`
+	Balance string `gorm:"column:balance;not null;default:'0'"`
+}
+
+func (AccountScheme) TableName() string { return "accounts" }
+
+// InitAccountDB opens a SQLite database and auto-migrates the accounts table.
+func InitAccountDB(dsn string) *gorm.DB {
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		panic(fmt.Sprintf("failed to open accounts database: %v", err))
+	}
+	if err := db.AutoMigrate(&AccountScheme{}); err != nil {
+		panic(fmt.Sprintf("failed to migrate accounts table: %v", err))
+	}
+	return db
+}
+
+// AccountRecord is the domain model returned to callers.
+type AccountRecord struct {
+	Address string   `json:"address"`
+	Token   TokenID  `json:"token"`
+	Balance *big.Int `json:"balance"`
+}
+
+// FindAccount retrieves an account by address + token, or returns an error if not found.
+func (a *Account) FindAccount(address string, token TokenID) (*AccountRecord, error) {
+	var row AccountScheme
+	if err := a.db.First(&row, "address = ? AND token = ?", address, string(token)).Error; err != nil {
+		return nil, err
+	}
+	return schemeToAccount(&row), nil
+}
+
+// UpsertBalance adds amount to the existing balance (creates the row if absent).
+func (a *Account) UpsertBalance(address string, token TokenID, amount *big.Int) error {
+	var row AccountScheme
+	err := a.db.First(&row, "address = ? AND token = ?", address, string(token)).Error
+	if err != nil {
+		// Row not found — create with the deposited amount.
+		row = AccountScheme{
+			Address: address,
+			Token:   string(token),
+			Balance: amount.String(),
+		}
+		return a.db.Create(&row).Error
+	}
+	existing := new(big.Int)
+	existing.SetString(row.Balance, 10)
+	newBal := new(big.Int).Add(existing, amount)
+	return a.db.Model(&row).Update("balance", newBal.String()).Error
+}
+
+// SetBalance overwrites the balance for address+token.
+func (a *Account) SetBalance(address string, token TokenID, balance *big.Int) error {
+	return a.db.Model(&AccountScheme{}).
+		Where("address = ? AND token = ?", address, string(token)).
+		Update("balance", balance.String()).Error
+}
+
+func schemeToAccount(s *AccountScheme) *AccountRecord {
+	bal := new(big.Int)
+	bal.SetString(s.Balance, 10)
+	return &AccountRecord{
+		Address: s.Address,
+		Token:   TokenID(s.Token),
+		Balance: bal,
+	}
 }
 
 // ────────────────────── Order ↔ Scheme Conversion ──────────────────────
