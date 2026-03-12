@@ -20,5 +20,5 @@ func main() {
 	orderBookTri := core.NewOrderBook()
 	accountTri := core.NewAccount()
 
-	startup.InitDefaultKernel(yuCfg).WithTripods(poaTri, orderBookTri, accountTri).Startup()
+	startup.InitDefaultKernel(yuCfg).WithTripods(poaTri, accountTri, orderBookTri).Startup()
 }

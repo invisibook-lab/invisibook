@@ -15,7 +15,8 @@ import (
 
 type OrderBook struct {
 	*tripod.Tripod
-	db *gorm.DB
+	Account *Account `tripod:"account"`
+	db      *gorm.DB
 }
 
 func NewOrderBook() *OrderBook {
