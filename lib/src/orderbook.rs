@@ -5,30 +5,64 @@ use crate::types::*;
 
 // ────────────────────── ID Generator ──────────────────────
 
-/// Computes a deterministic order ID by SHA-256-hashing the order's immutable
-/// content fields.  The JSON layout must match the Go side exactly:
-///   {"type":<int>,"token1":"...","token2":"...","price":"...","amount":"..."}
-/// where `type` is 0 for Buy / 1 for Sell, and `price` is an empty string when
-/// no price is given.
 /// Returns the first 7 characters of an order ID for display purposes.
 pub fn short_id(id: &str) -> &str {
     &id[..id.len().min(7)]
 }
 
+/// Computes a deterministic order ID using Poseidon(BN254) over five field elements:
+///   [type, price, token1, token2, amount]
+/// where string fields are reduced via SHA-256 mod BN254r (Fr::from_be_bytes_mod_order).
+/// Must match the Go side ComputeOrderID in chain/core/order.go.
+///
+/// Android fallback: SHA-256 over a fixed JSON string (ark-ff SIGSEGV workaround).
 pub fn compute_order_id(
     trade_type: TradeType,
     subject: &TradePair,
     price: Option<i64>,
     amount: &CipherText,
 ) -> OrderID {
+    #[cfg(not(target_os = "android"))]
+    {
+        use ark_bn254::Fr;
+        use ark_ff::{BigInteger, PrimeField};
+        use light_poseidon::{Poseidon, PoseidonHasher};
+
+        fn str_to_fr(s: &str) -> Fr {
+            let mut h = Sha256::new();
+            h.update(s.as_bytes());
+            Fr::from_be_bytes_mod_order(&h.finalize())
+        }
+
+        let result = (|| -> Option<String> {
+            let type_fr = Fr::from(match trade_type {
+                TradeType::Buy => 0u64,
+                TradeType::Sell => 1u64,
+            });
+            let price_fr = Fr::from(price.unwrap_or(0) as u64);
+            let token1_fr = str_to_fr(&subject.token1);
+            let token2_fr = str_to_fr(&subject.token2);
+            let amount_fr = str_to_fr(amount);
+
+            let mut hasher = Poseidon::<Fr>::new_circom(5).ok()?;
+            let hash = hasher
+                .hash(&[type_fr, price_fr, token1_fr, token2_fr, amount_fr])
+                .ok()?;
+            let bytes = hash.into_bigint().to_bytes_be();
+            Some(bytes.iter().map(|b| format!("{:02x}", b)).collect())
+        })();
+
+        if let Some(id) = result {
+            return id;
+        }
+    }
+
+    // Android fallback: SHA-256 over JSON (ark-ff SIGSEGV workaround).
     let type_int = match trade_type {
         TradeType::Buy => 0,
         TradeType::Sell => 1,
     };
-    let price_str = match price {
-        Some(p) => p.to_string(),
-        None => String::new(),
-    };
+    let price_str = price.map(|p| p.to_string()).unwrap_or_default();
     let json = format!(
         r#"{{"type":{},"token1":"{}","token2":"{}","price":"{}","amount":"{}"}}"#,
         type_int, subject.token1, subject.token2, price_str, amount
