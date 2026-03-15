@@ -1,7 +1,10 @@
-.PHONY: build-cli clean
+.PHONY: build run clean
 
-build-cli:
-	go build -o invisibook ./cli/
+build:
+	go build -o invisibook .
+
+run:
+	go run .
 
 clean:
 	rm -f invisibook
