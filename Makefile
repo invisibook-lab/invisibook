@@ -1,6 +1,6 @@
 .PHONY: build-desktop build-cli build-chain run-chain clean
 
-build: build-desktop build-cli
+build: build-desktop build-cli build-chain
 
 build-desktop:
 	cd app/desktop && cargo build --release
