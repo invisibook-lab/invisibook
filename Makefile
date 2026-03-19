@@ -12,6 +12,9 @@ build-cli:
 build-chain:
 	cd chain && go build -o invisibook .
 
+run-desktop:
+	cd app/desktop && cargo run --release
+
 run-chain:
 	cd chain && go run .
 
