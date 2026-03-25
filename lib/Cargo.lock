@@ -272,6 +272,7 @@ dependencies = [
  "curve25519-dalek-derive",
  "digest",
  "fiat-crypto",
+ "rand_core",
  "rustc_version",
  "subtle",
  "zeroize",
@@ -961,6 +962,16 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mpc"
+version = "0.1.0"
+dependencies = [
+ "curve25519-dalek",
+ "rand",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]
