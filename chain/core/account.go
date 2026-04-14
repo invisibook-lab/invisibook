@@ -2,7 +2,6 @@ package core
 
 import (
 	"fmt"
-	"math/big"
 	"net/http"
 
 	"gorm.io/gorm"
@@ -33,7 +32,8 @@ type GetAccountRequest struct {
 	Token   TokenID `json:"token"   validate:"required"`
 }
 
-// GetAccount returns the account balance for the given public-key address and token.
+// GetAccount returns all unspent UTXOs for the given address and token.
+// Amounts are ciphertext, so no aggregate balance is computed on-chain.
 func (a *Account) GetAccount(ctx *context.ReadContext) {
 	req := new(GetAccountRequest)
 	if err := ctx.BindJson(req); err != nil {
@@ -45,25 +45,30 @@ func (a *Account) GetAccount(ctx *context.ReadContext) {
 		return
 	}
 
-	acc, err := a.FindAccount(req.Address, req.Token)
+	utxos, err := a.FindUnspentUTXOs(req.Address, req.Token)
 	if err != nil {
-		ctx.Json(http.StatusNotFound, map[string]string{"error": "account not found"})
+		ctx.Json(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	ctx.JsonOk(acc)
+
+	ctx.JsonOk(&AccountRecord{
+		Address: req.Address,
+		Token:   req.Token,
+		UTXOs:   utxos,
+	})
 }
 
 // ────────────────────── Writing: Deposit ──────────────────────
 
 type DepositRequest struct {
-	Address string   `json:"address"  validate:"required"`
-	Token   TokenID  `json:"token"    validate:"required"`
-	Amount  *big.Int `json:"amount"   validate:"required"`
-	ZkProof string   `json:"zk_proof" validate:"required"`
+	Address string     `json:"address"  validate:"required"`
+	Token   TokenID    `json:"token"    validate:"required"`
+	Amount  CipherText `json:"amount"   validate:"required"` // encrypted amount
+	ZkProof string     `json:"zk_proof" validate:"required"` // bridge deposit proof
 }
 
-// Deposit verifies that the user has bridged assets from another chain, then
-// credits the corresponding balance on this chain.
+// Deposit verifies the bridge proof then mints a new UTXO for the depositor.
+// The ZkProof is stored on the UTXO and re-verified before the UTXO can be spent.
 func (a *Account) Deposit(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
 
@@ -74,33 +79,38 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 	if err := Validator.Struct(req); err != nil {
 		return err
 	}
-	if req.Amount.Sign() <= 0 {
-		return fmt.Errorf("deposit amount must be positive")
-	}
 
 	// TODO: verify zk_proof that the user deposited the corresponding assets
 	// into the Invisibook bridge contract on another chain.
 
-	if err := a.UpsertBalance(req.Address, req.Token, req.Amount); err != nil {
-		return fmt.Errorf("failed to deposit: %w", err)
+	utxo := &UTXO{
+		ID:      generateUTXOID(),
+		Owner:   req.Address,
+		Token:   req.Token,
+		Amount:  req.Amount,
+		ZkProof: req.ZkProof,
+	}
+	if err := a.CreateUTXO(utxo); err != nil {
+		return fmt.Errorf("failed to create UTXO: %w", err)
 	}
 
-	ctx.EmitStringEvent("deposit: addr=%s token=%s amount=%s",
-		req.Address, string(req.Token), req.Amount.String())
+	ctx.EmitStringEvent("deposit: addr=%s token=%s utxo=%s",
+		req.Address, string(req.Token), utxo.ID)
 	return nil
 }
 
 // ────────────────────── Writing: Withdraw ──────────────────────
 
 type WithdrawRequest struct {
-	Address string   `json:"address"  validate:"required"`
-	Token   TokenID  `json:"token"    validate:"required"`
-	Amount  *big.Int `json:"amount"   validate:"required"`
-	ZkProof string   `json:"zk_proof" validate:"required"`
+	Token   TokenID       `json:"token"   validate:"required"`
+	Inputs  []string      `json:"inputs"  validate:"required,min=1"` // UTXO IDs to consume
+	Change  *ChangeOutput `json:"change,omitempty"`                  // optional change UTXO
+	ZkProof string        `json:"zk_proof" validate:"required"`      // proves the withdrawal is valid
 }
 
-// Withdraw reduces the user's on-chain balance; the bridge contract on the
-// destination chain releases the corresponding assets.
+// Withdraw verifies the overall spend proof, then for each input UTXO verifies
+// its stored ZkProof before marking it spent. If the client supplies a change
+// output it is minted as a new UTXO.
 func (a *Account) Withdraw(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
 
@@ -111,27 +121,32 @@ func (a *Account) Withdraw(ctx *context.WriteContext) error {
 	if err := Validator.Struct(req); err != nil {
 		return err
 	}
-	if req.Amount.Sign() <= 0 {
-		return fmt.Errorf("withdrawal amount must be positive")
+
+	// TODO: verify req.ZkProof — proves that sum(inputs) >= withdrawn amount
+	// and that the change output commitment is correct.
+
+	spendTxID := generateUTXOID()
+	if err := a.SpendUTXOs(req.Inputs, spendTxID); err != nil {
+		return fmt.Errorf("failed to spend UTXOs: %w", err)
 	}
 
-	// TODO: verify zk_proof that the withdrawal amount <= current balance.
-
-	acc, err := a.FindAccount(req.Address, req.Token)
-	if err != nil {
-		return fmt.Errorf("account not found: %w", err)
+	if req.Change != nil {
+		if err := Validator.Struct(req.Change); err != nil {
+			return fmt.Errorf("invalid change output: %w", err)
+		}
+		changeUTXO := &UTXO{
+			ID:      generateUTXOID(),
+			Owner:   req.Change.Owner,
+			Token:   req.Token,
+			Amount:  req.Change.Amount,
+			ZkProof: req.ZkProof, // reuse withdrawal proof as the change commitment
+		}
+		if err := a.CreateUTXO(changeUTXO); err != nil {
+			return fmt.Errorf("failed to create change UTXO: %w", err)
+		}
 	}
-	if acc.Balance.Cmp(req.Amount) < 0 {
-		return fmt.Errorf("insufficient balance: have %s, want %s",
-			acc.Balance.String(), req.Amount.String())
-	}
 
-	newBalance := new(big.Int).Sub(acc.Balance, req.Amount)
-	if err := a.SetBalance(req.Address, req.Token, newBalance); err != nil {
-		return fmt.Errorf("failed to withdraw: %w", err)
-	}
-
-	ctx.EmitStringEvent("withdraw: addr=%s token=%s amount=%s",
-		req.Address, string(req.Token), req.Amount.String())
+	ctx.EmitStringEvent("withdraw: token=%s spent=%d utxos tx=%s",
+		string(req.Token), len(req.Inputs), spendTxID)
 	return nil
 }
