@@ -272,7 +272,6 @@ dependencies = [
  "curve25519-dalek-derive",
  "digest",
  "fiat-crypto",
- "rand_core",
  "rustc_version",
  "subtle",
  "zeroize",
@@ -968,9 +967,6 @@ dependencies = [
 name = "mpc"
 version = "0.1.0"
 dependencies = [
- "curve25519-dalek",
- "rand",
- "sha2",
  "thiserror",
 ]
 
