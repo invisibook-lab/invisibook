@@ -27,14 +27,6 @@ func (o *Order) Validate() error {
 	return Validator.Struct(o)
 }
 
-func (o *Order) Id() OrderID {
-	return o.ID
-}
-
-func (o *Order) Length() uint64 {
-	return 0
-}
-
 // bn254r is the BN254 scalar field prime, matching the Rust ark-bn254 Fr modulus.
 var bn254r, _ = new(big.Int).SetString(
 	"21888242871839275222246405745257275088548364400416034343698204186575808495617", 10)
