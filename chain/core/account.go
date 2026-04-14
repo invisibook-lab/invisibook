@@ -32,7 +32,7 @@ type GetAccountRequest struct {
 	Token   TokenID `json:"token"   validate:"required"`
 }
 
-// GetAccount returns all unspent UTXOs for the given address and token.
+// GetAccount returns all Active Cash for the given address and token.
 // Amounts are ciphertext, so no aggregate balance is computed on-chain.
 func (a *Account) GetAccount(ctx *context.ReadContext) {
 	req := new(GetAccountRequest)
@@ -45,7 +45,7 @@ func (a *Account) GetAccount(ctx *context.ReadContext) {
 		return
 	}
 
-	utxos, err := a.FindUnspentUTXOs(req.Address, req.Token)
+	cash, err := a.FindActiveCash(req.Address, req.Token)
 	if err != nil {
 		ctx.Json(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -54,7 +54,7 @@ func (a *Account) GetAccount(ctx *context.ReadContext) {
 	ctx.JsonOk(&AccountRecord{
 		Address: req.Address,
 		Token:   req.Token,
-		UTXOs:   utxos,
+		Cash:    cash,
 	})
 }
 
@@ -67,8 +67,7 @@ type DepositRequest struct {
 	ZkProof string     `json:"zk_proof" validate:"required"` // bridge deposit proof
 }
 
-// Deposit verifies the bridge proof then mints a new UTXO for the depositor.
-// The ZkProof is stored on the UTXO and re-verified before the UTXO can be spent.
+// Deposit verifies the bridge proof then mints a new Active Cash for the depositor.
 func (a *Account) Deposit(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
 
@@ -83,19 +82,20 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 	// TODO: verify zk_proof that the user deposited the corresponding assets
 	// into the Invisibook bridge contract on another chain.
 
-	utxo := &UTXO{
-		ID:      generateUTXOID(),
+	cash := &Cash{
+		ID:      generateCashID(),
 		Owner:   req.Address,
 		Token:   req.Token,
 		Amount:  req.Amount,
 		ZkProof: req.ZkProof,
+		Status:  Active,
 	}
-	if err := a.CreateUTXO(utxo); err != nil {
-		return fmt.Errorf("failed to create UTXO: %w", err)
+	if err := a.CreateCash(cash); err != nil {
+		return fmt.Errorf("failed to create cash: %w", err)
 	}
 
-	ctx.EmitStringEvent("deposit: addr=%s token=%s utxo=%s",
-		req.Address, string(req.Token), utxo.ID)
+	ctx.EmitStringEvent("deposit: addr=%s token=%s cash=%s",
+		req.Address, string(req.Token), cash.ID)
 	return nil
 }
 
@@ -103,14 +103,14 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 
 type WithdrawRequest struct {
 	Token   TokenID       `json:"token"   validate:"required"`
-	Inputs  []string      `json:"inputs"  validate:"required,min=1"` // UTXO IDs to consume
-	Change  *ChangeOutput `json:"change,omitempty"`                  // optional change UTXO
+	Inputs  []string      `json:"inputs"  validate:"required,min=1"` // Cash IDs to consume
+	Change  *ChangeOutput `json:"change,omitempty"`                  // optional change Cash
 	ZkProof string        `json:"zk_proof" validate:"required"`      // proves the withdrawal is valid
 }
 
-// Withdraw verifies the overall spend proof, then for each input UTXO verifies
-// its stored ZkProof before marking it spent. If the client supplies a change
-// output it is minted as a new UTXO.
+// Withdraw verifies the overall spend proof, then marks each input Cash as Spent.
+// If the client supplies a change output it is minted as a new Active Cash.
+// Withdraw consumes Active Cash directly (Active → Spent), skipping the Locked state.
 func (a *Account) Withdraw(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
 
@@ -125,28 +125,29 @@ func (a *Account) Withdraw(ctx *context.WriteContext) error {
 	// TODO: verify req.ZkProof — proves that sum(inputs) >= withdrawn amount
 	// and that the change output commitment is correct.
 
-	spendTxID := generateUTXOID()
-	if err := a.SpendUTXOs(req.Inputs, spendTxID); err != nil {
-		return fmt.Errorf("failed to spend UTXOs: %w", err)
+	spendTxID := generateCashID()
+	if err := a.SpendCash(req.Inputs, spendTxID); err != nil {
+		return fmt.Errorf("failed to spend cash: %w", err)
 	}
 
 	if req.Change != nil {
 		if err := Validator.Struct(req.Change); err != nil {
 			return fmt.Errorf("invalid change output: %w", err)
 		}
-		changeUTXO := &UTXO{
-			ID:      generateUTXOID(),
+		changeCash := &Cash{
+			ID:      generateCashID(),
 			Owner:   req.Change.Owner,
 			Token:   req.Token,
 			Amount:  req.Change.Amount,
 			ZkProof: req.ZkProof, // reuse withdrawal proof as the change commitment
+			Status:  Active,
 		}
-		if err := a.CreateUTXO(changeUTXO); err != nil {
-			return fmt.Errorf("failed to create change UTXO: %w", err)
+		if err := a.CreateCash(changeCash); err != nil {
+			return fmt.Errorf("failed to create change cash: %w", err)
 		}
 	}
 
-	ctx.EmitStringEvent("withdraw: token=%s spent=%d utxos tx=%s",
+	ctx.EmitStringEvent("withdraw: token=%s spent=%d cash tx=%s",
 		string(req.Token), len(req.Inputs), spendTxID)
 	return nil
 }

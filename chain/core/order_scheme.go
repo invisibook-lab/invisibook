@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
 
@@ -12,14 +13,16 @@ import (
 
 // OrderScheme is the flat SQL model for the orders table.
 type OrderScheme struct {
-	ID         string `gorm:"primaryKey;column:id"`
-	Type       int    `gorm:"column:type;index:idx_pair_type"`
-	Token1     string `gorm:"column:token1;index:idx_pair_type"`
-	Token2     string `gorm:"column:token2;index:idx_pair_type"`
-	Price      string `gorm:"column:price"`
-	Amount     string `gorm:"column:amount"`
-	Status     int    `gorm:"column:status;index"`
-	MatchOrder string `gorm:"column:match_order"`
+	ID           string `gorm:"primaryKey;column:id"`
+	Type         int    `gorm:"column:type;index:idx_pair_type"`
+	Token1       string `gorm:"column:token1;index:idx_pair_type"`
+	Token2       string `gorm:"column:token2;index:idx_pair_type"`
+	Price        string `gorm:"column:price"`
+	Amount       string `gorm:"column:amount"`
+	Owner        string `gorm:"column:owner;index"`
+	InputCashIDs string `gorm:"column:input_cash_ids"` // JSON array of cash IDs
+	Status       int    `gorm:"column:status;index"`
+	MatchOrder   string `gorm:"column:match_order"`
 }
 
 func (OrderScheme) TableName() string {
@@ -59,6 +62,11 @@ func (ot *OrderBook) GetOrder(id OrderID) (*Order, error) {
 // UpdateOrderStatus updates the status of an order by ID.
 func (ot *OrderBook) UpdateOrderStatus(id OrderID, status OrderStat) error {
 	return ot.db.Model(&OrderScheme{}).Where("id = ?", string(id)).Update("status", int(status)).Error
+}
+
+// UpdateOrderMatchOrder sets the match_order field of an order.
+func (ot *OrderBook) UpdateOrderMatchOrder(id OrderID, matchID OrderID) error {
+	return ot.db.Model(&OrderScheme{}).Where("id = ?", string(id)).Update("match_order", string(matchID)).Error
 }
 
 // FindPendingCounterOrders queries pending orders of the given type on the
@@ -140,14 +148,23 @@ func orderToScheme(o *Order) *OrderScheme {
 	if o.Price != nil {
 		priceStr = o.Price.String()
 	}
+	cashIDsJSON := "[]"
+	if len(o.InputCashIDs) > 0 {
+		if b, err := json.Marshal(o.InputCashIDs); err == nil {
+			cashIDsJSON = string(b)
+		}
+	}
 	return &OrderScheme{
-		ID:     string(o.ID),
-		Type:   int(o.Type),
-		Token1: string(o.Subject.Token1),
-		Token2: string(o.Subject.Token2),
-		Price:  priceStr,
-		Amount: string(o.Amount),
-		Status: int(o.Status),
+		ID:           string(o.ID),
+		Type:         int(o.Type),
+		Token1:       string(o.Subject.Token1),
+		Token2:       string(o.Subject.Token2),
+		Price:        priceStr,
+		Amount:       string(o.Amount),
+		Owner:        o.Owner,
+		InputCashIDs: cashIDsJSON,
+		Status:       int(o.Status),
+		MatchOrder:   string(o.MatchOrder),
 	}
 }
 
@@ -157,6 +174,10 @@ func schemeToOrder(s *OrderScheme) *Order {
 		price = new(big.Int)
 		price.SetString(s.Price, 10)
 	}
+	var cashIDs []string
+	if s.InputCashIDs != "" {
+		_ = json.Unmarshal([]byte(s.InputCashIDs), &cashIDs)
+	}
 	return &Order{
 		ID:   OrderID(s.ID),
 		Type: TradeType(s.Type),
@@ -164,9 +185,12 @@ func schemeToOrder(s *OrderScheme) *Order {
 			Token1: TokenID(s.Token1),
 			Token2: TokenID(s.Token2),
 		},
-		Price:  price,
-		Amount: CipherText(s.Amount),
-		Status: OrderStat(s.Status),
+		Price:        price,
+		Amount:       CipherText(s.Amount),
+		Owner:        s.Owner,
+		InputCashIDs: cashIDs,
+		MatchOrder:   OrderID(s.MatchOrder),
+		Status:       OrderStat(s.Status),
 	}
 }
 

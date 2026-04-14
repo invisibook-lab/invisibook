@@ -13,13 +13,15 @@ import (
 var Validator = validator.New()
 
 type Order struct {
-	ID         OrderID    `json:"id"      validate:"required"`
-	Type       TradeType  `json:"type"    validate:"oneof=0 1"`
-	Subject    TradePair  `json:"subject"`
-	Price      *big.Int   `json:"price,omitempty"`
-	Amount     CipherText `json:"amount"  validate:"required"`
-	MatchOrder OrderID    `json:"match_order,omitempty"`
-	Status     OrderStat  `json:"status"  validate:"oneof=0 1 2 3"`
+	ID           OrderID    `json:"id"      validate:"required"`
+	Type         TradeType  `json:"type"    validate:"oneof=0 1"`
+	Subject      TradePair  `json:"subject"`
+	Price        *big.Int   `json:"price,omitempty"`
+	Amount       CipherText `json:"amount"  validate:"required"`
+	Owner        string     `json:"owner"   validate:"required"`
+	InputCashIDs []string   `json:"input_cash_ids"`
+	MatchOrder   OrderID    `json:"match_order,omitempty"`
+	Status       OrderStat  `json:"status"  validate:"oneof=0 1 2 3"`
 }
 
 // Validate checks all struct tag constraints on the Order.
