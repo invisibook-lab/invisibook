@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	cfgPath := flag.String("config", "cfg/chain.toml", "path to kernel config file")
+	cfgPath := flag.String("config", "cfg/chain.toml", "path to chain config file")
 	coreCfgPath := flag.String("core-config", "cfg/core.toml", "path to core tripod config file")
 	flag.Parse()
 

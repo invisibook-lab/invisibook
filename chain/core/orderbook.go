@@ -37,6 +37,7 @@ type SendOrderRequest struct {
 	Amount       CipherText `json:"amount"         validate:"required"`
 	Owner        string     `json:"owner"          validate:"required"`
 	InputCashIDs []string   `json:"input_cash_ids" validate:"required,min=1"`
+	HandlingFee  []string   `json:"handling_fee" validate:"required,min=1"` // must be plaintext.
 }
 
 // SendOrder creates a new order, locks the input Cash, stores it via SQL, and attempts to match it.
