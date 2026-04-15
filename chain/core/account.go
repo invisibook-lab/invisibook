@@ -17,9 +17,9 @@ type Account struct {
 	db *gorm.DB
 }
 
-func NewAccount() *Account {
+func NewAccount(cfg *AccountConfig) *Account {
 	tri := tripod.NewTripodWithName("account")
-	a := &Account{Tripod: tri, db: InitAccountDB("accounts.db")}
+	a := &Account{Tripod: tri, db: InitAccountDB(cfg.DBPath)}
 	a.SetWritings(a.Deposit, a.Withdraw)
 	a.SetReadings(a.GetAccount)
 	return a

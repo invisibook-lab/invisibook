@@ -1,0 +1,7 @@
+# Core Tripod Configuration
+
+[orderbook]
+db_path = "orders.db"
+
+[account]
+db_path = "accounts.db"

@@ -19,9 +19,9 @@ type OrderBook struct {
 	db      *gorm.DB
 }
 
-func NewOrderBook() *OrderBook {
+func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	tri := tripod.NewTripodWithName("orderbook")
-	ot := &OrderBook{Tripod: tri, db: InitOrderDB("orders.db")}
+	ot := &OrderBook{Tripod: tri, db: InitOrderDB(cfg.DBPath)}
 	ot.SetWritings(ot.SendOrder, ot.SettleOrder)
 	ot.SetReadings(ot.QueryOrders)
 	return ot
