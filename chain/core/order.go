@@ -86,6 +86,7 @@ const (
 	Matched
 	Done
 	Cancelled
+	Frozen
 )
 
 type TradePair struct {
@@ -118,6 +119,8 @@ func (s OrderStat) String() string {
 		return "Done"
 	case Cancelled:
 		return "Cancelled"
+	case Frozen:
+		return "Frozen"
 	default:
 		return "Unknown"
 	}
