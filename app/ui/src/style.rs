@@ -142,6 +142,7 @@ body {
 .status-matched   { color: var(--green); }
 .status-done      { color: var(--text-third); }
 .status-cancelled { color: var(--red); }
+.status-frozen    { color: #3a86ff; }
 
 .amount-cipher {
     font-size: 11px;

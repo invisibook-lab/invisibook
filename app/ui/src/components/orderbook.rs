@@ -61,6 +61,7 @@ fn render_rows(
                     OrderStatus::Matched => "status-matched",
                     OrderStatus::Done => "status-done",
                     OrderStatus::Cancelled => "status-cancelled",
+                    OrderStatus::Frozen => "status-frozen",
                 };
                 let price_str = match order.price {
                     Some(p) => p.to_string(),
