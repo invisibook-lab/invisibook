@@ -142,6 +142,7 @@ impl ChainClient {
                 OrderStatus::Matched => 1,
                 OrderStatus::Done => 2,
                 OrderStatus::Cancelled => 3,
+                OrderStatus::Frozen => 4,
             }),
             limit,
             offset,

@@ -32,6 +32,7 @@ pub enum OrderStatus {
     Matched,
     Done,
     Cancelled,
+    Frozen,
 }
 
 impl fmt::Display for OrderStatus {
@@ -41,6 +42,7 @@ impl fmt::Display for OrderStatus {
             OrderStatus::Matched => write!(f, "Matched"),
             OrderStatus::Done => write!(f, "Done"),
             OrderStatus::Cancelled => write!(f, "Cancelled"),
+            OrderStatus::Frozen => write!(f, "Frozen"),
         }
     }
 }
