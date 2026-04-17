@@ -16,7 +16,7 @@ func main() {
 	flag.Parse()
 
 	yuCfg := startup.InitKernelConfigFromPath(*cfgPath)
-	poaCfg := poa.DefaultCfg(0)
+	poaCfg := poa.SingleNodeCfg()
 
 	coreCfg, err := core.LoadConfig(*coreCfgPath)
 	if err != nil {

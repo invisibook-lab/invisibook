@@ -3,15 +3,16 @@ module github.com/invisibook-lab/invisibook
 go 1.25.0
 
 require (
+	github.com/BurntSushi/toml v1.2.1
 	github.com/go-playground/validator/v10 v10.30.1
-	github.com/yu-org/yu v1.3.1
+	github.com/iden3/go-iden3-crypto v0.0.17
+	github.com/yu-org/yu v1.3.2
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.1
 )
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
-	github.com/BurntSushi/toml v1.2.1 // indirect
 	github.com/ChainSafe/go-schnorrkel v0.0.0-20200626160457-b38283118816 // indirect
 	github.com/DataDog/zstd v1.5.6-0.20230824185856-869dae002e5e // indirect
 	github.com/HyperService-Consortium/go-hexutil v1.0.1 // indirect
@@ -65,7 +66,6 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/huin/goupnp v1.3.0 // indirect
-	github.com/iden3/go-iden3-crypto v0.0.17 // indirect
 	github.com/ipfs/go-cid v0.4.1 // indirect
 	github.com/ipfs/go-log/v2 v2.5.1 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
