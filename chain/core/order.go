@@ -21,7 +21,7 @@ type Order struct {
 	Owner        string     `json:"owner"   validate:"required"`
 	InputCashIDs []string   `json:"input_cash_ids"`
 	MatchOrder   OrderID    `json:"match_order,omitempty"`
-	Status       OrderStat  `json:"status"  validate:"oneof=0 1 2 3"`
+	Status       OrderStat  `json:"status"  validate:"oneof=0 1 2 3 4"`
 }
 
 // Validate checks all struct tag constraints on the Order.
