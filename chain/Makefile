@@ -8,3 +8,6 @@ run:
 
 clean:
 	rm -f invisibook
+
+reset:
+	rm -rf data

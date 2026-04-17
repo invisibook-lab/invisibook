@@ -20,3 +20,6 @@ run-chain:
 
 clean:
 	rm -f invisibook
+
+reset-chain:
+	cd chain && rm -rf data
