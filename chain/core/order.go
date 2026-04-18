@@ -19,7 +19,7 @@ type Order struct {
 	Price        *big.Int   `json:"price,omitempty"`
 	Amount       CipherText `json:"amount"  validate:"required"`
 	Owner        string     `json:"owner"   validate:"required"`
-	InputCashIDs []string   `json:"input_cash_ids"`
+	InputCashIDs []string   `json:"input_cash_ids" validate:"required,min=1"`
 	MatchOrder   OrderID    `json:"match_order,omitempty"`
 	Status       OrderStat  `json:"status"  validate:"oneof=0 1 2 3 4"`
 }
@@ -41,23 +41,17 @@ func strToFieldElem(s string) *big.Int {
 	return n.Mod(n, bn254r)
 }
 
-// ComputeOrderID derives a deterministic order ID using Poseidon(BN254) over
-// five field elements: [type, price, token1, token2, amount].
-// String fields are reduced to field elements via SHA-256 mod BN254r.
+// ComputeOrderID derives a deterministic order ID from the input Cash IDs
+// using Poseidon(BN254). Each cash ID is reduced to a field element via
+// SHA-256 mod BN254r, then all elements are hashed together.
 // Must match the Rust compute_order_id in invisibook-lib.
-func ComputeOrderID(orderType TradeType, subject TradePair, price *big.Int, amount CipherText) OrderID {
-	typeElem := big.NewInt(int64(orderType))
-
-	priceElem := big.NewInt(0)
-	if price != nil {
-		priceElem = new(big.Int).Set(price)
+func ComputeOrderID(inputCashIDs []string) OrderID {
+	elems := make([]*big.Int, len(inputCashIDs))
+	for i, id := range inputCashIDs {
+		elems[i] = strToFieldElem(id)
 	}
 
-	token1Elem := strToFieldElem(string(subject.Token1))
-	token2Elem := strToFieldElem(string(subject.Token2))
-	amountElem := strToFieldElem(string(amount))
-
-	result, err := poseidon.Hash([]*big.Int{typeElem, priceElem, token1Elem, token2Elem, amountElem})
+	result, err := poseidon.Hash(elems)
 	if err != nil {
 		panic("ComputeOrderID: poseidon hash failed: " + err.Error())
 	}

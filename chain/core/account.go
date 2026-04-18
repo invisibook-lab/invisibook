@@ -8,21 +8,41 @@ import (
 
 	"github.com/yu-org/yu/core/context"
 	"github.com/yu-org/yu/core/tripod"
+	"github.com/yu-org/yu/core/types"
 )
 
 // ────────────────────── Tripod ──────────────────────
 
 type Account struct {
 	*tripod.Tripod
-	db *gorm.DB
+	db  *gorm.DB
+	cfg *AccountConfig
 }
 
 func NewAccount(cfg *AccountConfig) *Account {
 	tri := tripod.NewTripodWithName("account")
-	a := &Account{Tripod: tri, db: InitAccountDB(cfg.DBPath)}
+	a := &Account{Tripod: tri, db: InitAccountDB(cfg.DBPath), cfg: cfg}
 	a.SetWritings(a.Deposit, a.Withdraw)
 	a.SetReadings(a.GetAccount)
 	return a
+}
+
+// InitChain seeds genesis accounts with pre-funded Cash at chain startup.
+func (a *Account) InitChain(block *types.Block) {
+	for _, ga := range a.cfg.GenesisAccounts {
+		cash := &Cash{
+			ID:      generateCashID(),
+			Owner:   ga.Address,
+			Token:   TokenID(ga.Token),
+			Amount:  CipherText(ga.Amount),
+			ZkProof: "genesis",
+			Status:  Active,
+		}
+		if err := a.CreateCash(cash); err != nil {
+			panic(fmt.Sprintf("failed to seed genesis account %s: %v", ga.Address, err))
+		}
+		fmt.Printf("genesis: addr=%s token=%s amount=%s cash=%s\n", ga.Address, ga.Token, ga.Amount, cash.ID)
+	}
 }
 
 // ────────────────────── Reading: GetAccount ──────────────────────

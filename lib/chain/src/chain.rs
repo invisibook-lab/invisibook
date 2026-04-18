@@ -15,6 +15,9 @@ struct SendOrderParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     price: Option<String>,
     amount: CipherText,
+    owner: String,
+    input_cash_ids: Vec<String>,
+    handling_fee: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -26,6 +29,15 @@ struct TradePairJson {
 #[derive(Debug, Serialize)]
 struct SettleOrderParams {
     order_ids: Vec<OrderID>,
+    outputs: Vec<CashOutputParams>,
+    zk_proof: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CashOutputParams {
+    owner: String,
+    token: TokenID,
+    amount: CipherText,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,7 +71,11 @@ pub struct QueryOrderItem {
     pub subject: QueryTradePair,
     pub price: Option<String>,
     pub amount: CipherText,
+    pub owner: String,
+    pub input_cash_ids: Vec<String>,
     pub status: u8,
+    #[serde(default)]
+    pub match_order: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,18 +117,34 @@ impl ChainClient {
             },
             price: order.price.map(|p| p.to_string()),
             amount: order.amount.clone(),
+            owner: order.owner.clone(),
+            input_cash_ids: order.input_cash_ids.clone(),
+            handling_fee: order.handling_fee.clone(),
         };
         self.client
             .write_chain("orderbook", "SendOrder", &params, 100, 0)
             .await
     }
 
-    /// Requests settlement of a list of matched orders (writing request to OrderBook.SettleOrder).
+    /// Requests settlement of a matched order pair (writing request to OrderBook.SettleOrder).
     pub async fn settle_order(
         &self,
         order_ids: Vec<OrderID>,
+        outputs: Vec<CashOutput>,
+        zk_proof: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let params = SettleOrderParams { order_ids };
+        let params = SettleOrderParams {
+            order_ids,
+            outputs: outputs
+                .into_iter()
+                .map(|o| CashOutputParams {
+                    owner: o.owner,
+                    token: o.token,
+                    amount: o.amount,
+                })
+                .collect(),
+            zk_proof: zk_proof.to_string(),
+        };
         self.client
             .write_chain("orderbook", "SettleOrder", &params, 100, 0)
             .await

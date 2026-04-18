@@ -61,6 +61,15 @@ impl fmt::Display for TradePair {
     }
 }
 
+// ────────────────────── CashOutput (for settlement) ──────────────────────
+
+#[derive(Debug, Clone)]
+pub struct CashOutput {
+    pub owner: String,
+    pub token: TokenID,
+    pub amount: CipherText,
+}
+
 // ────────────────────── Order ──────────────────────
 
 #[derive(Debug, Clone)]
@@ -70,5 +79,9 @@ pub struct Order {
     pub subject: TradePair,
     pub price: Option<i64>,
     pub amount: CipherText,
+    pub owner: String,
+    pub input_cash_ids: Vec<String>,
+    pub handling_fee: Vec<String>,
     pub status: OrderStatus,
+    pub match_order: Option<OrderID>,
 }

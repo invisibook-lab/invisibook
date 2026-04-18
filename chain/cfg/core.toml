@@ -5,3 +5,24 @@ db_path = "data/orders.db"
 
 [account]
 db_path = "data/accounts.db"
+
+# Genesis accounts: pre-fund alice and bob with ETH and USDT
+[[account.genesis_accounts]]
+address = "alice"
+token   = "ETH"
+amount  = "1000"
+
+[[account.genesis_accounts]]
+address = "alice"
+token   = "USDT"
+amount  = "500000"
+
+[[account.genesis_accounts]]
+address = "bob"
+token   = "ETH"
+amount  = "1000"
+
+[[account.genesis_accounts]]
+address = "bob"
+token   = "USDT"
+amount  = "500000"

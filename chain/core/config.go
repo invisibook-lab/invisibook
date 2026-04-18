@@ -19,7 +19,15 @@ type OrderBookConfig struct {
 
 // AccountConfig holds configuration for the Account tripod.
 type AccountConfig struct {
-	DBPath string `toml:"db_path"`
+	DBPath          string           `toml:"db_path"`
+	GenesisAccounts []GenesisAccount `toml:"genesis_accounts"`
+}
+
+// GenesisAccount defines a pre-funded account seeded at chain initialization.
+type GenesisAccount struct {
+	Address string `toml:"address"`
+	Token   string `toml:"token"`
+	Amount  string `toml:"amount"`
 }
 
 // DefaultConfig returns a Config with sensible defaults.

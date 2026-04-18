@@ -70,15 +70,20 @@ pub fn TradeForm(
             token2: t2.clone(),
         };
         let amount = orderbook::mock_cipher_text(&amount_str);
-        let id = orderbook::compute_order_id(trade_type, &subject, Some(price), &amount);
 
+        // NOTE: order ID and input_cash_ids will be set when submitting
+        // to the chain with real cash. For local preview we use a placeholder.
         let order = Order {
-            id,
+            id: String::new(),
             trade_type,
             subject,
             price: Some(price),
             amount,
+            owner: String::new(),
+            input_cash_ids: Vec::new(),
+            handling_fee: vec!["0".to_string()],
             status: OrderStatus::Pending,
+            match_order: None,
         };
 
         let order_id = order.id.clone();

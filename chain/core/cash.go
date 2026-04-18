@@ -44,6 +44,10 @@ type Cash struct {
 	By      string     `json:"by,omitempty"` // Locked: order ID; Spent: tx/cash ID
 }
 
+func (c *Cash) IsNative() bool {
+	return c.Token.IsNative()
+}
+
 // AccountRecord is the response returned by GetAccount.
 // Because amounts are ciphertext, no aggregate balance is computed on-chain.
 type AccountRecord struct {

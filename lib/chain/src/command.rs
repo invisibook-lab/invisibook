@@ -81,15 +81,20 @@ pub fn parse_command(input: &str) -> CommandResult {
         token2: token2.clone(),
     };
     let amount = orderbook::mock_cipher_text(amount_str);
-    let id = orderbook::compute_order_id(trade_type, &subject, Some(price), &amount);
 
+    // NOTE: order ID and input_cash_ids will be set when the order is
+    // actually submitted with real cash. For local preview we use a placeholder.
     let order = Order {
-        id,
+        id: String::new(),
         trade_type,
         subject,
         price: Some(price),
         amount,
+        owner: String::new(),
+        input_cash_ids: Vec::new(),
+        handling_fee: vec!["0".to_string()],
         status: OrderStatus::Pending,
+        match_order: None,
     };
 
     let type_name = match trade_type {
