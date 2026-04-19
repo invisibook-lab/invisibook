@@ -1,3 +1,4 @@
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 
@@ -10,38 +11,9 @@ pub fn short_id(id: &str) -> &str {
     &id[..id.len().min(7)]
 }
 
-/// Computes a deterministic order ID from the input Cash IDs using Poseidon(BN254).
-/// Each cash ID is reduced to a field element via SHA-256 mod BN254r.
-/// Must match the Go side ComputeOrderID in chain/core/order.go.
-///
-/// Android fallback: SHA-256 over concatenated cash IDs (ark-ff SIGSEGV workaround).
+/// Computes a deterministic order ID by SHA-256 hashing the concatenation
+/// of all input Cash IDs. Must match the Go side ComputeOrderID.
 pub fn compute_order_id(input_cash_ids: &[String]) -> OrderID {
-    #[cfg(not(target_os = "android"))]
-    {
-        use ark_bn254::Fr;
-        use ark_ff::{BigInteger, PrimeField};
-        use light_poseidon::{Poseidon, PoseidonHasher};
-
-        fn str_to_fr(s: &str) -> Fr {
-            let mut h = Sha256::new();
-            h.update(s.as_bytes());
-            Fr::from_be_bytes_mod_order(&h.finalize())
-        }
-
-        let result = (|| -> Option<String> {
-            let elems: Vec<Fr> = input_cash_ids.iter().map(|id| str_to_fr(id)).collect();
-            let mut hasher = Poseidon::<Fr>::new_circom(elems.len()).ok()?;
-            let hash = hasher.hash(&elems).ok()?;
-            let bytes = hash.into_bigint().to_bytes_be();
-            Some(bytes.iter().map(|b| format!("{:02x}", b)).collect())
-        })();
-
-        if let Some(id) = result {
-            return id;
-        }
-    }
-
-    // Android fallback: SHA-256 over concatenated cash IDs.
     let mut hasher = Sha256::new();
     for id in input_cash_ids {
         hasher.update(id.as_bytes());
@@ -51,10 +23,14 @@ pub fn compute_order_id(input_cash_ids: &[String]) -> OrderID {
 
 // ────────────────────── Cipher Mock ──────────────────────
 
-/// Simulates FHE encryption – hashes the plaintext amount.
-/// Uses Poseidon (BN254) on desktop; falls back to SHA-256 on Android (arm64
-/// ark-ff SIGSEGV workaround).
-pub fn mock_cipher_text(plaintext: &str) -> CipherText {
+/// Encrypts the plaintext amount as poseidon(amount, random) where random
+/// is a locally generated 256-bit value. This hides the actual amount on-chain.
+/// Uses Poseidon (BN254) on desktop; falls back to SHA-256 on Android.
+pub fn encrypt_amount(plaintext: &str) -> CipherText {
+    // Generate a 256-bit random value
+    let mut random_bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut random_bytes);
+
     #[cfg(not(target_os = "android"))]
     {
         use ark_bn254::Fr;
@@ -63,22 +39,24 @@ pub fn mock_cipher_text(plaintext: &str) -> CipherText {
 
         let amount: u64 = plaintext.parse().unwrap_or(0);
         let result = (|| -> Option<String> {
-            let mut hasher = Poseidon::<Fr>::new_circom(1).ok()?;
-            let hash = hasher.hash(&[Fr::from(amount)]).ok()?;
+            let amount_fr = Fr::from(amount);
+            let random_fr = Fr::from_be_bytes_mod_order(&random_bytes);
+            let mut hasher = Poseidon::<Fr>::new_circom(2).ok()?;
+            let hash = hasher.hash(&[amount_fr, random_fr]).ok()?;
             let bytes = hash.into_bigint().to_bytes_be();
             Some(bytes.iter().map(|b| format!("{:02x}", b)).collect())
         })();
 
         if let Some(hex) = result {
-            return format!("0x{}", hex);
+            return hex;
         }
     }
 
-    // Android (and Poseidon fallback): use SHA-256
+    // Android fallback: SHA-256(amount || random)
     let mut hasher = Sha256::new();
     hasher.update(plaintext.as_bytes());
-    let bytes = hasher.finalize();
-    format!("0x{}", bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>())
+    hasher.update(&random_bytes);
+    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 // ────────────────────── Order Helpers ──────────────────────
@@ -97,7 +75,7 @@ pub fn sort_orders(orders: &mut [Order]) {
 pub fn sample_orders() -> Vec<Order> {
     let make = |trade_type: TradeType, t1: &str, t2: &str, price: i64, amt: &str, status: OrderStatus, idx: u32| {
         let subject = TradePair { token1: t1.into(), token2: t2.into() };
-        let amount = mock_cipher_text(amt);
+        let amount = encrypt_amount(amt);
         let fake_cash_id = format!("sample-cash-{}", idx);
         let id = compute_order_id(&[fake_cash_id.clone()]);
         Order { id, trade_type, subject, price: Some(price), amount, owner: String::new(), input_cash_ids: vec![fake_cash_id], handling_fee: vec!["0".to_string()], status, match_order: None }

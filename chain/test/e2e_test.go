@@ -83,7 +83,7 @@ func TestFullOrderLifecycle(t *testing.T) {
 	chainDir := ".."
 	os.RemoveAll(chainDir + "/data")
 
-	cmd := exec.Command("./invisibook-chain")
+	cmd := exec.Command("./invisibook")
 	cmd.Dir = chainDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

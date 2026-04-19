@@ -2177,6 +2177,7 @@ dependencies = [
  "ark-bn254",
  "ark-ff",
  "light-poseidon",
+ "rand 0.9.2",
  "serde",
  "serde_json",
  "sha2",

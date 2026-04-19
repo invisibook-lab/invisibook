@@ -69,7 +69,7 @@ pub fn TradeForm(
             token1: t1.clone(),
             token2: t2.clone(),
         };
-        let amount = orderbook::mock_cipher_text(&amount_str);
+        let amount = orderbook::encrypt_amount(&amount_str);
 
         // NOTE: order ID and input_cash_ids will be set when submitting
         // to the chain with real cash. For local preview we use a placeholder.

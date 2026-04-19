@@ -6,7 +6,6 @@ import (
 	"math/big"
 
 	"github.com/go-playground/validator/v10"
-	"github.com/iden3/go-iden3-crypto/poseidon"
 )
 
 // Validator is the shared validator instance for struct tag validation.
@@ -29,38 +28,15 @@ func (o *Order) Validate() error {
 	return Validator.Struct(o)
 }
 
-// bn254r is the BN254 scalar field prime, matching the Rust ark-bn254 Fr modulus.
-var bn254r, _ = new(big.Int).SetString(
-	"21888242871839275222246405745257275088548364400416034343698204186575808495617", 10)
-
-// strToFieldElem reduces the SHA-256 hash of s into a BN254 scalar field element.
-// Must match the Rust side: Fr::from_be_bytes_mod_order(&sha256(s)).
-func strToFieldElem(s string) *big.Int {
-	h := sha256.Sum256([]byte(s))
-	n := new(big.Int).SetBytes(h[:])
-	return n.Mod(n, bn254r)
-}
-
-// ComputeOrderID derives a deterministic order ID from the input Cash IDs
-// using Poseidon(BN254). Each cash ID is reduced to a field element via
-// SHA-256 mod BN254r, then all elements are hashed together.
+// ComputeOrderID derives a deterministic order ID by SHA-256 hashing the
+// concatenation of all input Cash IDs.
 // Must match the Rust compute_order_id in invisibook-lib.
 func ComputeOrderID(inputCashIDs []string) OrderID {
-	elems := make([]*big.Int, len(inputCashIDs))
-	for i, id := range inputCashIDs {
-		elems[i] = strToFieldElem(id)
+	h := sha256.New()
+	for _, id := range inputCashIDs {
+		h.Write([]byte(id))
 	}
-
-	result, err := poseidon.Hash(elems)
-	if err != nil {
-		panic("ComputeOrderID: poseidon hash failed: " + err.Error())
-	}
-
-	// Pad to 32 bytes big-endian to match Rust's into_bigint().to_bytes_be().
-	b := result.Bytes()
-	padded := make([]byte, 32)
-	copy(padded[32-len(b):], b)
-	return OrderID(hex.EncodeToString(padded))
+	return OrderID(hex.EncodeToString(h.Sum(nil)))
 }
 
 type (
