@@ -6,9 +6,28 @@ A privacy-preserving order book built on pure cryptography — no TEE, no centra
 
 ## Prerequisites
 
+- **Go 1.21+** – [install](https://go.dev/dl/)
 - **Rust 1.74+** – [install](https://www.rust-lang.org/tools/install)
+- **GCC / C compiler** – required by CGo (SQLite driver)
 
 ## Build & Run
+
+### Chain
+
+```bash
+cd chain
+go build -o invisibook .
+./invisibook
+```
+
+The chain node listens on:
+- **HTTP** `localhost:7999` – reading & writing API
+- **WebSocket** `localhost:8999`
+- **P2P** `localhost:8887`
+
+Configuration files are in `chain/cfg/`:
+- `chain.toml` – yu framework config (ports, consensus, chain_id)
+- `core.toml` – tripod config (DB paths, genesis accounts)
 
 ### Desktop
 
