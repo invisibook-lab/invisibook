@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use invisibook_lib::chain::ChainClient;
 use invisibook_lib::orderbook;
 use invisibook_lib::types::*;
 
@@ -23,11 +25,17 @@ pub struct App {
     pub input: TextInput,
     pub message: Option<String>,
     pub is_error: bool,
+    pub chain_client: Option<Arc<ChainClient>>,
+    pub runtime: tokio::runtime::Runtime,
 }
 
 impl App {
-    pub fn new() -> Self {
-        let mut orders = orderbook::sample_orders();
+    pub fn new_with(
+        chain_orders: Option<Vec<Order>>,
+        chain_client: Option<Arc<ChainClient>>,
+        runtime: tokio::runtime::Runtime,
+    ) -> Self {
+        let mut orders = chain_orders.unwrap_or_else(|| orderbook::sample_orders());
         orderbook::sort_orders(&mut orders);
 
         App {
@@ -42,6 +50,8 @@ impl App {
             },
             message: None,
             is_error: false,
+            chain_client,
+            runtime,
         }
     }
 

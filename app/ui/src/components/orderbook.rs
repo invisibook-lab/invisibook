@@ -49,8 +49,8 @@ fn render_rows(
     rsx! {
         for (i, order) in orders.iter().enumerate() {
             {
-                let is_selected = selected.map_or(false, |s| s == i);
-                let is_expanded = expanded.map_or(false, |e| e == i);
+                let is_selected = selected.is_some_and(|s| s == i);
+                let is_expanded = expanded.is_some_and(|e| e == i);
 
                 let type_class = match order.trade_type {
                     TradeType::Buy => "type-buy",
@@ -97,7 +97,7 @@ fn render_rows(
                         class: "{row_class}",
                         onclick: move |_| {
                             sel_signal.set(Some(i));
-                            let currently_expanded = exp_signal.read().map_or(false, |e| e == i);
+                            let currently_expanded = exp_signal.read().is_some_and(|e| e == i);
                             if currently_expanded {
                                 exp_signal.set(None);
                             } else {

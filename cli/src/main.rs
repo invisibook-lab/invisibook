@@ -3,6 +3,7 @@ mod model;
 mod view;
 
 use std::io;
+use std::sync::Arc;
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -11,9 +12,36 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 
+use invisibook_lib::chain::ChainClient;
+use invisibook_lib::config::ClientConfig;
+
 use model::App;
 
 fn main() -> io::Result<()> {
+    // ── Chain client setup ──
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+
+    let cfg = ClientConfig::load_with_args();
+    let (client, initial_orders) = match cfg.keypair() {
+        Ok(kp) => {
+            let c = Arc::new(ChainClient::new(
+                &cfg.chain.http_url,
+                &cfg.chain.ws_url,
+                kp,
+            ));
+            let orders = rt.block_on(async {
+                c.query_orders(None, None, None, None, None, Some(100), Some(0))
+                    .await
+                    .ok()
+            });
+            (Some(c), orders)
+        }
+        Err(e) => {
+            eprintln!("Failed to parse keypair: {}", e);
+            (None, None)
+        }
+    };
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -22,7 +50,7 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Run app
-    let mut app = App::new();
+    let mut app = App::new_with(initial_orders, client.clone(), rt);
     let result = run_app(&mut terminal, &mut app);
 
     // Restore terminal

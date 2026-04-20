@@ -4,6 +4,9 @@ use yu_sdk::{KeyPair, YuClient};
 
 use crate::types::*;
 
+// Re-export KeyPair so consumers don't need to depend on yu-sdk directly.
+pub use yu_sdk::KeyPair as YuKeyPair;
+
 // ────────────────────── Request/Response Types ──────────────────────
 
 #[derive(Debug, Serialize)]
@@ -84,6 +87,58 @@ pub struct QueryTradePair {
     pub token2: TokenID,
 }
 
+// ────────────────────── Account Request/Response Types ──────────────────────
+
+#[derive(Debug, Serialize)]
+struct GetAccountParams {
+    address: String,
+    token: TokenID,
+}
+
+#[derive(Debug, Serialize)]
+struct DepositParams {
+    address: String,
+    token: TokenID,
+    amount: CipherText,
+    zk_proof: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WithdrawParams {
+    token: TokenID,
+    inputs: Vec<String>,
+    change: ChangeOutputParams,
+    zk_proof: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChangeOutputParams {
+    owner: String,
+    amount: CipherText,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountResponse {
+    address: String,
+    token: TokenID,
+    #[serde(default)]
+    cash: Vec<CashItemResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CashItemResponse {
+    id: String,
+    owner: String,
+    token: TokenID,
+    amount: CipherText,
+    #[serde(default)]
+    zk_proof: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    by: String,
+}
+
 // ────────────────────── Chain Client ──────────────────────
 
 pub struct ChainClient {
@@ -151,6 +206,7 @@ impl ChainClient {
     }
 
     /// Queries orders from the chain with optional filters and pagination.
+    #[allow(clippy::too_many_arguments)]
     pub async fn query_orders(
         &self,
         id: Option<OrderID>,
@@ -160,7 +216,7 @@ impl ChainClient {
         status: Option<OrderStatus>,
         limit: Option<u32>,
         offset: Option<u32>,
-    ) -> Result<Value, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Order>, Box<dyn std::error::Error>> {
         let params = QueryOrdersParams {
             id,
             trade_type: trade_type.map(|t| match t {
@@ -179,8 +235,121 @@ impl ChainClient {
             limit,
             offset,
         };
-        self.client
+        let value: Value = self
+            .client
             .read_chain("orderbook", "QueryOrders", &params)
+            .await?;
+        let resp: QueryOrdersResponse = serde_json::from_value(value)?;
+        Ok(resp
+            .orders
+            .into_iter()
+            .map(query_item_to_order)
+            .collect())
+    }
+
+    /// Gets account details for the given address and token.
+    pub async fn get_account(
+        &self,
+        address: &str,
+        token: &str,
+    ) -> Result<AccountRecord, Box<dyn std::error::Error>> {
+        let params = GetAccountParams {
+            address: address.to_string(),
+            token: token.to_string(),
+        };
+        let value: Value = self
+            .client
+            .read_chain("account", "GetAccount", &params)
+            .await?;
+        let resp: AccountResponse = serde_json::from_value(value)?;
+        Ok(AccountRecord {
+            address: resp.address,
+            token: resp.token,
+            cash: resp
+                .cash
+                .into_iter()
+                .map(|c| CashItem {
+                    id: c.id,
+                    owner: c.owner,
+                    token: c.token,
+                    amount: c.amount,
+                    zk_proof: c.zk_proof,
+                    status: c.status,
+                    by: c.by,
+                })
+                .collect(),
+        })
+    }
+
+    /// Deposits funds into an account (requires zk proof of bridge deposit).
+    pub async fn deposit(
+        &self,
+        address: &str,
+        token: &str,
+        amount: &str,
+        zk_proof: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let params = DepositParams {
+            address: address.to_string(),
+            token: token.to_string(),
+            amount: amount.to_string(),
+            zk_proof: zk_proof.to_string(),
+        };
+        self.client
+            .write_chain("account", "Deposit", &params, 100, 0)
             .await
+    }
+
+    /// Withdraws funds from the account (requires zk proof that amount <= balance).
+    pub async fn withdraw(
+        &self,
+        token: &str,
+        inputs: Vec<String>,
+        change: ChangeOutput,
+        zk_proof: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let params = WithdrawParams {
+            token: token.to_string(),
+            inputs,
+            change: ChangeOutputParams {
+                owner: change.owner,
+                amount: change.amount,
+            },
+            zk_proof: zk_proof.to_string(),
+        };
+        self.client
+            .write_chain("account", "Withdraw", &params, 100, 0)
+            .await
+    }
+}
+
+// ────────────────────── Helpers ──────────────────────
+
+fn query_item_to_order(item: QueryOrderItem) -> Order {
+    let trade_type = match item.trade_type {
+        0 => TradeType::Buy,
+        _ => TradeType::Sell,
+    };
+    let status = match item.status {
+        0 => OrderStatus::Pending,
+        1 => OrderStatus::Matched,
+        2 => OrderStatus::Done,
+        3 => OrderStatus::Cancelled,
+        _ => OrderStatus::Frozen,
+    };
+    Order {
+        id: item.id,
+        trade_type,
+        subject: TradePair {
+            token1: item.subject.token1,
+            token2: item.subject.token2,
+        },
+        price: item.price.and_then(|p| p.parse().ok()),
+        amount: item.amount,
+        owner: item.owner,
+        input_cash_ids: item.input_cash_ids,
+        handling_fee: Vec::new(),
+        status,
+        match_order: item.match_order,
     }
 }

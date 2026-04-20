@@ -7,3 +7,4 @@ edition = "2021"
 ratatui = "0.29"
 crossterm = "0.28"
 invisibook-lib = { path = "../lib/chain" }
+tokio = { version = "1", features = ["rt-multi-thread"] }

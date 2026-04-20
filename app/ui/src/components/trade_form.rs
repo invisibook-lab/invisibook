@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use dioxus::prelude::*;
 
+use invisibook_lib::chain::ChainClient;
 use invisibook_lib::orderbook;
 use invisibook_lib::types::*;
 
@@ -14,6 +16,8 @@ pub fn TradeForm(
     own_order_ids: Signal<HashMap<OrderID, String>>,
     expanded: Signal<Option<usize>>,
     message: Signal<Option<(String, bool)>>,
+    chain_client: Signal<Option<Arc<ChainClient>>>,
+    my_address: Signal<String>,
 ) -> Element {
     // ── Form state ──
     let mut side = use_signal(|| TradeType::Buy);
@@ -21,6 +25,7 @@ pub fn TradeForm(
     let mut token2 = use_signal(|| "USDT".to_string());
     let mut price_input = use_signal(String::new);
     let mut amount_input = use_signal(String::new);
+    let mut submitting = use_signal(|| false);
 
     // ── Derived ──
     let current_side = *side.read();
@@ -36,7 +41,8 @@ pub fn TradeForm(
         format!("-- {}", t2_display)
     };
 
-    let can_submit = price_val > 0.0 && amount_val > 0.0;
+    let is_submitting = *submitting.read();
+    let can_submit = price_val > 0.0 && amount_val > 0.0 && !is_submitting;
 
     // ── Submit handler ──
     let on_submit = move |_| {
@@ -70,40 +76,74 @@ pub fn TradeForm(
             token2: t2.clone(),
         };
         let amount = orderbook::encrypt_amount(&amount_str);
+        let owner = my_address.read().clone();
 
-        // NOTE: order ID and input_cash_ids will be set when submitting
-        // to the chain with real cash. For local preview we use a placeholder.
         let order = Order {
             id: String::new(),
             trade_type,
             subject,
             price: Some(price),
             amount,
-            owner: String::new(),
+            owner,
             input_cash_ids: Vec::new(),
             handling_fee: vec!["0".to_string()],
             status: OrderStatus::Pending,
             match_order: None,
         };
 
-        let order_id = order.id.clone();
-        {
-            let mut o = orders.write();
-            o.push(order);
-            orderbook::sort_orders(&mut *o);
-        }
-        own_order_ids
-            .write()
-            .insert(order_id, amount_str.clone());
-        expanded.set(None);
+        let client = chain_client.read().clone();
 
-        message.set(Some((
-            format!(
-                "✓ {} {}/{} price {} amount {}",
-                trade_type, t1, t2, price_str, amount_str
-            ),
-            false,
-        )));
+        if let Some(client) = client {
+            // Async send to chain
+            submitting.set(true);
+            let amount_str_clone = amount_str.clone();
+            spawn(async move {
+                match client.send_order(&order).await {
+                    Ok(()) => {
+                        let order_id = order.id.clone();
+                        {
+                            let mut o = orders.write();
+                            o.push(order);
+                            orderbook::sort_orders(&mut *o);
+                        }
+                        own_order_ids
+                            .write()
+                            .insert(order_id, amount_str_clone);
+                        expanded.set(None);
+                        message.set(Some((
+                            format!(
+                                "✓ {} {}/{} price {} amount {}",
+                                trade_type, t1, t2, price_str, amount_str
+                            ),
+                            false,
+                        )));
+                    }
+                    Err(e) => {
+                        message.set(Some((format!("✗ Send order failed: {}", e), true)));
+                    }
+                }
+                submitting.set(false);
+            });
+        } else {
+            // No chain client — local only
+            let order_id = order.id.clone();
+            {
+                let mut o = orders.write();
+                o.push(order);
+                orderbook::sort_orders(&mut *o);
+            }
+            own_order_ids
+                .write()
+                .insert(order_id, amount_str.clone());
+            expanded.set(None);
+            message.set(Some((
+                format!(
+                    "✓ {} {}/{} price {} amount {} (local)",
+                    trade_type, t1, t2, price_str, amount_str
+                ),
+                false,
+            )));
+        }
 
         price_input.set(String::new());
         amount_input.set(String::new());
@@ -194,7 +234,9 @@ pub fn TradeForm(
                     class: if current_side == TradeType::Buy { "submit-btn buy" } else { "submit-btn sell" },
                     disabled: !can_submit,
                     onclick: on_submit,
-                    if current_side == TradeType::Buy {
+                    if is_submitting {
+                        "Submitting..."
+                    } else if current_side == TradeType::Buy {
                         "Buy {t1_display}"
                     } else {
                         "Sell {t1_display}"

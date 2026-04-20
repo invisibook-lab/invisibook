@@ -7,3 +7,4 @@ edition = "2021"
 dioxus = { version = "0.7", features = ["desktop"] }
 invisibook-ui = { path = "../ui" }
 invisibook-lib = { path = "../../lib/chain" }
+tokio = { version = "1", features = ["rt", "macros"] }

@@ -55,7 +55,7 @@ pub fn encrypt_amount(plaintext: &str) -> CipherText {
     // Android fallback: SHA-256(amount || random)
     let mut hasher = Sha256::new();
     hasher.update(plaintext.as_bytes());
-    hasher.update(&random_bytes);
+    hasher.update(random_bytes);
     hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
 }
 
@@ -77,7 +77,7 @@ pub fn sample_orders() -> Vec<Order> {
         let subject = TradePair { token1: t1.into(), token2: t2.into() };
         let amount = encrypt_amount(amt);
         let fake_cash_id = format!("sample-cash-{}", idx);
-        let id = compute_order_id(&[fake_cash_id.clone()]);
+        let id = compute_order_id(std::slice::from_ref(&fake_cash_id));
         Order { id, trade_type, subject, price: Some(price), amount, owner: String::new(), input_cash_ids: vec![fake_cash_id], handling_fee: vec!["0".to_string()], status, match_order: None }
     };
 

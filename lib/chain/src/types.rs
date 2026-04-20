@@ -70,6 +70,32 @@ pub struct CashOutput {
     pub amount: CipherText,
 }
 
+// ────────────────────── Account / Cash ──────────────────────
+
+#[derive(Debug, Clone)]
+pub struct CashItem {
+    pub id: String,
+    pub owner: String,
+    pub token: TokenID,
+    pub amount: CipherText,
+    pub zk_proof: String,
+    pub status: String,
+    pub by: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AccountRecord {
+    pub address: String,
+    pub token: TokenID,
+    pub cash: Vec<CashItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChangeOutput {
+    pub owner: String,
+    pub amount: CipherText,
+}
+
 // ────────────────────── Order ──────────────────────
 
 #[derive(Debug, Clone)]
