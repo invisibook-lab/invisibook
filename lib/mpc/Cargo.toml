@@ -4,4 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+ark-mpc = { git = "https://github.com/invisibook-lab/ark-mpc" }
 thiserror = "1"
