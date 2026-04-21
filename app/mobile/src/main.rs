@@ -1,7 +1,10 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use dioxus::prelude::*;
 
+use invisibook_lib::chain::ChainClient;
+use invisibook_lib::config::ClientConfig;
 use invisibook_lib::orderbook;
 use invisibook_lib::types::*;
 use invisibook_ui::components::{Header, OrderBook, Toast, TradeForm};
@@ -19,16 +22,49 @@ enum Tab {
 
 #[component]
 fn App() -> Element {
-    let orders = use_signal(|| {
-        let mut o = orderbook::sample_orders();
-        orderbook::sort_orders(&mut o);
-        o
-    });
+    let (initial_client, initial_address) = {
+        let cfg = ClientConfig::load(None);
+        match cfg.keypair() {
+            Ok(kp) => {
+                let addr = kp.address();
+                let c = ChainClient::new(&cfg.chain.http_url, &cfg.chain.ws_url, kp);
+                (Some(Arc::new(c)), addr)
+            }
+            Err(_) => (None, String::new()),
+        }
+    };
+    let client: Signal<Option<Arc<ChainClient>>> = use_signal(|| initial_client);
+    let my_address: Signal<String> = use_signal(|| initial_address);
+
+    let mut orders = use_signal(Vec::<Order>::new);
     let own_order_ids = use_signal(HashMap::<OrderID, String>::new);
     let selected = use_signal(|| None::<usize>);
     let expanded = use_signal(|| None::<usize>);
     let message = use_signal(|| None::<(String, bool)>);
     let mut active_tab = use_signal(|| Tab::OrderBook);
+
+    let _fetch = use_resource(move || {
+        let client = client.read().clone();
+        async move {
+            if let Some(c) = client {
+                match c.query_orders(None, None, None, None, None, Some(100), Some(0)).await {
+                    Ok(mut chain_orders) => {
+                        orderbook::sort_orders(&mut chain_orders);
+                        orders.set(chain_orders);
+                    }
+                    Err(_) => {
+                        let mut o = orderbook::sample_orders();
+                        orderbook::sort_orders(&mut o);
+                        orders.set(o);
+                    }
+                }
+            } else {
+                let mut o = orderbook::sample_orders();
+                orderbook::sort_orders(&mut o);
+                orders.set(o);
+            }
+        }
+    });
 
     let (t1, t2) = {
         let list = orders.read();
@@ -52,7 +88,7 @@ fn App() -> Element {
                 if *active_tab.read() == Tab::OrderBook {
                     OrderBook { orders, own_order_ids, selected, expanded }
                 } else {
-                    TradeForm { orders, own_order_ids, expanded, message }
+                    TradeForm { orders, own_order_ids, expanded, message, chain_client: client, my_address }
                 }
             }
 
