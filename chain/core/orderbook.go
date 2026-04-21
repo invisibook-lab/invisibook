@@ -11,6 +11,17 @@ import (
 	"github.com/yu-org/yu/core/tripod"
 )
 
+// ────────────────────── Events ──────────────────────
+
+// OrderEvent is emitted as a JSON event after SendOrder succeeds.
+// EventType is "created" when the order is stored, and "matched" when a
+// counterparty is found (both the new order and the matched order are included).
+type OrderEvent struct {
+	EventType string `json:"event_type"`
+	Order     *Order `json:"order"`
+	Matched   *Order `json:"matched,omitempty"`
+}
+
 // ────────────────────── Tripod ──────────────────────
 
 type OrderBook struct {
@@ -103,8 +114,9 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 		return fmt.Errorf("failed to insert order: %w", err)
 	}
 
-	ctx.EmitStringEvent("order created: %s %s %s price=%s owner=%s",
-		string(req.ID), req.Type.String(), req.Subject.String(), order.Price.String(), req.Owner)
+	if err := ctx.EmitJsonEvent(&OrderEvent{EventType: "created", Order: order}); err != nil {
+		return fmt.Errorf("failed to emit order created event: %w", err)
+	}
 
 	// Attempt to match
 	matched, err := ot.matchOrder(order)
@@ -113,7 +125,9 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	}
 
 	if matched != nil {
-		ctx.EmitStringEvent("order matched: %s <-> %s", order.ID, matched.ID)
+		if err := ctx.EmitJsonEvent(&OrderEvent{EventType: "matched", Order: order, Matched: matched}); err != nil {
+			return fmt.Errorf("failed to emit order matched event: %w", err)
+		}
 	}
 
 	return nil

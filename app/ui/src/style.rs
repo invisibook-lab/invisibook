@@ -350,6 +350,43 @@ body {
     color: var(--white);
 }
 
+/* ── Balance Section ── */
+.balance-section {
+    display: flex;
+    flex-direction: column;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    gap: 2px;
+}
+
+.balance-header {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-bottom: 2px;
+}
+
+.balance-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 2px 0;
+}
+
+.balance-token {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--white);
+}
+
+.balance-value {
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.balance-loading { color: var(--text-secondary); }
+.balance-none    { color: var(--text-secondary); }
+.balance-ok      { color: #4caf50; }
+
 /* ── Submit Button ── */
 .submit-btn {
     padding: 12px;

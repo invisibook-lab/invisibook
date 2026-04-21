@@ -14,6 +14,8 @@ toml = "0.8"
 dirs = "6"
 hex = "0.4"
 clap = { version = "4", features = ["derive"] }
+tokio-tungstenite = { version = "0.23", features = ["connect"] }
+futures-util = "0.3"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 light-poseidon = "0.2"

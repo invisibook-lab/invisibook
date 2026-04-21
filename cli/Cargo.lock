@@ -1105,6 +1105,7 @@ dependencies = [
  "ark-ff",
  "clap",
  "dirs",
+ "futures-util",
  "hex",
  "light-poseidon",
  "rand 0.9.4",
@@ -1112,6 +1113,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "tokio-tungstenite",
  "toml",
  "yu-sdk",
 ]

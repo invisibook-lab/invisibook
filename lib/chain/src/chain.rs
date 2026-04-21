@@ -141,8 +141,40 @@ struct CashItemResponse {
 
 // ────────────────────── Chain Client ──────────────────────
 
+// ────────────────────── WebSocket Event Types ──────────────────────
+
+/// Raw event from the yu Receipt WebSocket stream.
+/// `value` is a base64-encoded JSON payload (Go encodes []byte as base64).
+#[derive(Deserialize)]
+struct YuEvent {
+    value: Vec<u8>, // serde_json auto-decodes base64 → raw bytes
+}
+
+/// Partial Receipt structure — only the fields we care about.
+#[derive(Deserialize)]
+struct YuReceipt {
+    tripod_name: Option<String>,
+    writing_name: Option<String>,
+    #[serde(default)]
+    events: Vec<YuEvent>,
+    #[serde(default)]
+    error: String,
+}
+
+/// JSON event emitted by Go `SendOrder` via `ctx.EmitJsonEvent`.
+#[derive(Deserialize)]
+struct ChainOrderEvent {
+    #[allow(dead_code)]
+    event_type: String,
+    order: QueryOrderItem,
+    matched: Option<QueryOrderItem>,
+}
+
+// ────────────────────── Chain Client ──────────────────────
+
 pub struct ChainClient {
     client: YuClient,
+    ws_url: String,
 }
 
 impl ChainClient {
@@ -151,7 +183,10 @@ impl ChainClient {
     /// `ws_url`   example: "ws://localhost:8999"
     pub fn new(http_url: &str, ws_url: &str, keypair: KeyPair) -> Self {
         let client = YuClient::new(http_url, ws_url).with_keypair(keypair);
-        Self { client }
+        Self {
+            client,
+            ws_url: ws_url.trim_end_matches('/').to_string(),
+        }
     }
 
     /// Sends a new order to the chain (writing request to OrderBook.SendOrder).
@@ -320,6 +355,59 @@ impl ChainClient {
         self.client
             .write_chain("account", "Withdraw", &params, 100, 0)
             .await
+    }
+
+    /// Subscribe to on-chain order events via WebSocket.
+    ///
+    /// Returns an `mpsc::Receiver<Order>` that yields confirmed orders as they
+    /// are included in blocks, plus a `JoinHandle` for the background task.
+    /// Each `SendOrder` tx emits one "created" event (and optionally one
+    /// "matched" event) — both are forwarded as separate `Order` values.
+    pub async fn subscribe_order_events(
+        &self,
+    ) -> Result<
+        (tokio::sync::mpsc::Receiver<Order>, tokio::task::JoinHandle<()>),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::connect_async;
+
+        let url = format!("{}/subscribe/results", self.ws_url);
+        let (ws_stream, _) = connect_async(url.as_str()).await?;
+        let (_, mut read) = ws_stream.split();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+
+        let handle = tokio::spawn(async move {
+            while let Some(Ok(msg)) = read.next().await {
+                let Ok(text) = msg.into_text() else { continue };
+                let Ok(receipt) = serde_json::from_str::<YuReceipt>(&text) else {
+                    continue;
+                };
+                if receipt.tripod_name.as_deref() != Some("orderbook") {
+                    continue;
+                }
+                if receipt.writing_name.as_deref() != Some("SendOrder") {
+                    continue;
+                }
+                if !receipt.error.is_empty() {
+                    continue; // tx failed on-chain, ignore
+                }
+                for event in receipt.events {
+                    let Ok(chain_event) =
+                        serde_json::from_slice::<ChainOrderEvent>(&event.value)
+                    else {
+                        continue;
+                    };
+                    let _ = tx.send(query_item_to_order(chain_event.order)).await;
+                    if let Some(matched) = chain_event.matched {
+                        let _ = tx.send(query_item_to_order(matched)).await;
+                    }
+                }
+            }
+        });
+
+        Ok((rx, handle))
     }
 }
 

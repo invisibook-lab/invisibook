@@ -24,10 +24,39 @@ pub fn render_ui(f: &mut Frame, app: &App) {
     let input_line_y: usize;
 
     // ── Title ──
-    lines.push(Line::from(Span::styled(
-        "  INVISIBOOK Order Book  ",
-        Style::default().fg(WHITE).bg(PURPLE).bold(),
-    )));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "  INVISIBOOK Order Book  ",
+            Style::default().fg(WHITE).bg(PURPLE).bold(),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            if app.my_address.is_empty() { "not connected".to_string() } else { format!("addr: {}", &app.my_address) },
+            Style::default().fg(DIM_GRAY),
+        ),
+    ]));
+
+    // ── Balances by TokenID ──
+    if !app.balances.is_empty() {
+        let mut sorted_tokens: Vec<(&String, &usize)> = app.balances.iter().collect();
+        sorted_tokens.sort_by_key(|(t, _)| t.as_str());
+        let mut balance_spans: Vec<Span> = vec![
+            Span::styled("  Balances  ", Style::default().fg(GOLD).bold()),
+        ];
+        for (i, (token, active)) in sorted_tokens.iter().enumerate() {
+            if i > 0 {
+                balance_spans.push(Span::styled(" │ ", Style::default().fg(DIM_GRAY)));
+            }
+            let count_style = if **active > 0 {
+                Style::default().fg(GREEN)
+            } else {
+                Style::default().fg(DIM_GRAY)
+            };
+            balance_spans.push(Span::styled(format!("{}: ", token), Style::default().fg(WHITE)));
+            balance_spans.push(Span::styled(format!("{} active", active), count_style));
+        }
+        lines.push(Line::from(balance_spans));
+    }
     lines.push(Line::from(""));
 
     if app.orders.is_empty() {

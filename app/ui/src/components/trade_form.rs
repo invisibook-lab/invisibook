@@ -32,6 +32,27 @@ pub fn TradeForm(
     let t1_display = token1.read().clone();
     let t2_display = token2.read().clone();
 
+    // ── Balance: fetch active cash for both tokens in the pair ──
+    let balances = use_resource(move || {
+        let client = chain_client.read().clone();
+        let addr = my_address.read().clone();
+        let t1 = token1.read().clone();
+        let t2 = token2.read().clone();
+        async move {
+            let Some(c) = client else { return vec![] };
+            let mut result = Vec::new();
+            if let Ok(acc) = c.get_account(&addr, &t1).await {
+                result.push(acc);
+            }
+            if t2 != t1 {
+                if let Ok(acc) = c.get_account(&addr, &t2).await {
+                    result.push(acc);
+                }
+            }
+            result
+        }
+    });
+
     let price_val: f64 = price_input.read().parse().unwrap_or(0.0);
     let amount_val: f64 = amount_input.read().parse().unwrap_or(0.0);
     let total = price_val * amount_val;
@@ -43,6 +64,22 @@ pub fn TradeForm(
 
     let is_submitting = *submitting.read();
     let can_submit = price_val > 0.0 && amount_val > 0.0 && !is_submitting;
+
+    // ── Precompute balance data (per token) ──
+    let balances_loading = balances.read().is_none();
+    let balances_data: Vec<(String, usize)> = {
+        let read = balances.read();
+        match &*read {
+            None => vec![],
+            Some(accounts) => accounts
+                .iter()
+                .map(|acc| {
+                    let active = acc.cash.iter().filter(|c| c.status == "Active").count();
+                    (acc.token.clone(), active)
+                })
+                .collect(),
+        }
+    };
 
     // ── Submit handler ──
     let on_submit = move |_| {
@@ -93,57 +130,35 @@ pub fn TradeForm(
 
         let client = chain_client.read().clone();
 
-        if let Some(client) = client {
-            // Async send to chain
-            submitting.set(true);
-            let amount_str_clone = amount_str.clone();
-            spawn(async move {
-                match client.send_order(&order).await {
-                    Ok(()) => {
-                        let order_id = order.id.clone();
-                        {
-                            let mut o = orders.write();
-                            o.push(order);
-                            orderbook::sort_orders(&mut *o);
-                        }
-                        own_order_ids
-                            .write()
-                            .insert(order_id, amount_str_clone);
-                        expanded.set(None);
-                        message.set(Some((
-                            format!(
-                                "✓ {} {}/{} price {} amount {}",
-                                trade_type, t1, t2, price_str, amount_str
-                            ),
-                            false,
-                        )));
-                    }
-                    Err(e) => {
-                        message.set(Some((format!("✗ Send order failed: {}", e), true)));
-                    }
+        let Some(client) = client else {
+            message.set(Some(("✗ Not connected to chain".into(), true)));
+            return;
+        };
+
+        submitting.set(true);
+        let amount_str_clone = amount_str.clone();
+        spawn(async move {
+            match client.send_order(&order).await {
+                Ok(()) => {
+                    // Order accepted by chain; wait for WS event to confirm.
+                    // Store plain amount so the order book can display it once confirmed.
+                    // The order ID is not known yet (empty), so we use the amount_str
+                    // as a pending marker keyed by a temporary token.
+                    own_order_ids
+                        .write()
+                        .insert(order.id.clone(), amount_str_clone);
+                    expanded.set(None);
+                    message.set(Some((
+                        format!("⏳ {} {}/{} submitting to chain...", trade_type, t1, t2),
+                        false,
+                    )));
                 }
-                submitting.set(false);
-            });
-        } else {
-            // No chain client — local only
-            let order_id = order.id.clone();
-            {
-                let mut o = orders.write();
-                o.push(order);
-                orderbook::sort_orders(&mut *o);
+                Err(e) => {
+                    message.set(Some((format!("✗ Send order failed: {e}"), true)));
+                }
             }
-            own_order_ids
-                .write()
-                .insert(order_id, amount_str.clone());
-            expanded.set(None);
-            message.set(Some((
-                format!(
-                    "✓ {} {}/{} price {} amount {} (local)",
-                    trade_type, t1, t2, price_str, amount_str
-                ),
-                false,
-            )));
-        }
+            submitting.set(false);
+        });
 
         price_input.set(String::new());
         amount_input.set(String::new());
@@ -226,6 +241,30 @@ pub fn TradeForm(
                 div { class: "total-row",
                     span { class: "total-label", "Total" }
                     span { class: "total-value", "{total_str}" }
+                }
+
+                // Balance - grouped by TokenID
+                div { class: "balance-section",
+                    span { class: "balance-header", "Available" }
+                    if balances_loading {
+                        div { class: "balance-row",
+                            span { class: "balance-loading", "..." }
+                        }
+                    } else if balances_data.is_empty() {
+                        div { class: "balance-row",
+                            span { class: "balance-none", "—" }
+                        }
+                    } else {
+                        for (token, active) in balances_data.iter() {
+                            div { key: "{token}", class: "balance-row",
+                                span { class: "balance-token", "{token}" }
+                                span {
+                                    class: if *active > 0 { "balance-value balance-ok" } else { "balance-value balance-none" },
+                                    "{active} active cash"
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Submit

@@ -43,6 +43,10 @@ fn App() -> Element {
             }
         }
     };
+
+    // Clone for the WS coroutine before moving into the signal
+    let client_for_ws = initial_client.clone();
+
     let client: Signal<Option<Arc<ChainClient>>> = use_signal(|| initial_client);
     let my_address: Signal<String> = use_signal(|| initial_address);
 
@@ -50,9 +54,9 @@ fn App() -> Element {
     let own_order_ids = use_signal(HashMap::<OrderID, String>::new);
     let selected = use_signal(|| None::<usize>);
     let expanded = use_signal(|| None::<usize>);
-    let message = use_signal(|| None::<(String, bool)>);
+    let mut message = use_signal(|| None::<(String, bool)>);
 
-    // ── Fetch orders from chain on mount ──
+    // ── Fetch initial order list from chain ──
     let _fetch = use_resource(move || {
         let client = client.read().clone();
         async move {
@@ -62,22 +66,38 @@ fn App() -> Element {
                         orderbook::sort_orders(&mut chain_orders);
                         orders.set(chain_orders);
                     }
-                    Err(e) => {
-                        eprintln!("Failed to fetch orders: {}", e);
-                        // Fall back to sample orders
-                        let mut o = orderbook::sample_orders();
-                        orderbook::sort_orders(&mut o);
-                        orders.set(o);
-                    }
+                    Err(e) => eprintln!("Failed to fetch orders: {}", e),
                 }
-            } else {
-                // No chain client — use sample data
-                let mut o = orderbook::sample_orders();
-                orderbook::sort_orders(&mut o);
-                orders.set(o);
             }
         }
     });
+
+    // ── Background coroutine: subscribe to chain events via WebSocket ──
+    // When SendOrder is confirmed on-chain, upsert the order into the book.
+    use_coroutine(move |_: UnboundedReceiver<()>| {
+        // Clone here so the FnMut closure can yield the value into the async block.
+        let c = client_for_ws.clone();
+        async move {
+        let Some(c) = c else { return };
+        let Ok((mut rx, _handle)) = c.subscribe_order_events().await else {
+            eprintln!("Failed to subscribe to chain events");
+            return;
+        };
+        while let Some(order) = rx.recv().await {
+            let short = order.id[..order.id.len().min(7)].to_string();
+            {
+                let mut o = orders.write();
+                if let Some(existing) = o.iter_mut().find(|x| x.id == order.id) {
+                    *existing = order;
+                } else {
+                    o.push(order);
+                    orderbook::sort_orders(&mut *o);
+                }
+            }
+            message.set(Some((format!("✓ Order {short} confirmed on chain"), false)));
+        }
+        } // end async move
+    }); // end use_coroutine
 
     let (t1, t2) = {
         let list = orders.read();
