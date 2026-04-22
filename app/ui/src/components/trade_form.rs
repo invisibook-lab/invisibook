@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 
+use invisibook_lib::cash_store::CashStore;
 use invisibook_lib::chain::ChainClient;
 use invisibook_lib::orderbook;
 use invisibook_lib::types::*;
@@ -18,6 +19,7 @@ pub fn TradeForm(
     message: Signal<Option<(String, bool)>>,
     chain_client: Signal<Option<Arc<ChainClient>>>,
     my_address: Signal<String>,
+    cash_store: Signal<CashStore>,
 ) -> Element {
     // ── Form state ──
     let mut side = use_signal(|| TradeType::Buy);
@@ -25,33 +27,13 @@ pub fn TradeForm(
     let mut token2 = use_signal(|| "USDT".to_string());
     let mut price_input = use_signal(String::new);
     let mut amount_input = use_signal(String::new);
+    let mut fee_input = use_signal(|| "1".to_string());
     let mut submitting = use_signal(|| false);
 
     // ── Derived ──
     let current_side = *side.read();
     let t1_display = token1.read().clone();
     let t2_display = token2.read().clone();
-
-    // ── Balance: fetch active cash for both tokens in the pair ──
-    let balances = use_resource(move || {
-        let client = chain_client.read().clone();
-        let addr = my_address.read().clone();
-        let t1 = token1.read().clone();
-        let t2 = token2.read().clone();
-        async move {
-            let Some(c) = client else { return vec![] };
-            let mut result = Vec::new();
-            if let Ok(acc) = c.get_account(&addr, &t1).await {
-                result.push(acc);
-            }
-            if t2 != t1 {
-                if let Ok(acc) = c.get_account(&addr, &t2).await {
-                    result.push(acc);
-                }
-            }
-            result
-        }
-    });
 
     let price_val: f64 = price_input.read().parse().unwrap_or(0.0);
     let amount_val: f64 = amount_input.read().parse().unwrap_or(0.0);
@@ -65,20 +47,22 @@ pub fn TradeForm(
     let is_submitting = *submitting.read();
     let can_submit = price_val > 0.0 && amount_val > 0.0 && !is_submitting;
 
-    // ── Precompute balance data (per token) ──
-    let balances_loading = balances.read().is_none();
-    let balances_data: Vec<(String, usize)> = {
-        let read = balances.read();
-        match &*read {
-            None => vec![],
-            Some(accounts) => accounts
-                .iter()
-                .map(|acc| {
-                    let active = acc.cash.iter().filter(|c| c.status == "Active").count();
-                    (acc.token.clone(), active)
-                })
-                .collect(),
+    // ── Balance from CashStore: (token, active_count, locked_count) ──
+    // Group all local cash records by token and count by status.
+    let balances_data: Vec<(String, usize, usize)> = {
+        let store = cash_store.read();
+        let mut map: HashMap<String, (usize, usize)> = HashMap::new();
+        for rec in store.records() {
+            let entry = map.entry(rec.token.clone()).or_default();
+            if rec.status == CASH_ACTIVE {
+                entry.0 += 1;
+            } else if rec.status == CASH_LOCKED {
+                entry.1 += 1;
+            }
         }
+        let mut result: Vec<_> = map.into_iter().map(|(t, (a, l))| (t, a, l)).collect();
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        result
     };
 
     // ── Submit handler ──
@@ -104,9 +88,33 @@ pub fn TradeForm(
             }
         };
 
+        let fee_str = fee_input.read().clone();
+        let fee = if fee_str.trim().is_empty() { "1".to_string() } else { fee_str };
+
         let trade_type = *side.read();
         let t1 = token1.read().clone();
         let t2 = token2.read().clone();
+
+        // Buy → pays with token2; Sell → spends token1
+        let input_token = if trade_type == TradeType::Buy { t2.clone() } else { t1.clone() };
+
+        // Collect active cash IDs for the input token from the local CashStore
+        let input_cash_ids: Vec<String> = {
+            let store = cash_store.read();
+            store
+                .records()
+                .iter()
+                .filter(|r| r.token == input_token && r.status == CASH_ACTIVE)
+                .map(|r| r.cash_id.clone())
+                .collect()
+        };
+
+        if input_cash_ids.is_empty() {
+            message.set(Some((format!("✗ No active {} cash available", input_token), true)));
+            return;
+        }
+
+        let order_id = orderbook::compute_order_id(&input_cash_ids);
 
         let subject = TradePair {
             token1: t1.clone(),
@@ -116,14 +124,14 @@ pub fn TradeForm(
         let owner = my_address.read().clone();
 
         let order = Order {
-            id: String::new(),
+            id: order_id,
             trade_type,
             subject,
             price: Some(price),
             amount,
             owner,
-            input_cash_ids: Vec::new(),
-            handling_fee: vec!["0".to_string()],
+            input_cash_ids,
+            handling_fee: vec![fee.clone()],
             status: OrderStatus::Pending,
             match_order: None,
         };
@@ -140,10 +148,6 @@ pub fn TradeForm(
         spawn(async move {
             match client.send_order(&order).await {
                 Ok(()) => {
-                    // Order accepted by chain; wait for WS event to confirm.
-                    // Store plain amount so the order book can display it once confirmed.
-                    // The order ID is not known yet (empty), so we use the amount_str
-                    // as a pending marker keyed by a temporary token.
                     own_order_ids
                         .write()
                         .insert(order.id.clone(), amount_str_clone);
@@ -162,6 +166,7 @@ pub fn TradeForm(
 
         price_input.set(String::new());
         amount_input.set(String::new());
+        fee_input.set("1".to_string());
     };
 
     rsx! {
@@ -237,30 +242,61 @@ pub fn TradeForm(
                     }
                 }
 
+                // Handling Fee
+                div { class: "input-group",
+                    span { class: "input-label", "Fee" }
+                    div { class: "input-wrapper",
+                        input {
+                            class: "input-field",
+                            r#type: "number",
+                            min: "0",
+                            placeholder: "1",
+                            value: "{fee_input}",
+                            oninput: move |evt: Event<FormData>| fee_input.set(evt.value()),
+                        }
+                    }
+                }
+
                 // Total
                 div { class: "total-row",
                     span { class: "total-label", "Total" }
                     span { class: "total-value", "{total_str}" }
                 }
 
-                // Balance - grouped by TokenID
+                // Active Token
                 div { class: "balance-section",
-                    span { class: "balance-header", "Available" }
-                    if balances_loading {
-                        div { class: "balance-row",
-                            span { class: "balance-loading", "..." }
-                        }
-                    } else if balances_data.is_empty() {
+                    span { class: "balance-header", "Active Token" }
+                    if balances_data.is_empty() {
                         div { class: "balance-row",
                             span { class: "balance-none", "—" }
                         }
                     } else {
-                        for (token, active) in balances_data.iter() {
-                            div { key: "{token}", class: "balance-row",
+                        for (token, active, _locked) in balances_data.iter() {
+                            div { key: "active-{token}", class: "balance-row",
                                 span { class: "balance-token", "{token}" }
                                 span {
                                     class: if *active > 0 { "balance-value balance-ok" } else { "balance-value balance-none" },
-                                    "{active} active cash"
+                                    "{active} cash"
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Locked Token
+                div { class: "balance-section",
+                    span { class: "balance-header", "Locked Token" }
+                    if balances_data.is_empty() {
+                        div { class: "balance-row",
+                            span { class: "balance-none", "—" }
+                        }
+                    } else {
+                        for (token, _active, locked) in balances_data.iter() {
+                            div { key: "locked-{token}", class: "balance-row",
+                                span { class: "balance-token", "{token}" }
+                                span {
+                                    class: if *locked > 0 { "balance-value balance-locked" } else { "balance-value balance-none" },
+                                    "{locked} cash"
                                 }
                             }
                         }

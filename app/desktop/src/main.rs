@@ -4,11 +4,12 @@ use std::sync::Arc;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 
+use invisibook_lib::cash_store::CashStore;
 use invisibook_lib::chain::ChainClient;
 use invisibook_lib::config::ClientConfig;
 use invisibook_lib::orderbook;
 use invisibook_lib::types::*;
-use invisibook_ui::components::{Header, OrderBook, Toast, TradeForm};
+use invisibook_ui::components::{Header, KeyImport, OrderBook, Toast, TradeForm};
 use invisibook_ui::style::CSS;
 
 fn main() {
@@ -55,6 +56,9 @@ fn App() -> Element {
     let selected = use_signal(|| None::<usize>);
     let expanded = use_signal(|| None::<usize>);
     let mut message = use_signal(|| None::<(String, bool)>);
+    let cash_store = use_signal(|| CashStore::load(CashStore::default_path()));
+    let mut show_key_import = use_signal(|| false);
+    let key_imported = use_signal(|| false);
 
     // ── Fetch initial order list from chain ──
     let _fetch = use_resource(move || {
@@ -111,12 +115,38 @@ fn App() -> Element {
     rsx! {
         style { {CSS} }
         div { class: "app",
-            Header { token1: t1, token2: t2 }
+            div { class: "app-topbar",
+                Header { token1: t1, token2: t2 }
+                if !*key_imported.read() {
+                    button {
+                        class: "import-key-btn",
+                        onclick: move |_| show_key_import.set(true),
+                        "Import Key"
+                    }
+                } else {
+                    div { class: "address-badge",
+                        {
+                            let addr = my_address.read();
+                            let n = addr.len();
+                            if n >= 10 { format!("{}...{}", &addr[..10], &addr[n-4..]) }
+                            else { addr.clone() }
+                        }
+                    }
+                }
+            }
             div { class: "main",
                 OrderBook { orders, own_order_ids, selected, expanded }
-                TradeForm { orders, own_order_ids, expanded, message, chain_client: client, my_address }
+                TradeForm { orders, own_order_ids, expanded, message, chain_client: client, my_address, cash_store }
             }
             Toast { message }
+            KeyImport {
+                chain_client: client,
+                my_address,
+                message,
+                cash_store,
+                visible: show_key_import,
+                key_imported,
+            }
         }
     }
 }

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 
@@ -27,11 +28,20 @@ func NewAccount(cfg *AccountConfig) *Account {
 	return a
 }
 
+// genesisCashID returns a deterministic cash ID for a genesis account.
+// ID = first 16 bytes of SHA256("genesis:" + addr + ":" + token) as hex (32 chars).
+// This ensures the same cash IDs on every fresh chain start, making them
+// safe to pre-populate in test cash files (tests/alice_cash.json, etc.).
+func genesisCashID(addr, token string) string {
+	h := sha256.Sum256([]byte("genesis:" + addr + ":" + token))
+	return fmt.Sprintf("%x", h[:16])
+}
+
 // InitChain seeds genesis accounts with pre-funded Cash at chain startup.
 func (a *Account) InitChain(block *types.Block) {
 	for _, ga := range a.cfg.GenesisAccounts {
 		cash := &Cash{
-			ID:      generateCashID(),
+			ID:      genesisCashID(ga.Address, ga.Token),
 			Owner:   ga.Address,
 			Token:   TokenID(ga.Token),
 			Amount:  CipherText(ga.Amount),
@@ -65,7 +75,7 @@ func (a *Account) GetAccount(ctx *context.ReadContext) {
 		return
 	}
 
-	cash, err := a.FindActiveCash(req.Address, req.Token)
+	cash, err := a.FindNonSpentCash(req.Address, req.Token)
 	if err != nil {
 		ctx.Json(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

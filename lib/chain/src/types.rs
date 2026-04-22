@@ -72,6 +72,10 @@ pub struct CashOutput {
 
 // ────────────────────── Account / Cash ──────────────────────
 
+// CashStatus values: 0 = Active, 1 = Locked, 2 = Spent
+pub const CASH_ACTIVE: u8 = 0;
+pub const CASH_LOCKED: u8 = 1;
+
 #[derive(Debug, Clone)]
 pub struct CashItem {
     pub id: String,
@@ -79,7 +83,7 @@ pub struct CashItem {
     pub token: TokenID,
     pub amount: CipherText,
     pub zk_proof: String,
-    pub status: String,
+    pub status: u8,
     pub by: String,
 }
 

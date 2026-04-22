@@ -1,0 +1,16 @@
+[
+  {
+    "cash_id": "66fca8b45dee877c067f21a71ae9a6aa",
+    "token": "ETH",
+    "amount": 1000,
+    "random": "",
+    "status": 0
+  },
+  {
+    "cash_id": "ab8ce747f4a3564da54de5e5a7ddad1d",
+    "token": "USDT",
+    "amount": 500000,
+    "random": "",
+    "status": 0
+  }
+]

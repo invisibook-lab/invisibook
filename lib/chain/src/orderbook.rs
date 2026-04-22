@@ -21,13 +21,13 @@ pub fn compute_order_id(input_cash_ids: &[String]) -> OrderID {
     hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-// ────────────────────── Cipher Mock ──────────────────────
+// ────────────────────── Cipher ──────────────────────
 
-/// Encrypts the plaintext amount as poseidon(amount, random) where random
-/// is a locally generated 256-bit value. This hides the actual amount on-chain.
-/// Uses Poseidon (BN254) on desktop; falls back to SHA-256 on Android.
-pub fn encrypt_amount(plaintext: &str) -> CipherText {
-    // Generate a 256-bit random value
+/// Core implementation: returns (ciphertext, amount_u64, random_bytes).
+/// chain stores amount = poseidon(amount_plaintext, random);
+/// plaintext and random must be kept off-chain by the client.
+fn encrypt_amount_inner(plaintext: &str) -> (CipherText, u64, [u8; 32]) {
+    let amount: u64 = plaintext.parse().unwrap_or(0);
     let mut random_bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut random_bytes);
 
@@ -37,7 +37,6 @@ pub fn encrypt_amount(plaintext: &str) -> CipherText {
         use ark_ff::{BigInteger, PrimeField};
         use light_poseidon::{Poseidon, PoseidonHasher};
 
-        let amount: u64 = plaintext.parse().unwrap_or(0);
         let result = (|| -> Option<String> {
             let amount_fr = Fr::from(amount);
             let random_fr = Fr::from_be_bytes_mod_order(&random_bytes);
@@ -48,7 +47,7 @@ pub fn encrypt_amount(plaintext: &str) -> CipherText {
         })();
 
         if let Some(hex) = result {
-            return hex;
+            return (hex, amount, random_bytes);
         }
     }
 
@@ -56,7 +55,22 @@ pub fn encrypt_amount(plaintext: &str) -> CipherText {
     let mut hasher = Sha256::new();
     hasher.update(plaintext.as_bytes());
     hasher.update(random_bytes);
-    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+    let cipher = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+    (cipher, amount, random_bytes)
+}
+
+/// Encrypts the plaintext amount. Use `encrypt_amount_with_info` when you
+/// need to persist the (amount, random) for later cash verification.
+pub fn encrypt_amount(plaintext: &str) -> CipherText {
+    encrypt_amount_inner(plaintext).0
+}
+
+/// Encrypts the plaintext amount and returns `(ciphertext, amount, random_hex)`
+/// so callers can store the cash record locally.
+pub fn encrypt_amount_with_info(plaintext: &str) -> (CipherText, u64, String) {
+    let (cipher, amount, random_bytes) = encrypt_amount_inner(plaintext);
+    let random_hex = hex::encode(random_bytes);
+    (cipher, amount, random_hex)
 }
 
 // ────────────────────── Order Helpers ──────────────────────

@@ -134,7 +134,7 @@ struct CashItemResponse {
     #[serde(default)]
     zk_proof: String,
     #[serde(default)]
-    status: String,
+    status: u8,
     #[serde(default)]
     by: String,
 }

@@ -28,6 +28,7 @@ func (s CashStatus) String() string {
 	}
 }
 
+
 // ────────────────────── Domain Models ──────────────────────
 
 // Cash is the domain model for a single transaction output.

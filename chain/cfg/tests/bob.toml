@@ -1,0 +1,16 @@
+# Bob's test account configuration for Invisibook
+#
+# Usage:
+#   CLI:     invisibook --config tests/bob.toml
+#   Desktop: Import private key below, then import tests/bob_cash.json
+#
+# Address: 0x6a3803d5f059902a1c6dafbc9ba4729212f7caac
+# Genesis balances: 1000 ETH, 500000 USDT
+
+[chain]
+http_url = "http://localhost:7999"
+ws_url   = "ws://localhost:8999"
+chain_id = 1926
+
+[keypair]
+private_key = "0202020202020202020202020202020202020202020202020202020202020202"

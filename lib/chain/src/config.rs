@@ -128,6 +128,11 @@ impl ClientConfig {
         Ok(KeyPair::from_ed25519_bytes(&seed))
     }
 
+    /// Build a KeyPair directly from a 32-byte seed (for key import use).
+    pub fn keypair_from_seed(seed: &[u8; 32]) -> Result<KeyPair, Box<dyn std::error::Error>> {
+        Ok(KeyPair::from_ed25519_bytes(seed))
+    }
+
     // ── internal ──
 
     fn load_file(path: Option<&str>) -> Option<Self> {

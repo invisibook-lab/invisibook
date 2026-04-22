@@ -386,6 +386,7 @@ body {
 .balance-loading { color: var(--text-secondary); }
 .balance-none    { color: var(--text-secondary); }
 .balance-ok      { color: #4caf50; }
+.balance-locked  { color: var(--gold); }
 
 /* ── Submit Button ── */
 .submit-btn {
@@ -417,6 +418,172 @@ body {
     opacity: 0.35;
     cursor: not-allowed;
 }
+
+/* ── Top Bar ── */
+.app-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-card);
+}
+
+.import-key-btn {
+    margin-right: 16px;
+    padding: 6px 14px;
+    background: transparent;
+    border: 1px solid var(--purple);
+    border-radius: 6px;
+    color: var(--purple-light);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    letter-spacing: 0.3px;
+    transition: background 0.15s, color 0.15s;
+    white-space: nowrap;
+}
+.import-key-btn:hover {
+    background: rgba(125, 86, 244, 0.15);
+    color: #fff;
+}
+
+.address-badge {
+    margin-right: 16px;
+    padding: 5px 12px;
+    background: rgba(14, 203, 129, 0.08);
+    border: 1px solid rgba(14, 203, 129, 0.3);
+    border-radius: 6px;
+    color: var(--green);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+/* ── Modal ── */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+    backdrop-filter: blur(2px);
+}
+
+.modal {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 28px 28px 24px;
+    width: 420px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    animation: modalIn 0.18s ease-out;
+}
+
+@keyframes modalIn {
+    from { opacity: 0; transform: translateY(-12px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0)    scale(1);    }
+}
+
+.modal-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--white);
+    letter-spacing: 0.3px;
+}
+
+.modal-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 4px;
+}
+
+.modal-actions .submit-btn {
+    flex: 1;
+    margin-top: 0;
+    padding: 10px;
+    font-size: 14px;
+}
+
+/* The modal uses input-field directly (no wrapper) */
+.modal .input-field {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 12px;
+    width: 100%;
+    transition: border-color 0.15s;
+}
+.modal .input-field:focus { border-color: var(--gold); }
+
+/* ── Cash File Drop Zone ── */
+.drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: 6px;
+    padding: 18px 16px;
+    text-align: center;
+    cursor: default;
+    transition: border-color 0.15s, background 0.15s;
+    min-height: 70px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.drop-zone.drag-over {
+    border-color: var(--purple);
+    background: rgba(125, 86, 244, 0.08);
+}
+
+.drop-hint {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-third);
+    font-size: 13px;
+    pointer-events: none;
+}
+
+.drop-hint-icon { font-size: 22px; line-height: 1; }
+.drop-hint-text { font-size: 12px; }
+
+.drop-content {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+}
+
+.drop-filename {
+    flex: 1;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    color: var(--green);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: left;
+}
+
+.drop-clear {
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1;
+    padding: 2px 7px;
+    cursor: pointer;
+    transition: border-color 0.1s, color 0.1s;
+}
+.drop-clear:hover { border-color: var(--red); color: var(--red); }
 
 /* ── Status Toast ── */
 .toast {

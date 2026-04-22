@@ -11,12 +11,45 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/invisibook-lab/invisibook/core"
 )
 
 const (
-	httpURL = "http://localhost:7999"
+	httpURL  = "http://localhost:7999"
+	testsDir = "../cfg/tests"
 )
+
+// ────────────────────── Config loading ──────────────────────
+
+type accountConfig struct {
+	Chain   struct {
+		HTTPURL string `toml:"http_url"`
+		WSURL   string `toml:"ws_url"`
+		ChainID uint64 `toml:"chain_id"`
+	} `toml:"chain"`
+	Keypair struct {
+		PrivateKey string `toml:"private_key"`
+	} `toml:"keypair"`
+}
+
+func loadAccountConfig(t *testing.T, name string) accountConfig {
+	t.Helper()
+	path := fmt.Sprintf("%s/%s.toml", testsDir, name)
+	var cfg accountConfig
+	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+		t.Fatalf("failed to load %s: %v", path, err)
+	}
+	return cfg
+}
+
+// deriveAddress reads the address comment from the toml file.
+// Since we can't run the Rust SDK from Go, we use the known addresses
+// derived from the keypair seeds (see tests/alice.toml and tests/bob.toml).
+var knownAddresses = map[string]string{
+	"alice": "0x34750f98bd59fcfc946da45aaabe933be154a4b5",
+	"bob":   "0x6a3803d5f059902a1c6dafbc9ba4729212f7caac",
+}
 
 // ────────────────────── yu HTTP helpers ──────────────────────
 
@@ -75,6 +108,14 @@ func waitBlock() {
 // ────────────────────── Test ──────────────────────
 
 func TestFullOrderLifecycle(t *testing.T) {
+	// Load test account configs
+	_ = loadAccountConfig(t, "alice")
+	_ = loadAccountConfig(t, "bob")
+	aliceAddr := knownAddresses["alice"]
+	bobAddr := knownAddresses["bob"]
+	t.Logf("alice address: %s", aliceAddr)
+	t.Logf("bob   address: %s", bobAddr)
+
 	// --- Kill any old chain process on our ports ---
 	exec.Command("bash", "-c", "lsof -ti:7999 -ti:8999 -ti:8887 | xargs kill -9 2>/dev/null").Run()
 	time.Sleep(1 * time.Second)
@@ -101,7 +142,7 @@ func TestFullOrderLifecycle(t *testing.T) {
 	// ═══════════════════ Step 1: Query genesis accounts ═══════════════════
 	t.Log("=== Step 1: Query genesis accounts ===")
 
-	aliceETH := getAccount(t, "alice", "ETH")
+	aliceETH := getAccount(t, aliceAddr, "ETH")
 	t.Logf("Alice ETH cash: %d items", len(aliceETH))
 	if len(aliceETH) != 1 {
 		t.Fatalf("expected 1 ETH cash for alice, got %d", len(aliceETH))
@@ -109,7 +150,7 @@ func TestFullOrderLifecycle(t *testing.T) {
 	aliceETHCashID := aliceETH[0].ID
 	t.Logf("  cash_id=%s amount=%s", aliceETHCashID, aliceETH[0].Amount)
 
-	bobUSDT := getAccount(t, "bob", "USDT")
+	bobUSDT := getAccount(t, bobAddr, "USDT")
 	t.Logf("Bob USDT cash: %d items", len(bobUSDT))
 	if len(bobUSDT) != 1 {
 		t.Fatalf("expected 1 USDT cash for bob, got %d", len(bobUSDT))
@@ -129,7 +170,7 @@ func TestFullOrderLifecycle(t *testing.T) {
 		"subject":        map[string]string{"token1": "ETH", "token2": "USDT"},
 		"price":          3500,
 		"amount":         "1000",
-		"owner":          "alice",
+		"owner":          aliceAddr,
 		"input_cash_ids": []string{aliceETHCashID},
 		"handling_fee":   []string{"0"},
 	})
@@ -139,7 +180,7 @@ func TestFullOrderLifecycle(t *testing.T) {
 	waitBlock()
 
 	// Verify alice's ETH cash is now Locked
-	aliceETHAfterSell := getAccount(t, "alice", "ETH")
+	aliceETHAfterSell := getAccount(t, aliceAddr, "ETH")
 	t.Logf("Alice ETH after sell order: %d active cash", len(aliceETHAfterSell))
 	if len(aliceETHAfterSell) != 0 {
 		t.Fatalf("expected 0 active ETH cash for alice (should be locked), got %d", len(aliceETHAfterSell))
@@ -164,7 +205,7 @@ func TestFullOrderLifecycle(t *testing.T) {
 		"subject":        map[string]string{"token1": "ETH", "token2": "USDT"},
 		"price":          3500,
 		"amount":         "500000",
-		"owner":          "bob",
+		"owner":          bobAddr,
 		"input_cash_ids": []string{bobUSDTCashID},
 		"handling_fee":   []string{"0"},
 	})
@@ -198,8 +239,8 @@ func TestFullOrderLifecycle(t *testing.T) {
 	err = wrCall("orderbook", "SettleOrder", map[string]any{
 		"order_ids": []string{string(sellOrderID), string(buyOrderID)},
 		"outputs": []map[string]string{
-			{"owner": "bob", "token": "ETH", "amount": "1000"},      // bob gets ETH
-			{"owner": "alice", "token": "USDT", "amount": "500000"}, // alice gets USDT
+			{"owner": bobAddr, "token": "ETH", "amount": "1000"},      // bob gets ETH
+			{"owner": aliceAddr, "token": "USDT", "amount": "500000"}, // alice gets USDT
 		},
 		"zk_proof": "test-proof-skip",
 	})
@@ -225,7 +266,7 @@ func TestFullOrderLifecycle(t *testing.T) {
 	t.Log("=== Step 5: Verify final balances ===")
 
 	// Bob should now have ETH: genesis(1000) + settlement(1000) = 2 cash items
-	bobETHFinal := getAccount(t, "bob", "ETH")
+	bobETHFinal := getAccount(t, bobAddr, "ETH")
 	t.Logf("Bob ETH: %d cash items", len(bobETHFinal))
 	if len(bobETHFinal) != 2 {
 		t.Fatalf("expected bob to have 2 ETH cash (genesis + settlement), got %d", len(bobETHFinal))
@@ -235,7 +276,7 @@ func TestFullOrderLifecycle(t *testing.T) {
 	}
 
 	// Alice should now have USDT: genesis(500000) + settlement(500000) = 2 cash items
-	aliceUSDTFinal := getAccount(t, "alice", "USDT")
+	aliceUSDTFinal := getAccount(t, aliceAddr, "USDT")
 	t.Logf("Alice USDT: %d cash items", len(aliceUSDTFinal))
 	if len(aliceUSDTFinal) != 2 {
 		t.Fatalf("expected alice to have 2 USDT cash (genesis + settlement), got %d", len(aliceUSDTFinal))
@@ -245,14 +286,14 @@ func TestFullOrderLifecycle(t *testing.T) {
 	}
 
 	// Alice's ETH should be gone (locked by sell order, then spent in settlement)
-	aliceETHFinal := getAccount(t, "alice", "ETH")
+	aliceETHFinal := getAccount(t, aliceAddr, "ETH")
 	t.Logf("Alice ETH: %d active cash items (should be 0, spent in settlement)", len(aliceETHFinal))
 	if len(aliceETHFinal) != 0 {
 		t.Fatalf("expected alice ETH to be 0 (spent), got %d", len(aliceETHFinal))
 	}
 
 	// Bob's USDT should be gone (locked by buy order, then spent in settlement)
-	bobUSDTFinal := getAccount(t, "bob", "USDT")
+	bobUSDTFinal := getAccount(t, bobAddr, "USDT")
 	t.Logf("Bob USDT: %d active cash items (should be 0, spent in settlement)", len(bobUSDTFinal))
 	if len(bobUSDTFinal) != 0 {
 		t.Fatalf("expected bob USDT to be 0 (spent), got %d", len(bobUSDTFinal))

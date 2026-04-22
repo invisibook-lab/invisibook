@@ -76,6 +76,21 @@ func (a *Account) FindActiveCash(owner string, token TokenID) ([]*Cash, error) {
 	return result, nil
 }
 
+// FindNonSpentCash returns all Active and Locked Cash for the given owner and token.
+func (a *Account) FindNonSpentCash(owner string, token TokenID) ([]*Cash, error) {
+	var rows []CashScheme
+	err := a.db.Where("owner = ? AND token = ? AND status != ?", owner, string(token), int(Spent)).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*Cash, 0, len(rows))
+	for i := range rows {
+		result = append(result, schemeToCash(&rows[i]))
+	}
+	return result, nil
+}
+
 // LockCash transitions Active Cash to Locked state, setting By to the order ID.
 // Returns an error if any Cash is not found, not Active, or fails proof verification.
 func (a *Account) LockCash(cashIDs []string, orderID string) error {

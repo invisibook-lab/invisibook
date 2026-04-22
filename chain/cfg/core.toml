@@ -6,23 +6,24 @@ db_path = "data/orders.db"
 [account]
 db_path = "data/accounts.db"
 
-# Genesis accounts: pre-fund alice and bob with ETH and USDT
+# Genesis accounts: pre-fund alice and bob with ETH and USDT.
+# Addresses are derived from the ed25519 seeds in tests/alice.toml and tests/bob.toml.
 [[account.genesis_accounts]]
-address = "alice"
+address = "0x34750f98bd59fcfc946da45aaabe933be154a4b5"
 token   = "ETH"
 amount  = "1000"
 
 [[account.genesis_accounts]]
-address = "alice"
+address = "0x34750f98bd59fcfc946da45aaabe933be154a4b5"
 token   = "USDT"
 amount  = "500000"
 
 [[account.genesis_accounts]]
-address = "bob"
+address = "0x6a3803d5f059902a1c6dafbc9ba4729212f7caac"
 token   = "ETH"
 amount  = "1000"
 
 [[account.genesis_accounts]]
-address = "bob"
+address = "0x6a3803d5f059902a1c6dafbc9ba4729212f7caac"
 token   = "USDT"
 amount  = "500000"
