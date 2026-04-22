@@ -16,7 +16,7 @@ struct SendOrderParams {
     trade_type: u8,
     subject: TradePairJson,
     #[serde(skip_serializing_if = "Option::is_none")]
-    price: Option<String>,
+    price: Option<u64>,
     amount: CipherText,
     owner: String,
     input_cash_ids: Vec<String>,
@@ -72,7 +72,7 @@ pub struct QueryOrderItem {
     #[serde(rename = "type")]
     pub trade_type: u8,
     pub subject: QueryTradePair,
-    pub price: Option<String>,
+    pub price: Option<u64>,
     pub amount: CipherText,
     pub owner: String,
     pub input_cash_ids: Vec<String>,
@@ -175,17 +175,19 @@ struct ChainOrderEvent {
 pub struct ChainClient {
     client: YuClient,
     ws_url: String,
+    chain_id: u64,
 }
 
 impl ChainClient {
     /// Creates a new ChainClient connected to the given yu node.
     /// `http_url` example: "http://localhost:7999"
     /// `ws_url`   example: "ws://localhost:8999"
-    pub fn new(http_url: &str, ws_url: &str, keypair: KeyPair) -> Self {
+    pub fn new(http_url: &str, ws_url: &str, keypair: KeyPair, chain_id: u64) -> Self {
         let client = YuClient::new(http_url, ws_url).with_keypair(keypair);
         Self {
             client,
             ws_url: ws_url.trim_end_matches('/').to_string(),
+            chain_id,
         }
     }
 
@@ -205,14 +207,14 @@ impl ChainClient {
                 token1: order.subject.token1.clone(),
                 token2: order.subject.token2.clone(),
             },
-            price: order.price.map(|p| p.to_string()),
+            price: order.price,
             amount: order.amount.clone(),
             owner: order.owner.clone(),
             input_cash_ids: order.input_cash_ids.clone(),
             handling_fee: order.handling_fee.clone(),
         };
         self.client
-            .write_chain("orderbook", "SendOrder", &params, 100, 0)
+            .write_chain("orderbook", "SendOrder", &params, self.chain_id, 100, 0)
             .await
     }
 
@@ -236,7 +238,7 @@ impl ChainClient {
             zk_proof: zk_proof.to_string(),
         };
         self.client
-            .write_chain("orderbook", "SettleOrder", &params, 100, 0)
+            .write_chain("orderbook", "SettleOrder", &params, self.chain_id, 100, 0)
             .await
     }
 
@@ -331,7 +333,7 @@ impl ChainClient {
             zk_proof: zk_proof.to_string(),
         };
         self.client
-            .write_chain("account", "Deposit", &params, 100, 0)
+            .write_chain("account", "Deposit", &params, self.chain_id, 100, 0)
             .await
     }
 
@@ -353,7 +355,7 @@ impl ChainClient {
             zk_proof: zk_proof.to_string(),
         };
         self.client
-            .write_chain("account", "Withdraw", &params, 100, 0)
+            .write_chain("account", "Withdraw", &params, self.chain_id, 100, 0)
             .await
     }
 
@@ -432,7 +434,7 @@ fn query_item_to_order(item: QueryOrderItem) -> Order {
             token1: item.subject.token1,
             token2: item.subject.token2,
         },
-        price: item.price.and_then(|p| p.parse().ok()),
+        price: item.price,
         amount: item.amount,
         owner: item.owner,
         input_cash_ids: item.input_cash_ids,

@@ -27,7 +27,7 @@ fn App() -> Element {
         match cfg.keypair() {
             Ok(kp) => {
                 let addr = kp.address();
-                let c = ChainClient::new(&cfg.chain.http_url, &cfg.chain.ws_url, kp);
+                let c = ChainClient::new(&cfg.chain.http_url, &cfg.chain.ws_url, kp, cfg.chain.chain_id);
                 (Some(Arc::new(c)), addr)
             }
             Err(_) => (None, String::new()),

@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/BurntSushi/toml v1.2.1
 	github.com/go-playground/validator/v10 v10.30.1
-	github.com/yu-org/yu v1.3.3
+	github.com/yu-org/yu v1.3.4
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.1
 )

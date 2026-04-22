@@ -30,6 +30,7 @@ fn main() -> io::Result<()> {
                 &cfg.chain.http_url,
                 &cfg.chain.ws_url,
                 kp,
+                cfg.chain.chain_id,
             ));
             let orders = rt.block_on(async {
                 c.query_orders(None, None, None, None, None, Some(100), Some(0))

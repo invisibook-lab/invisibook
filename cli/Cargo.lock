@@ -2826,9 +2826,9 @@ dependencies = [
 
 [[package]]
 name = "yu-sdk"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8da570ae26295110eaa9fd523939a77a481665e06e5fa4b83716c06d47aad6f"
+checksum = "e74f590db7a9335ed5ede055ff3e6bc77b7cac6fe831ef263332d62671b8a318"
 dependencies = [
  "ed25519-dalek",
  "futures-util",

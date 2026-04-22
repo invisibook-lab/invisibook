@@ -51,7 +51,7 @@ pub fn parse_command(input: &str) -> CommandResult {
     };
 
     // validate price is a positive integer
-    let price: i64 = match price_str.parse() {
+    let price: u64 = match price_str.parse() {
         Ok(p) if p > 0 => p,
         _ => {
             return CommandResult {
@@ -64,7 +64,7 @@ pub fn parse_command(input: &str) -> CommandResult {
     };
 
     // validate amount is a positive integer
-    let _amount: i64 = match amount_str.parse() {
+    let _amount: u64 = match amount_str.parse() {
         Ok(a) if a > 0 => a,
         _ => {
             return CommandResult {

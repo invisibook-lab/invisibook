@@ -84,7 +84,7 @@ pub fn TradeForm(
     // ── Submit handler ──
     let on_submit = move |_| {
         let price_str = price_input.read().clone();
-        let price: i64 = match price_str.parse() {
+        let price: u64 = match price_str.parse() {
             Ok(p) if p > 0 => p,
             _ => {
                 message.set(Some(("✗ Price must be a positive integer!".into(), true)));
@@ -93,7 +93,7 @@ pub fn TradeForm(
         };
 
         let amount_str = amount_input.read().clone();
-        let _amount: i64 = match amount_str.parse() {
+        let _amount: u64 = match amount_str.parse() {
             Ok(a) if a > 0 => a,
             _ => {
                 message.set(Some((

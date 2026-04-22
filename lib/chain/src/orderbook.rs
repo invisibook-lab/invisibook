@@ -73,7 +73,7 @@ pub fn sort_orders(orders: &mut [Order]) {
 // ────────────────────── Sample Data ──────────────────────
 
 pub fn sample_orders() -> Vec<Order> {
-    let make = |trade_type: TradeType, t1: &str, t2: &str, price: i64, amt: &str, status: OrderStatus, idx: u32| {
+    let make = |trade_type: TradeType, t1: &str, t2: &str, price: u64, amt: &str, status: OrderStatus, idx: u32| {
         let subject = TradePair { token1: t1.into(), token2: t2.into() };
         let amount = encrypt_amount(amt);
         let fake_cash_id = format!("sample-cash-{}", idx);

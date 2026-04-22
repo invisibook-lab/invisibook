@@ -103,7 +103,7 @@ pub struct Order {
     pub id: OrderID,
     pub trade_type: TradeType,
     pub subject: TradePair,
-    pub price: Option<i64>,
+    pub price: Option<u64>,
     pub amount: CipherText,
     pub owner: String,
     pub input_cash_ids: Vec<String>,

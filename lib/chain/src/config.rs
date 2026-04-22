@@ -27,12 +27,18 @@ pub struct ChainConfig {
     pub http_url: String,
     #[serde(default = "default_ws_url")]
     pub ws_url: String,
+    #[serde(default = "default_chain_id")]
+    pub chain_id: u64,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct KeypairConfig {
     #[serde(default)]
     pub private_key: String,
+}
+
+fn default_chain_id() -> u64 {
+    1926
 }
 
 fn default_http_url() -> String {
@@ -47,6 +53,7 @@ impl Default for ChainConfig {
         Self {
             http_url: default_http_url(),
             ws_url: default_ws_url(),
+            chain_id: default_chain_id(),
         }
     }
 }

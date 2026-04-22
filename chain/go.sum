@@ -475,8 +475,8 @@ github.com/viant/assertly v0.4.8/go.mod h1:aGifi++jvCrUaklKEKT0BU95igDNaqkvz+49u
 github.com/viant/toolbox v0.24.0/go.mod h1:OxMCG57V0PXuIP2HNQrtJf2CjqdmbrOx5EkMILuUhzM=
 github.com/wlynxg/anet v0.0.3 h1:PvR53psxFXstc12jelG6f1Lv4MWqE0tI76/hHGjh9rg=
 github.com/wlynxg/anet v0.0.3/go.mod h1:eay5PRQr7fIVAMbTbchTnO9gG65Hg/uYGdc7mguHxoA=
-github.com/yu-org/yu v1.3.3 h1:Eu//Is2oze2v62WNoHqga3OxO9eTdo7UnnGAPRGTAiA=
-github.com/yu-org/yu v1.3.3/go.mod h1:egcg6GwQ2lsUbfLOo6oJHwnB5jfA1HkdhOMEEW0r4cc=
+github.com/yu-org/yu v1.3.4 h1:fDVIiJ248YYAGqfAjLReqVDXghO7U3gn9AZurMQZlW4=
+github.com/yu-org/yu v1.3.4/go.mod h1:egcg6GwQ2lsUbfLOo6oJHwnB5jfA1HkdhOMEEW0r4cc=
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.2.1/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.3.5/go.mod h1:mwnBkeHKe2W/ZEtQ+71ViKU8L12m81fl3OWwC1Zlc8k=
