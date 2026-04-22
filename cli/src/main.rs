@@ -14,7 +14,7 @@ use ratatui::prelude::*;
 
 use invisibook_lib::chain::ChainClient;
 use invisibook_lib::config::ClientConfig;
-use invisibook_lib::types::Order;
+use invisibook_lib::types::{Order, CASH_ACTIVE};
 
 use model::App;
 
@@ -50,7 +50,7 @@ fn main() -> io::Result<()> {
         let mut bals = std::collections::HashMap::new();
         for token in ["ETH", "BTC", "SOL", "USDT", "USDC", "DAI"] {
             if let Ok(acc) = rt.block_on(c.get_account(&my_address, token)) {
-                let active = acc.cash.iter().filter(|c| c.status == "Active").count();
+                let active = acc.cash.iter().filter(|c| c.status == CASH_ACTIVE).count();
                 bals.insert(token.to_string(), active);
             }
         }

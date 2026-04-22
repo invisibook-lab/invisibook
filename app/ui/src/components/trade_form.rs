@@ -49,7 +49,7 @@ pub fn TradeForm(
 
     // ── Balance from CashStore: (token, active_count, locked_count) ──
     // Group all local cash records by token and count by status.
-    let balances_data: Vec<(String, usize, usize)> = {
+    let (active_entries, locked_entries): (Vec<(String, usize)>, Vec<(String, usize)>) = {
         let store = cash_store.read();
         let mut map: HashMap<String, (usize, usize)> = HashMap::new();
         for rec in store.records() {
@@ -60,9 +60,12 @@ pub fn TradeForm(
                 entry.1 += 1;
             }
         }
-        let mut result: Vec<_> = map.into_iter().map(|(t, (a, l))| (t, a, l)).collect();
-        result.sort_by(|a, b| a.0.cmp(&b.0));
-        result
+        let mut pairs: Vec<(String, usize, usize)> =
+            map.into_iter().map(|(t, (a, l))| (t, a, l)).collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        let active = pairs.iter().filter(|(_, a, _)| *a > 0).map(|(t, a, _)| (t.clone(), *a)).collect();
+        let locked = pairs.iter().filter(|(_, _, l)| *l > 0).map(|(t, _, l)| (t.clone(), *l)).collect();
+        (active, locked)
     };
 
     // ── Submit handler ──
@@ -266,18 +269,15 @@ pub fn TradeForm(
                 // Active Token
                 div { class: "balance-section",
                     span { class: "balance-header", "Active Token" }
-                    if balances_data.is_empty() {
+                    if active_entries.is_empty() {
                         div { class: "balance-row",
                             span { class: "balance-none", "—" }
                         }
                     } else {
-                        for (token, active, _locked) in balances_data.iter() {
+                        for (token, active) in active_entries.iter() {
                             div { key: "active-{token}", class: "balance-row",
                                 span { class: "balance-token", "{token}" }
-                                span {
-                                    class: if *active > 0 { "balance-value balance-ok" } else { "balance-value balance-none" },
-                                    "{active} cash"
-                                }
+                                span { class: "balance-value balance-ok", "{active}" }
                             }
                         }
                     }
@@ -286,18 +286,15 @@ pub fn TradeForm(
                 // Locked Token
                 div { class: "balance-section",
                     span { class: "balance-header", "Locked Token" }
-                    if balances_data.is_empty() {
+                    if locked_entries.is_empty() {
                         div { class: "balance-row",
                             span { class: "balance-none", "—" }
                         }
                     } else {
-                        for (token, _active, locked) in balances_data.iter() {
+                        for (token, locked) in locked_entries.iter() {
                             div { key: "locked-{token}", class: "balance-row",
                                 span { class: "balance-token", "{token}" }
-                                span {
-                                    class: if *locked > 0 { "balance-value balance-locked" } else { "balance-value balance-none" },
-                                    "{locked} cash"
-                                }
+                                span { class: "balance-value balance-locked", "{locked}" }
                             }
                         }
                     }
