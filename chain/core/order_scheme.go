@@ -19,7 +19,7 @@ type OrderScheme struct {
 	Token2       string `gorm:"column:token2;index:idx_pair_type"`
 	Price        string `gorm:"column:price"`
 	Amount       string `gorm:"column:amount"`
-	Owner        string `gorm:"column:owner;index"`
+	Pubkey       string `gorm:"column:pubkey;index"` // owner's ed25519 pubkey (64-char hex)
 	InputCashIDs string `gorm:"column:input_cash_ids"` // JSON array of cash IDs
 	Status       int    `gorm:"column:status;index"`
 	MatchOrder   string `gorm:"column:match_order"`
@@ -161,7 +161,7 @@ func orderToScheme(o *Order) *OrderScheme {
 		Token2:       string(o.Subject.Token2),
 		Price:        priceStr,
 		Amount:       string(o.Amount),
-		Owner:        o.Owner,
+		Pubkey:       o.Pubkey,
 		InputCashIDs: cashIDsJSON,
 		Status:       int(o.Status),
 		MatchOrder:   string(o.MatchOrder),
@@ -187,7 +187,7 @@ func schemeToOrder(s *OrderScheme) *Order {
 		},
 		Price:        price,
 		Amount:       CipherText(s.Amount),
-		Owner:        s.Owner,
+		Pubkey:       s.Pubkey,
 		InputCashIDs: cashIDs,
 		MatchOrder:   OrderID(s.MatchOrder),
 		Status:       OrderStat(s.Status),

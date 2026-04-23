@@ -23,13 +23,10 @@ pub fn compute_order_id(input_cash_ids: &[String]) -> OrderID {
 
 // ────────────────────── Cipher ──────────────────────
 
-/// Core implementation: returns (ciphertext, amount_u64, random_bytes).
-/// chain stores amount = poseidon(amount_plaintext, random);
-/// plaintext and random must be kept off-chain by the client.
-fn encrypt_amount_inner(plaintext: &str) -> (CipherText, u64, [u8; 32]) {
+/// Core implementation: returns ciphertext = poseidon(amount, random).
+/// `random_bytes` is provided by the caller so genesis cash can use a fixed value.
+fn encrypt_with_random(plaintext: &str, random_bytes: [u8; 32]) -> (CipherText, u64) {
     let amount: u64 = plaintext.parse().unwrap_or(0);
-    let mut random_bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut random_bytes);
 
     #[cfg(not(target_os = "android"))]
     {
@@ -47,7 +44,7 @@ fn encrypt_amount_inner(plaintext: &str) -> (CipherText, u64, [u8; 32]) {
         })();
 
         if let Some(hex) = result {
-            return (hex, amount, random_bytes);
+            return (hex, amount);
         }
     }
 
@@ -56,6 +53,14 @@ fn encrypt_amount_inner(plaintext: &str) -> (CipherText, u64, [u8; 32]) {
     hasher.update(plaintext.as_bytes());
     hasher.update(random_bytes);
     let cipher = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+    (cipher, amount)
+}
+
+/// Core implementation: returns (ciphertext, amount_u64, random_bytes).
+fn encrypt_amount_inner(plaintext: &str) -> (CipherText, u64, [u8; 32]) {
+    let mut random_bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut random_bytes);
+    let (cipher, amount) = encrypt_with_random(plaintext, random_bytes);
     (cipher, amount, random_bytes)
 }
 
@@ -84,6 +89,20 @@ pub fn sort_orders(orders: &mut [Order]) {
     });
 }
 
+// ────────────────────── Genesis Cipher ──────────────────────
+
+/// Compute a deterministic ciphertext for a genesis cash entry.
+/// random = SHA256("genesis-random:" + cash_id), always the same for the same cash_id.
+/// Returns (ciphertext_hex, random_hex) to be stored in core.toml and alice/bob_cash.json.
+pub fn genesis_encrypt(cash_id: &str, amount_plaintext: &str) -> (CipherText, String) {
+    let mut hasher = Sha256::new();
+    hasher.update(b"genesis-random:");
+    hasher.update(cash_id.as_bytes());
+    let random_bytes: [u8; 32] = hasher.finalize().into();
+    let (cipher, _) = encrypt_with_random(amount_plaintext, random_bytes);
+    (cipher, hex::encode(random_bytes))
+}
+
 // ────────────────────── Sample Data ──────────────────────
 
 pub fn sample_orders() -> Vec<Order> {
@@ -92,7 +111,7 @@ pub fn sample_orders() -> Vec<Order> {
         let amount = encrypt_amount(amt);
         let fake_cash_id = format!("sample-cash-{}", idx);
         let id = compute_order_id(std::slice::from_ref(&fake_cash_id));
-        Order { id, trade_type, subject, price: Some(price), amount, owner: String::new(), input_cash_ids: vec![fake_cash_id], handling_fee: vec!["0".to_string()], status, match_order: None }
+        Order { id, trade_type, subject, price: Some(price), amount, pubkey: String::new(), input_cash_ids: vec![fake_cash_id], handling_fee: vec!["0".to_string()], status, match_order: None }
     };
 
     vec![
@@ -102,4 +121,23 @@ pub fn sample_orders() -> Vec<Order> {
         make(TradeType::Sell, "BTC", "USDT", 64500,   "1", OrderStatus::Matched, 4),
         make(TradeType::Buy,  "SOL", "USDT",   180,  "50", OrderStatus::Pending, 5),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn print_genesis_ciphertexts() {
+        let entries = [
+            ("f8c0ea0222c6acba512cc9ed613b64e3", "ETH",  "1000",   "alice"),
+            ("68ff80c3b73a39798be67087fb9f97ed", "USDT", "500000", "alice"),
+            ("4e88dd94be4154a37da7dd5b9d06a4a1", "ETH",  "1000",   "bob"),
+            ("ddada5eb9484fa322a931d53bb945431", "USDT", "500000", "bob"),
+        ];
+        for (cash_id, token, amount, who) in entries {
+            let (cipher, random) = genesis_encrypt(cash_id, amount);
+            println!("{} {} cash_id={} cipher={} random={}", who, token, cash_id, cipher, random);
+        }
+    }
 }

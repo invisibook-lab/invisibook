@@ -4,6 +4,7 @@ use std::sync::Arc;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 
+use hex;
 use invisibook_lib::cash_store::CashStore;
 use invisibook_lib::chain::ChainClient;
 use invisibook_lib::config::ClientConfig;
@@ -32,11 +33,12 @@ fn App() -> Element {
     // ── Load config & create chain client ──
     let (initial_client, initial_address) = {
         let cfg = ClientConfig::load_with_args();
-        match cfg.keypair() {
-            Ok(kp) => {
-                let addr = kp.address();
-                let c = ChainClient::new(&cfg.chain.http_url, &cfg.chain.ws_url, kp, cfg.chain.chain_id);
-                (Some(Arc::new(c)), addr)
+        match cfg.seed() {
+            Ok(seed) => {
+                let kp = invisibook_lib::config::ClientConfig::keypair_from_seed(&seed).unwrap();
+                let pubkey = hex::encode(kp.pubkey_bytes());
+                let c = ChainClient::new(&cfg.chain.http_url, &cfg.chain.ws_url, seed, cfg.chain.chain_id);
+                (Some(Arc::new(c)), pubkey)
             }
             Err(e) => {
                 eprintln!("Failed to parse keypair: {}", e);

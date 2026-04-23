@@ -18,7 +18,8 @@ struct SendOrderParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     price: Option<u64>,
     amount: CipherText,
-    owner: String,
+    pubkey: String,    // sender's ed25519 pubkey (64-char hex)
+    signature: String, // ed25519 sig over order ID bytes (128-char hex)
     input_cash_ids: Vec<String>,
     handling_fee: Vec<String>,
 }
@@ -38,7 +39,7 @@ struct SettleOrderParams {
 
 #[derive(Debug, Serialize)]
 struct CashOutputParams {
-    owner: String,
+    pubkey: String, // recipient's ed25519 pubkey (64-char hex)
     token: TokenID,
     amount: CipherText,
 }
@@ -74,7 +75,7 @@ pub struct QueryOrderItem {
     pub subject: QueryTradePair,
     pub price: Option<u64>,
     pub amount: CipherText,
-    pub owner: String,
+    pub pubkey: String,
     pub input_cash_ids: Vec<String>,
     pub status: u8,
     #[serde(default)]
@@ -91,13 +92,13 @@ pub struct QueryTradePair {
 
 #[derive(Debug, Serialize)]
 struct GetAccountParams {
-    address: String,
+    pubkey: String,
     token: TokenID,
 }
 
 #[derive(Debug, Serialize)]
 struct DepositParams {
-    address: String,
+    pubkey: String,
     token: TokenID,
     amount: CipherText,
     zk_proof: String,
@@ -113,13 +114,13 @@ struct WithdrawParams {
 
 #[derive(Debug, Serialize)]
 struct ChangeOutputParams {
-    owner: String,
+    pubkey: String,
     amount: CipherText,
 }
 
 #[derive(Debug, Deserialize)]
 struct AccountResponse {
-    address: String,
+    pubkey: String,
     token: TokenID,
     #[serde(default)]
     cash: Vec<CashItemResponse>,
@@ -128,7 +129,7 @@ struct AccountResponse {
 #[derive(Debug, Deserialize)]
 struct CashItemResponse {
     id: String,
-    owner: String,
+    pubkey: String,
     token: TokenID,
     amount: CipherText,
     #[serde(default)]
@@ -176,19 +177,38 @@ pub struct ChainClient {
     client: YuClient,
     ws_url: String,
     chain_id: u64,
+    seed: [u8; 32],     // ed25519 private key seed (for application-level signing)
+    pubkey_hex: String, // raw ed25519 pubkey as 64-char hex
 }
 
 impl ChainClient {
     /// Creates a new ChainClient connected to the given yu node.
     /// `http_url` example: "http://localhost:7999"
     /// `ws_url`   example: "ws://localhost:8999"
-    pub fn new(http_url: &str, ws_url: &str, keypair: KeyPair, chain_id: u64) -> Self {
+    /// `seed` is the 32-byte ed25519 private key seed.
+    pub fn new(http_url: &str, ws_url: &str, seed: [u8; 32], chain_id: u64) -> Self {
+        let keypair = KeyPair::from_ed25519_bytes(&seed);
+        let pubkey_hex = hex::encode(keypair.pubkey_bytes());
         let client = YuClient::new(http_url, ws_url).with_keypair(keypair);
         Self {
             client,
             ws_url: ws_url.trim_end_matches('/').to_string(),
             chain_id,
+            seed,
+            pubkey_hex,
         }
+    }
+
+    /// Returns the owner's raw ed25519 pubkey as a 64-char hex string.
+    pub fn pubkey_hex(&self) -> &str {
+        &self.pubkey_hex
+    }
+
+    /// Signs `message` with the client's ed25519 private key.
+    /// Returns the 64-byte signature as a 128-char hex string.
+    fn sign(&self, message: &[u8]) -> String {
+        let kp = KeyPair::from_ed25519_bytes(&self.seed);
+        hex::encode(kp.sign(message))
     }
 
     /// Sends a new order to the chain (writing request to OrderBook.SendOrder).
@@ -200,6 +220,7 @@ impl ChainClient {
             TradeType::Buy => 0u8,
             TradeType::Sell => 1u8,
         };
+        let signature = self.sign(order.id.as_bytes());
         let params = SendOrderParams {
             id: order.id.clone(),
             trade_type: type_int,
@@ -209,7 +230,8 @@ impl ChainClient {
             },
             price: order.price,
             amount: order.amount.clone(),
-            owner: order.owner.clone(),
+            pubkey: self.pubkey_hex.clone(),
+            signature,
             input_cash_ids: order.input_cash_ids.clone(),
             handling_fee: order.handling_fee.clone(),
         };
@@ -230,7 +252,7 @@ impl ChainClient {
             outputs: outputs
                 .into_iter()
                 .map(|o| CashOutputParams {
-                    owner: o.owner,
+                    pubkey: o.pubkey,
                     token: o.token,
                     amount: o.amount,
                 })
@@ -284,14 +306,14 @@ impl ChainClient {
             .collect())
     }
 
-    /// Gets account details for the given address and token.
+    /// Gets account details for the given pubkey and token.
     pub async fn get_account(
         &self,
-        address: &str,
+        pubkey: &str,
         token: &str,
     ) -> Result<AccountRecord, Box<dyn std::error::Error>> {
         let params = GetAccountParams {
-            address: address.to_string(),
+            pubkey: pubkey.to_string(),
             token: token.to_string(),
         };
         let value: Value = self
@@ -300,14 +322,14 @@ impl ChainClient {
             .await?;
         let resp: AccountResponse = serde_json::from_value(value)?;
         Ok(AccountRecord {
-            address: resp.address,
+            pubkey: resp.pubkey,
             token: resp.token,
             cash: resp
                 .cash
                 .into_iter()
                 .map(|c| CashItem {
                     id: c.id,
-                    owner: c.owner,
+                    pubkey: c.pubkey,
                     token: c.token,
                     amount: c.amount,
                     zk_proof: c.zk_proof,
@@ -321,13 +343,13 @@ impl ChainClient {
     /// Deposits funds into an account (requires zk proof of bridge deposit).
     pub async fn deposit(
         &self,
-        address: &str,
+        pubkey: &str,
         token: &str,
         amount: &str,
         zk_proof: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let params = DepositParams {
-            address: address.to_string(),
+            pubkey: pubkey.to_string(),
             token: token.to_string(),
             amount: amount.to_string(),
             zk_proof: zk_proof.to_string(),
@@ -349,7 +371,7 @@ impl ChainClient {
             token: token.to_string(),
             inputs,
             change: ChangeOutputParams {
-                owner: change.owner,
+                pubkey: change.pubkey,
                 amount: change.amount,
             },
             zk_proof: zk_proof.to_string(),
@@ -436,7 +458,7 @@ fn query_item_to_order(item: QueryOrderItem) -> Order {
         },
         price: item.price,
         amount: item.amount,
-        owner: item.owner,
+        pubkey: item.pubkey,
         input_cash_ids: item.input_cash_ids,
         handling_fee: Vec::new(),
         status,

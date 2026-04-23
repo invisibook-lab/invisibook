@@ -37,7 +37,7 @@ func (s CashStatus) String() string {
 // verify successfully before this Cash can be consumed.
 type Cash struct {
 	ID      string     `json:"id"`
-	Owner   string     `json:"owner"`
+	Pubkey  string     `json:"pubkey"`   // owner's raw ed25519 public key (64-char hex)
 	Token   TokenID    `json:"token"`
 	Amount  CipherText `json:"amount"`   // encrypted amount
 	ZkProof string     `json:"zk_proof"` // proof committed at creation
@@ -52,15 +52,15 @@ func (c *Cash) IsNative() bool {
 // AccountRecord is the response returned by GetAccount.
 // Because amounts are ciphertext, no aggregate balance is computed on-chain.
 type AccountRecord struct {
-	Address string  `json:"address"`
-	Token   TokenID `json:"token"`
-	Cash    []*Cash `json:"cash"`
+	Pubkey string  `json:"pubkey"`
+	Token  TokenID `json:"token"`
+	Cash   []*Cash `json:"cash"`
 }
 
 // ChangeOutput describes the change Cash that the client wants minted back
 // to themselves after a withdrawal.
 type ChangeOutput struct {
-	Owner  string     `json:"owner"  validate:"required"`
+	Pubkey string     `json:"pubkey" validate:"required"`
 	Amount CipherText `json:"amount" validate:"required"`
 }
 

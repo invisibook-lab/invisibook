@@ -34,7 +34,7 @@ pub struct ChainConfig {
 #[derive(Debug, Default, Deserialize)]
 pub struct KeypairConfig {
     #[serde(default)]
-    pub private_key: String,
+    pub mnemonic: String,
 }
 
 fn default_chain_id() -> u64 {
@@ -75,9 +75,9 @@ pub struct CliArgs {
     #[arg(long)]
     pub ws_url: Option<String>,
 
-    /// Hex-encoded ed25519 private key (64 hex chars)
+    /// BIP-39 mnemonic phrase (12 or 24 words)
     #[arg(long)]
-    pub private_key: Option<String>,
+    pub mnemonic: Option<String>,
 }
 
 // ────────────────────── Loading ──────────────────────
@@ -85,15 +85,16 @@ pub struct CliArgs {
 impl ClientConfig {
     /// Loads config by merging: defaults → config file → CLI args.
     /// Config file search order: explicit path > `./invisibook.toml` > `~/.invisibook/config.toml`.
-    /// If no config file is found, defaults are used.
+    /// If no mnemonic is found, a random 24-word mnemonic is generated.
     pub fn load(path: Option<&str>) -> Self {
         let mut cfg = Self::load_file(path).unwrap_or_default();
 
-        // Generate a random keypair if none was configured
-        if cfg.keypair.private_key.is_empty() {
-            let mut seed = [0u8; 32];
-            rand::rng().fill_bytes(&mut seed);
-            cfg.keypair.private_key = hex::encode(seed);
+        // Generate a random 24-word mnemonic if none was configured (32 bytes entropy)
+        if cfg.keypair.mnemonic.is_empty() {
+            let mut entropy = [0u8; 32];
+            rand::rng().fill_bytes(&mut entropy);
+            let m = bip39::Mnemonic::from_entropy(&entropy).expect("failed to generate mnemonic");
+            cfg.keypair.mnemonic = m.to_string();
         }
 
         cfg
@@ -112,19 +113,29 @@ impl ClientConfig {
         if let Some(url) = args.ws_url {
             cfg.chain.ws_url = url;
         }
-        if let Some(key) = args.private_key {
-            cfg.keypair.private_key = key;
+        if let Some(m) = args.mnemonic {
+            cfg.keypair.mnemonic = m;
         }
 
         cfg
     }
 
-    /// Parses the hex-encoded ed25519 private key seed into a yu-sdk KeyPair.
+    /// Derives a 32-byte ed25519 seed from the mnemonic at index 0, path m/44'/60'/0'/0'/0'.
+    pub fn seed(&self) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+        self.seed_at_index(0)
+    }
+
+    /// Derives a 32-byte ed25519 seed from the mnemonic at the given address index.
+    /// Path: m/44'/60'/0'/0'/index' (all hardened, coin_type=60).
+    pub fn seed_at_index(&self, index: u32) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+        let m = bip39::Mnemonic::parse(&self.keypair.mnemonic)?;
+        let bip39_seed = m.to_seed("");
+        Ok(crate::hd::derive_ed25519_key(&bip39_seed, 60, index))
+    }
+
+    /// Parses the mnemonic and returns a yu-sdk KeyPair for address index 0.
     pub fn keypair(&self) -> Result<KeyPair, Box<dyn std::error::Error>> {
-        let bytes = hex::decode(&self.keypair.private_key)?;
-        let seed: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| "private_key must be exactly 32 bytes (64 hex chars)")?;
+        let seed = self.seed()?;
         Ok(KeyPair::from_ed25519_bytes(&seed))
     }
 

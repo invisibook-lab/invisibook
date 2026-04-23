@@ -8,7 +8,7 @@ use invisibook_lib::cash_store::CashStore;
 use invisibook_lib::chain::ChainClient;
 use invisibook_lib::config::ClientConfig;
 
-/// Modal panel for importing a private key (hex) and optionally a cash file.
+/// Modal panel for importing a BIP-39 mnemonic phrase and optionally a cash file.
 #[component]
 pub fn KeyImport(
     chain_client: Signal<Option<Arc<ChainClient>>>,
@@ -18,7 +18,7 @@ pub fn KeyImport(
     visible: Signal<bool>,
     key_imported: Signal<bool>,
 ) -> Element {
-    let mut key_input = use_signal(String::new);
+    let mut mnemonic_input = use_signal(String::new);
     let mut cash_file_input = use_signal(String::new);
     let mut drag_over = use_signal(|| false);
 
@@ -27,69 +27,66 @@ pub fn KeyImport(
     }
 
     let on_import = move |_| {
-        let key_hex = key_input.read().trim().to_string();
-        if key_hex.is_empty() {
-            message.set(Some(("✗ Private key cannot be empty".into(), true)));
+        let mnemonic_text = mnemonic_input.read().trim().to_string();
+        if mnemonic_text.is_empty() {
+            message.set(Some(("✗ Mnemonic cannot be empty".into(), true)));
             return;
         }
 
-        // Parse private key
-        let cfg = ClientConfig::load(None);
-        let keypair = match hex::decode(&key_hex)
-            .ok()
-            .and_then(|b| <[u8; 32]>::try_from(b).ok())
-            .map(|seed| invisibook_lib::config::ClientConfig::keypair_from_seed(&seed))
-        {
-            Some(Ok(kp)) => kp,
-            _ => {
+        // Parse, validate, and derive ed25519 seed at m/44'/60'/0'/0'/0'
+        let seed = match invisibook_lib::hd::mnemonic_to_ed25519_key(&mnemonic_text, 60, 0) {
+            Ok(s) => s,
+            Err(e) => {
                 message.set(Some((
-                    "✗ Invalid private key — must be 64 hex chars (32 bytes)".into(),
+                    format!("✗ Invalid mnemonic: {}", e),
                     true,
                 )));
                 return;
             }
         };
 
-        let addr = keypair.address();
+        let cfg = ClientConfig::load(None);
+        let kp = ClientConfig::keypair_from_seed(&seed).unwrap();
+        let pubkey = hex::encode(kp.pubkey_bytes());
         let new_client = Arc::new(ChainClient::new(
             &cfg.chain.http_url,
             &cfg.chain.ws_url,
-            keypair,
+            seed,
             cfg.chain.chain_id,
         ));
 
         chain_client.set(Some(new_client));
-        my_address.set(addr.clone());
+        my_address.set(pubkey.clone());
         key_imported.set(true);
 
         // Optionally import cash file
         let cash_file = cash_file_input.read().trim().to_string();
         if !cash_file.is_empty() {
             let path = PathBuf::from(&cash_file);
-            match cash_store.write().merge_from_file(&path) {
+            match cash_store.write().load_from_file(&path) {
                 Ok(n) => message.set(Some((
-                    format!("✓ Key imported ({}) — {} cash records loaded", &addr[..10], n),
+                    format!("✓ Key imported ({}) — {} cash records loaded", &pubkey[..10], n),
                     false,
                 ))),
                 Err(e) => message.set(Some((
-                    format!("✓ Key imported ({}) — cash file error: {}", &addr[..10], e),
+                    format!("✓ Key imported ({}) — cash file error: {}", &pubkey[..10], e),
                     true,
                 ))),
             }
         } else {
             message.set(Some((
-                format!("✓ Key imported ({})", &addr[..10]),
+                format!("✓ Key imported ({})", &pubkey[..10]),
                 false,
             )));
         }
 
-        key_input.set(String::new());
+        mnemonic_input.set(String::new());
         cash_file_input.set(String::new());
         visible.set(false);
     };
 
     let on_cancel = move |_| {
-        key_input.set(String::new());
+        mnemonic_input.set(String::new());
         cash_file_input.set(String::new());
         visible.set(false);
     };
@@ -99,16 +96,16 @@ pub fn KeyImport(
     rsx! {
         div { class: "modal-overlay",
             div { class: "modal",
-                h3 { class: "modal-title", "Import Private Key" }
+                h3 { class: "modal-title", "Import Mnemonic" }
 
                 div { class: "input-group",
-                    span { class: "input-label", "Private Key (hex)" }
+                    span { class: "input-label", "Mnemonic Phrase" }
                     input {
                         class: "input-field",
-                        r#type: "password",
-                        placeholder: "64 hex characters",
-                        value: "{key_input}",
-                        oninput: move |evt: Event<FormData>| key_input.set(evt.value()),
+                        r#type: "text",
+                        placeholder: "12 or 24 words separated by spaces",
+                        value: "{mnemonic_input}",
+                        oninput: move |evt: Event<FormData>| mnemonic_input.set(evt.value()),
                     }
                 }
 

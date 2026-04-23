@@ -124,7 +124,7 @@ pub fn TradeForm(
             token2: t2.clone(),
         };
         let amount = orderbook::encrypt_amount(&amount_str);
-        let owner = my_address.read().clone();
+        let pubkey = my_address.read().clone();
 
         let order = Order {
             id: order_id,
@@ -132,7 +132,7 @@ pub fn TradeForm(
             subject,
             price: Some(price),
             amount,
-            owner,
+            pubkey,
             input_cash_ids,
             handling_fee: vec![fee.clone()],
             status: OrderStatus::Pending,

@@ -65,7 +65,7 @@ impl fmt::Display for TradePair {
 
 #[derive(Debug, Clone)]
 pub struct CashOutput {
-    pub owner: String,
+    pub pubkey: String, // recipient's ed25519 pubkey (64-char hex)
     pub token: TokenID,
     pub amount: CipherText,
 }
@@ -79,7 +79,7 @@ pub const CASH_LOCKED: u8 = 1;
 #[derive(Debug, Clone)]
 pub struct CashItem {
     pub id: String,
-    pub owner: String,
+    pub pubkey: String, // owner's raw ed25519 pubkey (64-char hex)
     pub token: TokenID,
     pub amount: CipherText,
     pub zk_proof: String,
@@ -89,14 +89,14 @@ pub struct CashItem {
 
 #[derive(Debug, Clone)]
 pub struct AccountRecord {
-    pub address: String,
+    pub pubkey: String, // owner's raw ed25519 pubkey (64-char hex)
     pub token: TokenID,
     pub cash: Vec<CashItem>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ChangeOutput {
-    pub owner: String,
+    pub pubkey: String, // recipient's ed25519 pubkey (64-char hex)
     pub amount: CipherText,
 }
 
@@ -109,7 +109,7 @@ pub struct Order {
     pub subject: TradePair,
     pub price: Option<u64>,
     pub amount: CipherText,
-    pub owner: String,
+    pub pubkey: String, // owner's ed25519 pubkey (64-char hex)
     pub input_cash_ids: Vec<String>,
     pub handling_fee: Vec<String>,
     pub status: OrderStatus,

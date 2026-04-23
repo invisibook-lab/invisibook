@@ -17,7 +17,7 @@ type Order struct {
 	Subject      TradePair  `json:"subject"`
 	Price        *big.Int   `json:"price,omitempty"`
 	Amount       CipherText `json:"amount"  validate:"required"`
-	Owner        string     `json:"owner"   validate:"required"`
+	Pubkey       string     `json:"pubkey"  validate:"required"` // owner's ed25519 pubkey (64-char hex)
 	InputCashIDs []string   `json:"input_cash_ids" validate:"required,min=1"`
 	MatchOrder   OrderID    `json:"match_order,omitempty"`
 	Status       OrderStat  `json:"status"  validate:"oneof=0 1 2 3 4"`

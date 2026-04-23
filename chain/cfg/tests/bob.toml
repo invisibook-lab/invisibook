@@ -2,9 +2,11 @@
 #
 # Usage:
 #   CLI:     invisibook --config tests/bob.toml
-#   Desktop: Import private key below, then import tests/bob_cash.json
+#   Desktop: Import mnemonic below, then import tests/bob_cash.json
 #
-# Address: 0x6a3803d5f059902a1c6dafbc9ba4729212f7caac
+# Mnemonic: abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about
+# Derived path: m/44'/60'/0'/0'/0'
+# Address (pubkey): 175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b
 # Genesis balances: 1000 ETH, 500000 USDT
 
 [chain]
@@ -13,4 +15,4 @@ ws_url   = "ws://localhost:8999"
 chain_id = 1926
 
 [keypair]
-private_key = "0202020202020202020202020202020202020202020202020202020202020202"
+mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"

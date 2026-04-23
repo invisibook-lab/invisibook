@@ -2,9 +2,11 @@
 #
 # Usage:
 #   CLI:     invisibook --config tests/alice.toml
-#   Desktop: Import private key below, then import tests/alice_cash.json
+#   Desktop: Import mnemonic below, then import tests/alice_cash.json
 #
-# Address: 0x34750f98bd59fcfc946da45aaabe933be154a4b5
+# Mnemonic: test test test test test test test test test test test junk
+# Derived path: m/44'/60'/0'/0'/0'
+# Address (pubkey): 3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb
 # Genesis balances: 1000 ETH, 500000 USDT
 
 [chain]
@@ -13,4 +15,4 @@ ws_url   = "ws://localhost:8999"
 chain_id = 1926
 
 [keypair]
-private_key = "0101010101010101010101010101010101010101010101010101010101010101"
+mnemonic = "test test test test test test test test test test test junk"

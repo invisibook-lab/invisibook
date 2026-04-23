@@ -1,6 +1,8 @@
 package core
 
 import (
+	"crypto/ed25519"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -46,9 +48,10 @@ type SendOrderRequest struct {
 	Subject      TradePair  `json:"subject"`
 	Price        *big.Int   `json:"price,omitempty"`
 	Amount       CipherText `json:"amount"         validate:"required"`
-	Owner        string     `json:"owner"          validate:"required"`
+	Pubkey       string     `json:"pubkey"         validate:"required"` // sender's ed25519 pubkey (64-char hex)
+	Signature    string     `json:"signature"      validate:"required"` // ed25519 sig over order ID bytes (128-char hex)
 	InputCashIDs []string   `json:"input_cash_ids" validate:"required,min=1"`
-	HandlingFee  []string   `json:"handling_fee" validate:"required,min=1"` // must be plaintext.
+	HandlingFee  []string   `json:"handling_fee"   validate:"required,min=1"` // must be plaintext.
 }
 
 // SendOrder creates a new order, locks the input Cash, stores it via SQL, and attempts to match it.
@@ -69,6 +72,19 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 		return fmt.Errorf("order ID mismatch: got %s, expected %s", req.ID, expectedID)
 	}
 
+	// Verify the sender's ed25519 signature over the order ID bytes.
+	pubkeyBytes, err := hex.DecodeString(req.Pubkey)
+	if err != nil || len(pubkeyBytes) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid pubkey: must be %d-byte ed25519 key as 64-char hex", ed25519.PublicKeySize)
+	}
+	sigBytes, err := hex.DecodeString(req.Signature)
+	if err != nil || len(sigBytes) != ed25519.SignatureSize {
+		return fmt.Errorf("invalid signature: must be %d-byte ed25519 sig as 128-char hex", ed25519.SignatureSize)
+	}
+	if !ed25519.Verify(pubkeyBytes, []byte(req.ID), sigBytes) {
+		return fmt.Errorf("signature verification failed for order %s", req.ID)
+	}
+
 	// Determine expected token for the input Cash:
 	// Buy(Token1/Token2) → paying with Token2
 	// Sell(Token1/Token2) → selling Token1
@@ -77,7 +93,7 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 		expectedToken = req.Subject.Token2
 	}
 
-	// Validate each input Cash: exists, Active, owner matches, token matches
+	// Validate each input Cash: exists, Active, pubkey matches, token matches
 	for _, cashID := range req.InputCashIDs {
 		cash, err := ot.Account.GetCash(cashID)
 		if err != nil {
@@ -86,8 +102,8 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 		if cash.Status != Active {
 			return fmt.Errorf("input cash %s is not Active (current: %s)", cashID, cash.Status.String())
 		}
-		if cash.Owner != req.Owner {
-			return fmt.Errorf("input cash %s owner mismatch: got %s, expected %s", cashID, cash.Owner, req.Owner)
+		if cash.Pubkey != req.Pubkey {
+			return fmt.Errorf("input cash %s pubkey mismatch: got %s, expected %s", cashID, cash.Pubkey, req.Pubkey)
 		}
 		if cash.Token != expectedToken {
 			return fmt.Errorf("input cash %s token mismatch: got %s, expected %s", cashID, cash.Token, expectedToken)
@@ -105,7 +121,7 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 		Subject:      req.Subject,
 		Price:        req.Price,
 		Amount:       req.Amount,
-		Owner:        req.Owner,
+		Pubkey:       req.Pubkey,
 		InputCashIDs: req.InputCashIDs,
 		Status:       Pending,
 	}
@@ -137,7 +153,7 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 
 // CashOutput describes a new Cash to be minted as settlement output.
 type CashOutput struct {
-	Owner  string     `json:"owner"  validate:"required"`
+	Pubkey string     `json:"pubkey" validate:"required"` // recipient's ed25519 pubkey (64-char hex)
 	Token  TokenID    `json:"token"  validate:"required"`
 	Amount CipherText `json:"amount" validate:"required"`
 }
@@ -203,7 +219,7 @@ func (ot *OrderBook) SettleOrder(ctx *context.WriteContext) error {
 		}
 		newCash := &Cash{
 			ID:      generateCashID(),
-			Owner:   out.Owner,
+			Pubkey:  out.Pubkey,
 			Token:   out.Token,
 			Amount:  out.Amount,
 			ZkProof: req.ZkProof,

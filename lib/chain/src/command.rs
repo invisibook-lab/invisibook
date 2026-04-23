@@ -90,7 +90,7 @@ pub fn parse_command(input: &str) -> CommandResult {
         subject,
         price: Some(price),
         amount,
-        owner: String::new(),
+        pubkey: String::new(),
         input_cash_ids: Vec::new(),
         handling_fee: vec!["0".to_string()],
         status: OrderStatus::Pending,

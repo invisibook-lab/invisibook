@@ -13,8 +13,8 @@ import (
 // Each row represents one Cash output in one of three states: Active, Locked, Spent.
 type CashScheme struct {
 	CashID  string `gorm:"primaryKey;column:cash_id"`
-	Owner   string `gorm:"column:owner;index:idx_owner_token"`
-	Token   string `gorm:"column:token;index:idx_owner_token"`
+	Pubkey  string `gorm:"column:pubkey;index:idx_pubkey_token"` // owner's raw ed25519 pubkey (64-char hex)
+	Token   string `gorm:"column:token;index:idx_pubkey_token"`
 	Amount  string `gorm:"column:amount;not null"`   // encrypted ciphertext
 	ZkProof string `gorm:"column:zk_proof;not null"` // proof committed at creation
 	Status  int    `gorm:"column:status;default:0"`  // 0=Active, 1=Locked, 2=Spent
@@ -43,7 +43,7 @@ func InitAccountDB(dsn string) *gorm.DB {
 func (a *Account) CreateCash(cash *Cash) error {
 	return a.db.Create(&CashScheme{
 		CashID:  cash.ID,
-		Owner:   cash.Owner,
+		Pubkey:  cash.Pubkey,
 		Token:   string(cash.Token),
 		Amount:  string(cash.Amount),
 		ZkProof: cash.ZkProof,
@@ -61,10 +61,10 @@ func (a *Account) GetCash(id string) (*Cash, error) {
 	return schemeToCash(&row), nil
 }
 
-// FindActiveCash returns all Active Cash for the given owner and token.
-func (a *Account) FindActiveCash(owner string, token TokenID) ([]*Cash, error) {
+// FindActiveCash returns all Active Cash for the given pubkey and token.
+func (a *Account) FindActiveCash(pubkey string, token TokenID) ([]*Cash, error) {
 	var rows []CashScheme
-	err := a.db.Where("owner = ? AND token = ? AND status = ?", owner, string(token), int(Active)).
+	err := a.db.Where("pubkey = ? AND token = ? AND status = ?", pubkey, string(token), int(Active)).
 		Find(&rows).Error
 	if err != nil {
 		return nil, err
@@ -76,10 +76,10 @@ func (a *Account) FindActiveCash(owner string, token TokenID) ([]*Cash, error) {
 	return result, nil
 }
 
-// FindNonSpentCash returns all Active and Locked Cash for the given owner and token.
-func (a *Account) FindNonSpentCash(owner string, token TokenID) ([]*Cash, error) {
+// FindNonSpentCash returns all Active and Locked Cash for the given pubkey and token.
+func (a *Account) FindNonSpentCash(pubkey string, token TokenID) ([]*Cash, error) {
 	var rows []CashScheme
-	err := a.db.Where("owner = ? AND token = ? AND status != ?", owner, string(token), int(Spent)).
+	err := a.db.Where("pubkey = ? AND token = ? AND status != ?", pubkey, string(token), int(Spent)).
 		Find(&rows).Error
 	if err != nil {
 		return nil, err
@@ -140,7 +140,7 @@ func (a *Account) UnlockCash(cashIDs []string) error {
 func schemeToCash(s *CashScheme) *Cash {
 	return &Cash{
 		ID:      s.CashID,
-		Owner:   s.Owner,
+		Pubkey:  s.Pubkey,
 		Token:   TokenID(s.Token),
 		Amount:  CipherText(s.Amount),
 		ZkProof: s.ZkProof,

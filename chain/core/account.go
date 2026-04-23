@@ -1,7 +1,6 @@
 package core
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"net/http"
 
@@ -28,41 +27,33 @@ func NewAccount(cfg *AccountConfig) *Account {
 	return a
 }
 
-// genesisCashID returns a deterministic cash ID for a genesis account.
-// ID = first 16 bytes of SHA256("genesis:" + addr + ":" + token) as hex (32 chars).
-// This ensures the same cash IDs on every fresh chain start, making them
-// safe to pre-populate in test cash files (tests/alice_cash.json, etc.).
-func genesisCashID(addr, token string) string {
-	h := sha256.Sum256([]byte("genesis:" + addr + ":" + token))
-	return fmt.Sprintf("%x", h[:16])
-}
-
-// InitChain seeds genesis accounts with pre-funded Cash at chain startup.
+// InitChain inserts genesis Cash records at chain startup.
+// Cash IDs are taken directly from the config — no derivation happens on-chain.
 func (a *Account) InitChain(block *types.Block) {
-	for _, ga := range a.cfg.GenesisAccounts {
+	for _, gc := range a.cfg.GenesisCash {
 		cash := &Cash{
-			ID:      genesisCashID(ga.Address, ga.Token),
-			Owner:   ga.Address,
-			Token:   TokenID(ga.Token),
-			Amount:  CipherText(ga.Amount),
+			ID:      gc.ID,
+			Pubkey:  gc.Pubkey,
+			Token:   TokenID(gc.Token),
+			Amount:  CipherText(gc.Amount),
 			ZkProof: "genesis",
 			Status:  Active,
 		}
 		if err := a.CreateCash(cash); err != nil {
-			panic(fmt.Sprintf("failed to seed genesis account %s: %v", ga.Address, err))
+			panic(fmt.Sprintf("failed to seed genesis cash %s: %v", gc.ID, err))
 		}
-		fmt.Printf("genesis: addr=%s token=%s amount=%s cash=%s\n", ga.Address, ga.Token, ga.Amount, cash.ID)
+		fmt.Printf("genesis: id=%s pubkey=%s token=%s amount=%s\n", gc.ID, gc.Pubkey, gc.Token, gc.Amount)
 	}
 }
 
 // ────────────────────── Reading: GetAccount ──────────────────────
 
 type GetAccountRequest struct {
-	Address string  `json:"address" validate:"required"`
-	Token   TokenID `json:"token"   validate:"required"`
+	Pubkey string  `json:"pubkey" validate:"required"`
+	Token  TokenID `json:"token"  validate:"required"`
 }
 
-// GetAccount returns all Active Cash for the given address and token.
+// GetAccount returns all non-Spent Cash for the given pubkey and token.
 // Amounts are ciphertext, so no aggregate balance is computed on-chain.
 func (a *Account) GetAccount(ctx *context.ReadContext) {
 	req := new(GetAccountRequest)
@@ -75,23 +66,23 @@ func (a *Account) GetAccount(ctx *context.ReadContext) {
 		return
 	}
 
-	cash, err := a.FindNonSpentCash(req.Address, req.Token)
+	cash, err := a.FindNonSpentCash(req.Pubkey, req.Token)
 	if err != nil {
 		ctx.Json(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
 	ctx.JsonOk(&AccountRecord{
-		Address: req.Address,
-		Token:   req.Token,
-		Cash:    cash,
+		Pubkey: req.Pubkey,
+		Token:  req.Token,
+		Cash:   cash,
 	})
 }
 
 // ────────────────────── Writing: Deposit ──────────────────────
 
 type DepositRequest struct {
-	Address string     `json:"address"  validate:"required"`
+	Pubkey  string     `json:"pubkey"   validate:"required"` // depositor's ed25519 pubkey (64-char hex)
 	Token   TokenID    `json:"token"    validate:"required"`
 	Amount  CipherText `json:"amount"   validate:"required"` // encrypted amount
 	ZkProof string     `json:"zk_proof" validate:"required"` // bridge deposit proof
@@ -114,7 +105,7 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 
 	cash := &Cash{
 		ID:      generateCashID(),
-		Owner:   req.Address,
+		Pubkey:  req.Pubkey,
 		Token:   req.Token,
 		Amount:  req.Amount,
 		ZkProof: req.ZkProof,
@@ -124,8 +115,8 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 		return fmt.Errorf("failed to create cash: %w", err)
 	}
 
-	ctx.EmitStringEvent("deposit: addr=%s token=%s cash=%s",
-		req.Address, string(req.Token), cash.ID)
+	ctx.EmitStringEvent("deposit: pubkey=%s token=%s cash=%s",
+		req.Pubkey, string(req.Token), cash.ID)
 	return nil
 }
 
@@ -166,7 +157,7 @@ func (a *Account) Withdraw(ctx *context.WriteContext) error {
 		}
 		changeCash := &Cash{
 			ID:      generateCashID(),
-			Owner:   req.Change.Owner,
+			Pubkey:  req.Change.Pubkey,
 			Token:   req.Token,
 			Amount:  req.Change.Amount,
 			ZkProof: req.ZkProof, // reuse withdrawal proof as the change commitment

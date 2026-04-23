@@ -15,6 +15,7 @@ use ratatui::prelude::*;
 use invisibook_lib::chain::ChainClient;
 use invisibook_lib::config::ClientConfig;
 use invisibook_lib::types::{Order, CASH_ACTIVE};
+use yu_sdk::KeyPair;
 
 use model::App;
 
@@ -23,13 +24,14 @@ fn main() -> io::Result<()> {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
 
     let cfg = ClientConfig::load_with_args();
-    let (client, initial_orders, my_address) = match cfg.keypair() {
-        Ok(kp) => {
-            let addr = kp.address();
+    let (client, initial_orders, my_address) = match cfg.seed() {
+        Ok(seed) => {
+            let kp = KeyPair::from_ed25519_bytes(&seed);
+            let pubkey = hex::encode(kp.pubkey_bytes());
             let c = Arc::new(ChainClient::new(
                 &cfg.chain.http_url,
                 &cfg.chain.ws_url,
-                kp,
+                seed,
                 cfg.chain.chain_id,
             ));
             let orders = rt.block_on(async {
@@ -37,7 +39,7 @@ fn main() -> io::Result<()> {
                     .await
                     .ok()
             });
-            (Some(c), orders, addr)
+            (Some(c), orders, pubkey)
         }
         Err(e) => {
             eprintln!("Failed to parse keypair: {}", e);

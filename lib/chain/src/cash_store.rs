@@ -49,22 +49,26 @@ impl CashStore {
         self.save()
     }
 
-    /// Merge records from another JSON file.
-    /// Returns the number of new records added.
-    pub fn merge_from_file(
+    /// Import records from a JSON file, replacing any existing records for the
+    /// same tokens. This prevents stale cash IDs (from old sessions or old
+    /// pubkeys) from being mixed with fresh ones.
+    /// Returns the number of records loaded from the file.
+    pub fn load_from_file(
         &mut self,
         path: &PathBuf,
     ) -> Result<usize, Box<dyn std::error::Error>> {
         let content = fs::read_to_string(path)?;
         let incoming: Vec<CashRecord> = serde_json::from_str(&content)?;
-        let before = self.records.len();
-        for rec in incoming {
-            if !self.records.iter().any(|r| r.cash_id == rec.cash_id) {
-                self.records.push(rec);
-            }
-        }
+        // Collect the tokens present in the file
+        let tokens: std::collections::HashSet<&str> =
+            incoming.iter().map(|r| r.token.as_str()).collect();
+        // Drop all existing records for those tokens
+        self.records.retain(|r| !tokens.contains(r.token.as_str()));
+        // Insert the fresh records
+        let n = incoming.len();
+        self.records.extend(incoming);
         self.save()?;
-        Ok(self.records.len() - before)
+        Ok(n)
     }
 
     fn save(&self) -> Result<(), Box<dyn std::error::Error>> {

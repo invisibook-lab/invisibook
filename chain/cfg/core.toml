@@ -6,24 +6,34 @@ db_path = "data/orders.db"
 [account]
 db_path = "data/accounts.db"
 
-# Genesis accounts: pre-fund alice and bob with ETH and USDT.
-# Addresses are derived from the ed25519 seeds in tests/alice.toml and tests/bob.toml.
-[[account.genesis_accounts]]
-address = "0x34750f98bd59fcfc946da45aaabe933be154a4b5"
-token   = "ETH"
-amount  = "1000"
+# Genesis cash: explicit Cash records inserted at chain startup.
+# IDs and ciphertexts must match cfg/tests/alice_cash.json and bob_cash.json.
+# amount = poseidon(plaintext, random) — computed by genesis_encrypt() in Rust.
+# alice mnemonic: "test test test test test test test test test test test junk"
+#   → pubkey (m/44'/60'/0'/0'/0'): 3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb
+# bob mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+#   → pubkey (m/44'/60'/0'/0'/0'): 175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b
 
-[[account.genesis_accounts]]
-address = "0x34750f98bd59fcfc946da45aaabe933be154a4b5"
-token   = "USDT"
-amount  = "500000"
+[[account.genesis_cash]]
+id     = "f8c0ea0222c6acba512cc9ed613b64e3"
+pubkey = "3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb"
+token  = "ETH"
+amount = "06fd5d63a99250c4b5c8dbd7e9d84eed86fd13f5108d10323e5c278fba524582"
 
-[[account.genesis_accounts]]
-address = "0x6a3803d5f059902a1c6dafbc9ba4729212f7caac"
-token   = "ETH"
-amount  = "1000"
+[[account.genesis_cash]]
+id     = "68ff80c3b73a39798be67087fb9f97ed"
+pubkey = "3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb"
+token  = "USDT"
+amount = "045f937abf56c53ba43116be5ad32a1c52a08329fe08fb9b57cefda4d9c5127b"
 
-[[account.genesis_accounts]]
-address = "0x6a3803d5f059902a1c6dafbc9ba4729212f7caac"
-token   = "USDT"
-amount  = "500000"
+[[account.genesis_cash]]
+id     = "4e88dd94be4154a37da7dd5b9d06a4a1"
+pubkey = "175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b"
+token  = "ETH"
+amount = "165fa4d0dad9b08c83ebea6362e22dbf373b3d734a9dd1b73df787ec975f221b"
+
+[[account.genesis_cash]]
+id     = "ddada5eb9484fa322a931d53bb945431"
+pubkey = "175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b"
+token  = "USDT"
+amount = "14794eafad293b03995020d7214028001c98cd66a6c15b89dc16fc577eec0bd4"
