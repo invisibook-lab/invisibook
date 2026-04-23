@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use invisibook_lib::chain::ChainClient;
+use invisibook_lib::chain::{ChainClient, OrderEvent};
 use invisibook_lib::orderbook;
 use invisibook_lib::types::*;
 
@@ -27,7 +27,7 @@ pub struct App {
     pub is_error: bool,
     pub chain_client: Option<Arc<ChainClient>>,
     pub runtime: tokio::runtime::Runtime,
-    pub event_rx: Option<std::sync::mpsc::Receiver<Order>>,
+    pub event_rx: Option<std::sync::mpsc::Receiver<OrderEvent>>,
     pub my_address: String,
     pub balances: HashMap<TokenID, usize>, // token -> active cash count
 }
@@ -37,7 +37,7 @@ impl App {
         chain_orders: Option<Vec<Order>>,
         chain_client: Option<Arc<ChainClient>>,
         runtime: tokio::runtime::Runtime,
-        event_rx: Option<std::sync::mpsc::Receiver<Order>>,
+        event_rx: Option<std::sync::mpsc::Receiver<OrderEvent>>,
         my_address: String,
         balances: HashMap<TokenID, usize>,
     ) -> Self {
@@ -67,19 +67,27 @@ impl App {
     /// Drain confirmed orders from the background WS subscription and upsert them.
     pub fn process_chain_events(&mut self) {
         let Some(ref rx) = self.event_rx else { return };
-        while let Ok(order) = rx.try_recv() {
-            let id = order.id.clone();
-            if let Some(existing) = self.orders.iter_mut().find(|o| o.id == id) {
-                *existing = order;
-            } else {
-                self.orders.push(order);
-                orderbook::sort_orders(&mut self.orders);
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                OrderEvent::Confirmed(order) => {
+                    let id = order.id.clone();
+                    if let Some(existing) = self.orders.iter_mut().find(|o| o.id == id) {
+                        *existing = order;
+                    } else {
+                        self.orders.push(order);
+                        orderbook::sort_orders(&mut self.orders);
+                    }
+                    self.message = Some(format!(
+                        "✓ Order {} confirmed on chain",
+                        &id[..id.len().min(7)]
+                    ));
+                    self.is_error = false;
+                }
+                OrderEvent::Error(e) => {
+                    self.message = Some(format!("✗ Chain error: {e}"));
+                    self.is_error = true;
+                }
             }
-            self.message = Some(format!(
-                "✓ Order {} confirmed on chain",
-                &id[..id.len().min(7)]
-            ));
-            self.is_error = false;
         }
     }
 

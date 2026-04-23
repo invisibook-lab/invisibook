@@ -12,9 +12,9 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 
-use invisibook_lib::chain::ChainClient;
+use invisibook_lib::chain::{ChainClient, OrderEvent};
 use invisibook_lib::config::ClientConfig;
-use invisibook_lib::types::{Order, CASH_ACTIVE};
+use invisibook_lib::types::CASH_ACTIVE;
 use yu_sdk::KeyPair;
 
 use model::App;
@@ -62,14 +62,14 @@ fn main() -> io::Result<()> {
     };
 
     // ── Background WS subscription ──
-    let (order_tx, order_rx) = std::sync::mpsc::channel::<Order>();
+    let (order_tx, order_rx) = std::sync::mpsc::channel::<OrderEvent>();
     if let Some(ref c) = client {
         let c_clone = c.clone();
         rt.spawn(async move {
             match c_clone.subscribe_order_events().await {
                 Ok((mut rx, _handle)) => {
-                    while let Some(order) = rx.recv().await {
-                        let _ = order_tx.send(order);
+                    while let Some(event) = rx.recv().await {
+                        let _ = order_tx.send(event);
                     }
                 }
                 Err(e) => eprintln!("WS subscription failed: {e}"),
