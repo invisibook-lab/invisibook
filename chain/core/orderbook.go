@@ -282,7 +282,7 @@ func (ot *OrderBook) QueryOrders(ctx *context.ReadContext) {
 		return
 	}
 
-	ctx.JsonOk(orders)
+	ctx.JsonOk(map[string]interface{}{"orders": orders})
 }
 
 // ────────────────────── Matching Logic ──────────────────────

@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 
 use hex;
 use invisibook_lib::cash_store::CashStore;
-use invisibook_lib::chain::ChainClient;
+use invisibook_lib::chain::{ChainClient, OrderEvent};
 use invisibook_lib::config::ClientConfig;
 use invisibook_lib::orderbook;
 use invisibook_lib::types::*;
@@ -31,18 +31,17 @@ fn main() {
 #[component]
 fn App() -> Element {
     // ── Load config & create chain client ──
-    let (initial_client, initial_address) = {
+    let (initial_client, initial_address, init_error) = {
         let cfg = ClientConfig::load_with_args();
         match cfg.seed() {
             Ok(seed) => {
                 let kp = invisibook_lib::config::ClientConfig::keypair_from_seed(&seed).unwrap();
                 let pubkey = hex::encode(kp.pubkey_bytes());
                 let c = ChainClient::new(&cfg.chain.http_url, &cfg.chain.ws_url, seed, cfg.chain.chain_id);
-                (Some(Arc::new(c)), pubkey)
+                (Some(Arc::new(c)), pubkey, None)
             }
             Err(e) => {
-                eprintln!("Failed to parse keypair: {}", e);
-                (None, String::new())
+                (None, String::new(), Some(format!("✗ Failed to parse keypair: {e}")))
             }
         }
     };
@@ -57,24 +56,27 @@ fn App() -> Element {
     let own_order_ids = use_signal(HashMap::<OrderID, String>::new);
     let selected = use_signal(|| None::<usize>);
     let expanded = use_signal(|| None::<usize>);
-    let mut message = use_signal(|| None::<(String, bool)>);
+    let mut message = use_signal(|| init_error.map(|e| (e, true)));
     let cash_store = use_signal(|| CashStore::load(CashStore::default_path()));
     let mut show_key_import = use_signal(|| false);
     let key_imported = use_signal(|| false);
 
-    // ── Fetch initial order list from chain ──
-    let _fetch = use_resource(move || {
-        let client = client.read().clone();
-        async move {
-            if let Some(c) = client {
+    // ── Poll order list from chain every 3 seconds (≈ 1 block) ──
+    use_coroutine(move |_: UnboundedReceiver<()>| async move {
+        loop {
+            let c = client.read().clone();
+            if let Some(c) = c {
                 match c.query_orders(None, None, None, None, None, Some(100), Some(0)).await {
                     Ok(mut chain_orders) => {
                         orderbook::sort_orders(&mut chain_orders);
                         orders.set(chain_orders);
                     }
-                    Err(e) => eprintln!("Failed to fetch orders: {}", e),
+                    Err(e) => {
+                        message.set(Some((format!("✗ Failed to fetch orders: {e}"), true)));
+                    }
                 }
             }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
     });
 
@@ -86,21 +88,28 @@ fn App() -> Element {
         async move {
         let Some(c) = c else { return };
         let Ok((mut rx, _handle)) = c.subscribe_order_events().await else {
-            eprintln!("Failed to subscribe to chain events");
+            message.set(Some(("✗ Failed to subscribe to chain events".into(), true)));
             return;
         };
-        while let Some(order) = rx.recv().await {
-            let short = order.id[..order.id.len().min(7)].to_string();
-            {
-                let mut o = orders.write();
-                if let Some(existing) = o.iter_mut().find(|x| x.id == order.id) {
-                    *existing = order;
-                } else {
-                    o.push(order);
-                    orderbook::sort_orders(&mut *o);
+        while let Some(event) = rx.recv().await {
+            match event {
+                OrderEvent::Confirmed(order) => {
+                    let short = order.id[..order.id.len().min(7)].to_string();
+                    {
+                        let mut o = orders.write();
+                        if let Some(existing) = o.iter_mut().find(|x| x.id == order.id) {
+                            *existing = order;
+                        } else {
+                            o.push(order);
+                            orderbook::sort_orders(&mut *o);
+                        }
+                    }
+                    message.set(Some((format!("✓ Order {short} confirmed on chain"), false)));
+                }
+                OrderEvent::Error(e) => {
+                    message.set(Some((format!("✗ Chain error: {e}"), true)));
                 }
             }
-            message.set(Some((format!("✓ Order {short} confirmed on chain"), false)));
         }
         } // end async move
     }); // end use_coroutine

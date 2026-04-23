@@ -73,6 +73,7 @@ pub struct QueryOrderItem {
     #[serde(rename = "type")]
     pub trade_type: u8,
     pub subject: QueryTradePair,
+    #[serde(default, deserialize_with = "deserialize_price")]
     pub price: Option<u64>,
     pub amount: CipherText,
     pub pubkey: String,
@@ -80,6 +81,21 @@ pub struct QueryOrderItem {
     pub status: u8,
     #[serde(default)]
     pub match_order: Option<String>,
+}
+
+/// Go's `*big.Int` serializes as a JSON string (e.g. `"100"`) via `MarshalText`,
+/// but we need `Option<u64>`. This handles both string and number representations.
+fn deserialize_price<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v: Option<Value> = Option::deserialize(deserializer)?;
+    match v {
+        None => Ok(None),
+        Some(Value::Number(n)) => Ok(n.as_u64()),
+        Some(Value::String(s)) => Ok(s.parse::<u64>().ok()),
+        _ => Ok(None),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +185,14 @@ struct ChainOrderEvent {
     event_type: String,
     order: QueryOrderItem,
     matched: Option<QueryOrderItem>,
+}
+
+/// Events yielded by `subscribe_order_events`.
+pub enum OrderEvent {
+    /// An order was confirmed on-chain.
+    Confirmed(Order),
+    /// An error occurred (chain tx error or parse failure).
+    Error(String),
 }
 
 // ────────────────────── Chain Client ──────────────────────
@@ -383,14 +407,12 @@ impl ChainClient {
 
     /// Subscribe to on-chain order events via WebSocket.
     ///
-    /// Returns an `mpsc::Receiver<Order>` that yields confirmed orders as they
-    /// are included in blocks, plus a `JoinHandle` for the background task.
-    /// Each `SendOrder` tx emits one "created" event (and optionally one
-    /// "matched" event) — both are forwarded as separate `Order` values.
+    /// Returns an `mpsc::Receiver<OrderEvent>` that yields confirmed orders or
+    /// chain-reported errors, plus a `JoinHandle` for the background task.
     pub async fn subscribe_order_events(
         &self,
     ) -> Result<
-        (tokio::sync::mpsc::Receiver<Order>, tokio::task::JoinHandle<()>),
+        (tokio::sync::mpsc::Receiver<OrderEvent>, tokio::task::JoinHandle<()>),
         Box<dyn std::error::Error + Send + Sync>,
     > {
         use futures_util::StreamExt;
@@ -403,11 +425,17 @@ impl ChainClient {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
 
         let handle = tokio::spawn(async move {
+            eprintln!("[ws] subscription connected");
             while let Some(Ok(msg)) = read.next().await {
                 let Ok(text) = msg.into_text() else { continue };
                 let Ok(receipt) = serde_json::from_str::<YuReceipt>(&text) else {
+                    eprintln!("[ws] failed to parse receipt");
                     continue;
                 };
+                eprintln!(
+                    "[ws] receipt: tripod={:?} writing={:?} error={:?} events={}",
+                    receipt.tripod_name, receipt.writing_name, receipt.error, receipt.events.len()
+                );
                 if receipt.tripod_name.as_deref() != Some("orderbook") {
                     continue;
                 }
@@ -415,17 +443,20 @@ impl ChainClient {
                     continue;
                 }
                 if !receipt.error.is_empty() {
-                    continue; // tx failed on-chain, ignore
+                    let _ = tx.send(OrderEvent::Error(receipt.error)).await;
+                    continue;
                 }
                 for event in receipt.events {
-                    let Ok(chain_event) =
-                        serde_json::from_slice::<ChainOrderEvent>(&event.value)
-                    else {
-                        continue;
-                    };
-                    let _ = tx.send(query_item_to_order(chain_event.order)).await;
-                    if let Some(matched) = chain_event.matched {
-                        let _ = tx.send(query_item_to_order(matched)).await;
+                    match serde_json::from_slice::<ChainOrderEvent>(&event.value) {
+                        Ok(chain_event) => {
+                            let _ = tx.send(OrderEvent::Confirmed(query_item_to_order(chain_event.order))).await;
+                            if let Some(matched) = chain_event.matched {
+                                let _ = tx.send(OrderEvent::Confirmed(query_item_to_order(matched))).await;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(OrderEvent::Error(format!("Failed to parse chain event: {e}"))).await;
+                        }
                     }
                 }
             }

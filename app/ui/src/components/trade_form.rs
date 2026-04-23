@@ -47,20 +47,20 @@ pub fn TradeForm(
     let is_submitting = *submitting.read();
     let can_submit = price_val > 0.0 && amount_val > 0.0 && !is_submitting;
 
-    // ── Balance from CashStore: (token, active_count, locked_count) ──
-    // Group all local cash records by token and count by status.
-    let (active_entries, locked_entries): (Vec<(String, usize)>, Vec<(String, usize)>) = {
+    // ── Balance from CashStore: (token, active_amount, locked_amount) ──
+    // Group all local cash records by token and sum amounts by status.
+    let (active_entries, locked_entries): (Vec<(String, u64)>, Vec<(String, u64)>) = {
         let store = cash_store.read();
-        let mut map: HashMap<String, (usize, usize)> = HashMap::new();
+        let mut map: HashMap<String, (u64, u64)> = HashMap::new();
         for rec in store.records() {
             let entry = map.entry(rec.token.clone()).or_default();
             if rec.status == CASH_ACTIVE {
-                entry.0 += 1;
+                entry.0 += rec.amount;
             } else if rec.status == CASH_LOCKED {
-                entry.1 += 1;
+                entry.1 += rec.amount;
             }
         }
-        let mut pairs: Vec<(String, usize, usize)> =
+        let mut pairs: Vec<(String, u64, u64)> =
             map.into_iter().map(|(t, (a, l))| (t, a, l)).collect();
         pairs.sort_by(|a, b| a.0.cmp(&b.0));
         let active = pairs.iter().filter(|(_, a, _)| *a > 0).map(|(t, a, _)| (t.clone(), *a)).collect();
@@ -156,7 +156,7 @@ pub fn TradeForm(
                         .insert(order.id.clone(), amount_str_clone);
                     expanded.set(None);
                     message.set(Some((
-                        format!("⏳ {} {}/{} submitting to chain...", trade_type, t1, t2),
+                        format!("✓ {} {}/{} order submitted", trade_type, t1, t2),
                         false,
                     )));
                 }
