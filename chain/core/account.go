@@ -104,7 +104,7 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 	// into the Invisibook bridge contract on another chain.
 
 	cash := &Cash{
-		ID:      generateCashID(),
+		ID:      computeCashID(req.Pubkey, req.Token, req.Amount),
 		Pubkey:  req.Pubkey,
 		Token:   req.Token,
 		Amount:  req.Amount,
@@ -123,10 +123,11 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 // ────────────────────── Writing: Withdraw ──────────────────────
 
 type WithdrawRequest struct {
-	Token   TokenID       `json:"token"   validate:"required"`
-	Inputs  []string      `json:"inputs"  validate:"required,min=1"` // Cash IDs to consume
-	Change  *ChangeOutput `json:"change,omitempty"`                  // optional change Cash
-	ZkProof string        `json:"zk_proof" validate:"required"`      // proves the withdrawal is valid
+	Pubkey  string        `json:"pubkey"   validate:"required"`      // withdrawer's ed25519 pubkey (64-char hex)
+	Token   TokenID       `json:"token"    validate:"required"`
+	Inputs  []string      `json:"inputs"   validate:"required,min=1"` // Cash IDs to consume
+	Change  *ChangeOutput `json:"change,omitempty"`                   // optional change Cash
+	ZkProof string        `json:"zk_proof" validate:"required"`       // proves the withdrawal is valid
 }
 
 // Withdraw verifies the overall spend proof, then marks each input Cash as Spent.
@@ -146,8 +147,8 @@ func (a *Account) Withdraw(ctx *context.WriteContext) error {
 	// TODO: verify req.ZkProof — proves that sum(inputs) >= withdrawn amount
 	// and that the change output commitment is correct.
 
-	spendTxID := generateCashID()
-	if err := a.SpendCash(req.Inputs, spendTxID); err != nil {
+	spendBy := fmt.Sprintf("withdraw:%s", req.Pubkey[:8])
+	if err := a.SpendCash(req.Inputs, spendBy); err != nil {
 		return fmt.Errorf("failed to spend cash: %w", err)
 	}
 
@@ -156,11 +157,11 @@ func (a *Account) Withdraw(ctx *context.WriteContext) error {
 			return fmt.Errorf("invalid change output: %w", err)
 		}
 		changeCash := &Cash{
-			ID:      generateCashID(),
+			ID:      computeCashID(req.Change.Pubkey, req.Token, req.Change.Amount),
 			Pubkey:  req.Change.Pubkey,
 			Token:   req.Token,
 			Amount:  req.Change.Amount,
-			ZkProof: req.ZkProof, // reuse withdrawal proof as the change commitment
+			ZkProof: req.ZkProof,
 			Status:  Active,
 		}
 		if err := a.CreateCash(changeCash); err != nil {
@@ -168,7 +169,7 @@ func (a *Account) Withdraw(ctx *context.WriteContext) error {
 		}
 	}
 
-	ctx.EmitStringEvent("withdraw: token=%s spent=%d cash tx=%s",
-		string(req.Token), len(req.Inputs), spendTxID)
+	ctx.EmitStringEvent("withdraw: token=%s spent=%d by=%s",
+		string(req.Token), len(req.Inputs), spendBy)
 	return nil
 }

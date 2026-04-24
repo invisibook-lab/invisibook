@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 
+use invisibook_lib::cash_store::CashStore;
 use invisibook_lib::chain::ChainClient;
 use invisibook_lib::config::ClientConfig;
 use invisibook_lib::orderbook;
@@ -24,10 +25,11 @@ enum Tab {
 fn App() -> Element {
     let (initial_client, initial_address) = {
         let cfg = ClientConfig::load(None);
-        match cfg.keypair() {
-            Ok(kp) => {
-                let addr = kp.address();
-                let c = ChainClient::new(&cfg.chain.http_url, &cfg.chain.ws_url, kp, cfg.chain.chain_id);
+        match cfg.seed() {
+            Ok(seed) => {
+                let kp = yu_sdk::KeyPair::from_ed25519_bytes(&seed);
+                let addr = hex::encode(kp.pubkey_bytes());
+                let c = ChainClient::new(&cfg.chain.http_url, &cfg.chain.ws_url, seed, cfg.chain.chain_id);
                 (Some(Arc::new(c)), addr)
             }
             Err(_) => (None, String::new()),
@@ -35,6 +37,7 @@ fn App() -> Element {
     };
     let client: Signal<Option<Arc<ChainClient>>> = use_signal(|| initial_client);
     let my_address: Signal<String> = use_signal(|| initial_address);
+    let cash_store: Signal<CashStore> = use_signal(|| CashStore::load(CashStore::default_path()));
 
     let mut orders = use_signal(Vec::<Order>::new);
     let own_order_ids = use_signal(HashMap::<OrderID, String>::new);
@@ -88,7 +91,7 @@ fn App() -> Element {
                 if *active_tab.read() == Tab::OrderBook {
                     OrderBook { orders, own_order_ids, selected, expanded }
                 } else {
-                    TradeForm { orders, own_order_ids, expanded, message, chain_client: client, my_address }
+                    TradeForm { orders, own_order_ids, expanded, message, chain_client: client, my_address, cash_store }
                 }
             }
 

@@ -2341,8 +2341,10 @@ name = "invisibook-mobile"
 version = "0.1.0"
 dependencies = [
  "dioxus",
+ "hex",
  "invisibook-lib",
  "invisibook-ui",
+ "yu-sdk",
 ]
 
 [[package]]

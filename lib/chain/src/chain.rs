@@ -10,6 +10,12 @@ pub use yu_sdk::KeyPair as YuKeyPair;
 // ────────────────────── Request/Response Types ──────────────────────
 
 #[derive(Debug, Serialize)]
+struct CashChangeParam {
+    cash_id: String,
+    amount: CipherText,
+}
+
+#[derive(Debug, Serialize)]
 struct SendOrderParams {
     id: OrderID,
     #[serde(rename = "type")]
@@ -22,6 +28,8 @@ struct SendOrderParams {
     signature: String, // ed25519 sig over order ID bytes (128-char hex)
     input_cash_ids: Vec<String>,
     handling_fee: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    change: Option<CashChangeParam>,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,6 +130,7 @@ struct DepositParams {
 
 #[derive(Debug, Serialize)]
 struct WithdrawParams {
+    pubkey: String,
     token: TokenID,
     inputs: Vec<String>,
     change: ChangeOutputParams,
@@ -236,9 +245,11 @@ impl ChainClient {
     }
 
     /// Sends a new order to the chain (writing request to OrderBook.SendOrder).
+    /// If `change` is provided, the chain will split the input cash and mint change.
     pub async fn send_order(
         &self,
         order: &Order,
+        change: Option<&CashChange>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let type_int = match order.trade_type {
             TradeType::Buy => 0u8,
@@ -258,6 +269,10 @@ impl ChainClient {
             signature,
             input_cash_ids: order.input_cash_ids.clone(),
             handling_fee: order.handling_fee.clone(),
+            change: change.map(|c| CashChangeParam {
+                cash_id: c.cash_id.clone(),
+                amount: c.amount.clone(),
+            }),
         };
         self.client
             .write_chain("orderbook", "SendOrder", &params, self.chain_id, 100, 0)
@@ -392,6 +407,7 @@ impl ChainClient {
         zk_proof: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let params = WithdrawParams {
+            pubkey: self.pubkey_hex.clone(),
             token: token.to_string(),
             inputs,
             change: ChangeOutputParams {

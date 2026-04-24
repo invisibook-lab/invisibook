@@ -101,21 +101,36 @@ pub fn TradeForm(
         // Buy → pays with token2; Sell → spends token1
         let input_token = if trade_type == TradeType::Buy { t2.clone() } else { t1.clone() };
 
-        // Collect active cash IDs for the input token from the local CashStore
-        let input_cash_ids: Vec<String> = {
-            let store = cash_store.read();
-            store
-                .records()
-                .iter()
-                .filter(|r| r.token == input_token && r.status == CASH_ACTIVE)
-                .map(|r| r.cash_id.clone())
-                .collect()
+        // Compute total: Buy → price * amount (token2); Sell → amount (token1)
+        let total: u64 = if trade_type == TradeType::Buy {
+            price * _amount
+        } else {
+            _amount
         };
 
-        if input_cash_ids.is_empty() {
-            message.set(Some((format!("✗ No active {} cash available", input_token), true)));
-            return;
-        }
+        let pubkey = my_address.read().clone();
+
+        // Smart cash selection
+        let (input_cash_ids, cash_change) = {
+            let store = cash_store.read();
+            match orderbook::select_cash(store.records(), &input_token, total) {
+                orderbook::CashSelection::Exact(ids) => (ids, None),
+                orderbook::CashSelection::WithChange { cash_ids, change_amount } => {
+                    let (change_cipher, _change_amt, change_random) =
+                        orderbook::encrypt_amount_with_info(&change_amount.to_string());
+                    let change_cash_id = orderbook::compute_cash_id(&pubkey, &input_token, &change_cipher);
+                    let change = CashChange {
+                        cash_id: change_cash_id.clone(),
+                        amount: change_cipher,
+                    };
+                    (cash_ids, Some((change, change_cash_id, change_amount, _change_amt, change_random)))
+                }
+                orderbook::CashSelection::Insufficient => {
+                    message.set(Some((format!("✗ Insufficient {} balance (need {})", input_token, total), true)));
+                    return;
+                }
+            }
+        };
 
         let order_id = orderbook::compute_order_id(&input_cash_ids);
 
@@ -124,7 +139,6 @@ pub fn TradeForm(
             token2: t2.clone(),
         };
         let amount = orderbook::encrypt_amount(&amount_str);
-        let pubkey = my_address.read().clone();
 
         let order = Order {
             id: order_id,
@@ -133,7 +147,7 @@ pub fn TradeForm(
             price: Some(price),
             amount,
             pubkey,
-            input_cash_ids,
+            input_cash_ids: input_cash_ids.clone(),
             handling_fee: vec![fee.clone()],
             status: OrderStatus::Pending,
             match_order: None,
@@ -146,15 +160,37 @@ pub fn TradeForm(
             return;
         };
 
+        // Extract change info for the async block
+        let change_ref = cash_change.as_ref().map(|(c, _, _, _, _)| c.clone());
+
         submitting.set(true);
         let amount_str_clone = amount_str.clone();
         spawn(async move {
-            match client.send_order(&order).await {
+            match client.send_order(&order, change_ref.as_ref()).await {
                 Ok(()) => {
                     own_order_ids
                         .write()
                         .insert(order.id.clone(), amount_str_clone);
                     expanded.set(None);
+
+                    // Update CashStore: mark originals as Spent, add change record
+                    if let Some((_, change_cash_id, change_amount, _, change_random)) = cash_change {
+                        let mut store = cash_store.write();
+                        for rec in store.records_mut().iter_mut() {
+                            if input_cash_ids.contains(&rec.cash_id) {
+                                rec.status = CASH_SPENT;
+                            }
+                        }
+                        store.records_mut().push(invisibook_lib::cash_store::CashRecord {
+                            cash_id: change_cash_id,
+                            token: input_token.clone(),
+                            amount: change_amount,
+                            random: change_random,
+                            status: CASH_ACTIVE,
+                        });
+                        let _ = store.flush();
+                    }
+
                     message.set(Some((
                         format!("✓ {} {}/{} order submitted", trade_type, t1, t2),
                         false,

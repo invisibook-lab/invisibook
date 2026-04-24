@@ -1,7 +1,7 @@
 package core
 
 import (
-	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 )
 
@@ -66,13 +66,13 @@ type ChangeOutput struct {
 
 // ────────────────────── Helpers ──────────────────────
 
-// generateCashID returns a random 32-hex-character string.
-func generateCashID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("failed to generate Cash ID: %v", err))
-	}
-	return fmt.Sprintf("%x", b)
+// computeCashID derives a deterministic Cash ID from its contents: SHA256(pubkey + token + amount).
+func computeCashID(pubkey string, token TokenID, amount CipherText) string {
+	h := sha256.New()
+	h.Write([]byte(pubkey))
+	h.Write([]byte(token))
+	h.Write([]byte(amount))
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 // verifyProof checks that the ZK proof stored on the Cash is valid,

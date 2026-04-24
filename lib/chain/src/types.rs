@@ -75,6 +75,7 @@ pub struct CashOutput {
 // CashStatus values: 0 = Active, 1 = Locked, 2 = Spent
 pub const CASH_ACTIVE: u8 = 0;
 pub const CASH_LOCKED: u8 = 1;
+pub const CASH_SPENT: u8 = 2;
 
 #[derive(Debug, Clone)]
 pub struct CashItem {
@@ -98,6 +99,13 @@ pub struct AccountRecord {
 pub struct ChangeOutput {
     pub pubkey: String, // recipient's ed25519 pubkey (64-char hex)
     pub amount: CipherText,
+}
+
+/// Change output attached to a SendOrder when splitting cash.
+#[derive(Debug, Clone)]
+pub struct CashChange {
+    pub cash_id: String,      // client-generated change cash ID
+    pub amount: CipherText,   // encrypted change amount
 }
 
 // ────────────────────── Order ──────────────────────

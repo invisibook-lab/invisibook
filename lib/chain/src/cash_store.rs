@@ -43,6 +43,10 @@ impl CashStore {
         &self.records
     }
 
+    pub fn records_mut(&mut self) -> &mut Vec<CashRecord> {
+        &mut self.records
+    }
+
     /// Add a record and persist to disk.
     pub fn add(&mut self, record: CashRecord) -> Result<(), Box<dyn std::error::Error>> {
         self.records.push(record);
@@ -69,6 +73,11 @@ impl CashStore {
         self.records.extend(incoming);
         self.save()?;
         Ok(n)
+    }
+
+    /// Persist current records to disk. Call after mutating via `records_mut()`.
+    pub fn flush(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.save()
     }
 
     fn save(&self) -> Result<(), Box<dyn std::error::Error>> {

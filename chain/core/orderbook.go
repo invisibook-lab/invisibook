@@ -42,16 +42,24 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 
 // ────────────────────── Writing: SendOrder ──────────────────────
 
+// CashChangeOutput describes a change Cash the client wants minted back
+// after a split. The client pre-generates the ID and encrypts the change amount.
+type CashChangeOutput struct {
+	CashID string     `json:"cash_id" validate:"required"` // client-generated
+	Amount CipherText `json:"amount"  validate:"required"` // encrypted change amount
+}
+
 type SendOrderRequest struct {
-	ID           OrderID    `json:"id"             validate:"required"`
-	Type         TradeType  `json:"type"           validate:"oneof=0 1"`
-	Subject      TradePair  `json:"subject"`
-	Price        *big.Int   `json:"price,omitempty"`
-	Amount       CipherText `json:"amount"         validate:"required"`
-	Pubkey       string     `json:"pubkey"         validate:"required"` // sender's ed25519 pubkey (64-char hex)
-	Signature    string     `json:"signature"      validate:"required"` // ed25519 sig over order ID bytes (128-char hex)
-	InputCashIDs []string   `json:"input_cash_ids" validate:"required,min=1"`
-	HandlingFee  []string   `json:"handling_fee"   validate:"required,min=1"` // must be plaintext.
+	ID           OrderID          `json:"id"             validate:"required"`
+	Type         TradeType        `json:"type"           validate:"oneof=0 1"`
+	Subject      TradePair        `json:"subject"`
+	Price        *big.Int         `json:"price,omitempty"`
+	Amount       CipherText       `json:"amount"         validate:"required"`
+	Pubkey       string           `json:"pubkey"         validate:"required"` // sender's ed25519 pubkey (64-char hex)
+	Signature    string           `json:"signature"      validate:"required"` // ed25519 sig over order ID bytes (128-char hex)
+	InputCashIDs []string         `json:"input_cash_ids" validate:"required,min=1"`
+	HandlingFee  []string         `json:"handling_fee"   validate:"required,min=1"` // must be plaintext.
+	Change       *CashChangeOutput `json:"change,omitempty"`
 }
 
 // SendOrder creates a new order, locks the input Cash, stores it via SQL, and attempts to match it.
@@ -110,9 +118,33 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 		}
 	}
 
-	// Lock the input Cash
-	if err := ot.Account.LockCash(req.InputCashIDs, string(req.ID)); err != nil {
-		return fmt.Errorf("failed to lock cash: %w", err)
+	// Lock or split the input Cash
+	var orderInputCashIDs []string
+	if req.Change != nil {
+		// Split mode: spend originals, create one locked cash + one active change cash
+		if err := ot.Account.SpendCash(req.InputCashIDs, string(req.ID)); err != nil {
+			return fmt.Errorf("failed to spend cash for split: %w", err)
+		}
+		lockedCashID := computeCashID(req.Pubkey, expectedToken, req.Amount)
+		if err := ot.Account.CreateCash(&Cash{
+			ID: lockedCashID, Pubkey: req.Pubkey, Token: expectedToken,
+			Amount: req.Amount, ZkProof: "split", Status: Locked, By: string(req.ID),
+		}); err != nil {
+			return fmt.Errorf("failed to create locked split cash: %w", err)
+		}
+		if err := ot.Account.CreateCash(&Cash{
+			ID: req.Change.CashID, Pubkey: req.Pubkey, Token: expectedToken,
+			Amount: req.Change.Amount, ZkProof: "split", Status: Active,
+		}); err != nil {
+			return fmt.Errorf("failed to create change cash: %w", err)
+		}
+		orderInputCashIDs = []string{lockedCashID}
+	} else {
+		// Normal mode: lock entire cash (existing behavior)
+		if err := ot.Account.LockCash(req.InputCashIDs, string(req.ID)); err != nil {
+			return fmt.Errorf("failed to lock cash: %w", err)
+		}
+		orderInputCashIDs = req.InputCashIDs
 	}
 
 	order := &Order{
@@ -122,7 +154,7 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 		Price:        req.Price,
 		Amount:       req.Amount,
 		Pubkey:       req.Pubkey,
-		InputCashIDs: req.InputCashIDs,
+		InputCashIDs: orderInputCashIDs,
 		Status:       Pending,
 	}
 
@@ -200,14 +232,14 @@ func (ot *OrderBook) SettleOrder(ctx *context.WriteContext) error {
 	// TODO: verify ZkProof — proves that sum(inputs) == sum(outputs)
 
 	// Spend locked Cash from both orders
-	settleTxID := generateCashID()
+	settleBy := fmt.Sprintf("settle:%s:%s", order0.ID[:8], order1.ID[:8])
 	if len(order0.InputCashIDs) > 0 {
-		if err := ot.Account.SpendCash(order0.InputCashIDs, settleTxID); err != nil {
+		if err := ot.Account.SpendCash(order0.InputCashIDs, settleBy); err != nil {
 			return fmt.Errorf("failed to spend cash for order %s: %w", order0.ID, err)
 		}
 	}
 	if len(order1.InputCashIDs) > 0 {
-		if err := ot.Account.SpendCash(order1.InputCashIDs, settleTxID); err != nil {
+		if err := ot.Account.SpendCash(order1.InputCashIDs, settleBy); err != nil {
 			return fmt.Errorf("failed to spend cash for order %s: %w", order1.ID, err)
 		}
 	}
@@ -218,7 +250,7 @@ func (ot *OrderBook) SettleOrder(ctx *context.WriteContext) error {
 			return fmt.Errorf("invalid cash output: %w", err)
 		}
 		newCash := &Cash{
-			ID:      generateCashID(),
+			ID:      computeCashID(out.Pubkey, out.Token, out.Amount),
 			Pubkey:  out.Pubkey,
 			Token:   out.Token,
 			Amount:  out.Amount,

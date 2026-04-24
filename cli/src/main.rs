@@ -12,6 +12,7 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 
+use invisibook_lib::cash_store::CashStore;
 use invisibook_lib::chain::{ChainClient, OrderEvent};
 use invisibook_lib::config::ClientConfig;
 use invisibook_lib::types::CASH_ACTIVE;
@@ -84,8 +85,11 @@ fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // ── Load local CashStore ──
+    let cash_store = CashStore::load(CashStore::default_path());
+
     // ── Run app ──
-    let mut app = App::new_with(initial_orders, client, rt, Some(order_rx), my_address, initial_balances);
+    let mut app = App::new_with(initial_orders, client, rt, Some(order_rx), my_address, initial_balances, cash_store);
     let result = run_app(&mut terminal, &mut app);
 
     // ── Restore terminal ──

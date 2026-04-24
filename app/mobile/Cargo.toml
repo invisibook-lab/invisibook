@@ -7,3 +7,5 @@ edition = "2021"
 dioxus = { version = "0.7", features = ["mobile"] }
 invisibook-ui = { path = "../ui" }
 invisibook-lib = { path = "../../lib/chain" }
+yu-sdk = "0.1.1"
+hex = "0.4"

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use invisibook_lib::cash_store::CashStore;
 use invisibook_lib::chain::{ChainClient, OrderEvent};
 use invisibook_lib::orderbook;
 use invisibook_lib::types::*;
@@ -30,6 +31,7 @@ pub struct App {
     pub event_rx: Option<std::sync::mpsc::Receiver<OrderEvent>>,
     pub my_address: String,
     pub balances: HashMap<TokenID, usize>, // token -> active cash count
+    pub cash_store: CashStore,
 }
 
 impl App {
@@ -40,6 +42,7 @@ impl App {
         event_rx: Option<std::sync::mpsc::Receiver<OrderEvent>>,
         my_address: String,
         balances: HashMap<TokenID, usize>,
+        cash_store: CashStore,
     ) -> Self {
         let mut orders = chain_orders.unwrap_or_else(|| orderbook::sample_orders());
         orderbook::sort_orders(&mut orders);
@@ -61,6 +64,7 @@ impl App {
             event_rx,
             my_address,
             balances,
+            cash_store,
         }
     }
 
