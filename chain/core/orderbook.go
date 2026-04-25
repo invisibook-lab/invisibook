@@ -155,6 +155,8 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 		Amount:       req.Amount,
 		Pubkey:       req.Pubkey,
 		InputCashIDs: orderInputCashIDs,
+		HandlingFee:  req.HandlingFee,
+		BlockHeight:  uint32(ctx.Block.Height),
 		Status:       Pending,
 	}
 
@@ -319,10 +321,12 @@ func (ot *OrderBook) QueryOrders(ctx *context.ReadContext) {
 
 // ────────────────────── Matching Logic ──────────────────────
 
-// matchOrder finds a counterparty for the incoming order.
+// matchOrder finds the best counterparty for the incoming order using three
+// priority levels:
 //
-//	Buy  → looks for pending Sell orders where sell price ≤ buy price (picks lowest sell)
-//	Sell → looks for pending Buy  orders where buy  price ≥ sell price (picks highest buy)
+//  1. Price Priority: best price first (lowest sell for buyer, highest buy for seller)
+//  2. Block Height Priority: earlier block (lower height) wins when prices tie
+//  3. Gas Fee Priority: higher handling fee wins when prices and block heights tie
 //
 // If matched, both orders' Status is set to Matched and MatchOrder is set to each other.
 func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
@@ -347,7 +351,7 @@ func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
 			continue
 		}
 
-		// Price compatibility
+		// Price compatibility check
 		if order.Type == Buy && candidate.Price.Cmp(order.Price) > 0 {
 			continue // sell price > buy price → incompatible
 		}
@@ -355,13 +359,42 @@ func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
 			continue // buy price < sell price → incompatible
 		}
 
-		// Best price selection
 		if bestMatch == nil {
 			bestMatch = candidate
-		} else if order.Type == Buy && candidate.Price.Cmp(bestMatch.Price) < 0 {
-			bestMatch = candidate // lower sell price is better for buyer
-		} else if order.Type == Sell && candidate.Price.Cmp(bestMatch.Price) > 0 {
-			bestMatch = candidate // higher buy price is better for seller
+			continue
+		}
+
+		// ── Priority 1: Price ──
+		priceCmp := candidate.Price.Cmp(bestMatch.Price)
+		if order.Type == Buy {
+			// Buying: lower sell price is better
+			if priceCmp < 0 {
+				bestMatch = candidate
+				continue
+			} else if priceCmp > 0 {
+				continue
+			}
+		} else {
+			// Selling: higher buy price is better
+			if priceCmp > 0 {
+				bestMatch = candidate
+				continue
+			} else if priceCmp < 0 {
+				continue
+			}
+		}
+
+		// ── Priority 2: Block Height (lower = earlier = better) ──
+		if candidate.BlockHeight < bestMatch.BlockHeight {
+			bestMatch = candidate
+			continue
+		} else if candidate.BlockHeight > bestMatch.BlockHeight {
+			continue
+		}
+
+		// ── Priority 3: Handling Fee (higher = better) ──
+		if totalFee(candidate.HandlingFee) > totalFee(bestMatch.HandlingFee) {
+			bestMatch = candidate
 		}
 	}
 
@@ -389,4 +422,16 @@ func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
 	}
 
 	return bestMatch, nil
+}
+
+// totalFee sums the handling fee strings as uint64 values.
+func totalFee(fees []string) uint64 {
+	var sum uint64
+	for _, f := range fees {
+		var v uint64
+		if _, err := fmt.Sscanf(f, "%d", &v); err == nil {
+			sum += v
+		}
+	}
+	return sum
 }

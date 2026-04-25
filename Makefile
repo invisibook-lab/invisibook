@@ -22,4 +22,7 @@ clean:
 	rm -f invisibook
 
 reset-chain:
-	cd chain && rm -rf data
+	cd chain && rm -rf data  
+
+reset-cash:
+	rm -f ~/.invisibook/*

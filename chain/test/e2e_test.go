@@ -89,6 +89,7 @@ func wrCall(tripod, funcName string, params any) error {
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
+	fmt.Printf("[wrCall] response (%d): %s\n", resp.StatusCode, string(b))
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("writing failed (%d): %s", resp.StatusCode, string(b))
 	}
@@ -341,6 +342,10 @@ type OrderItem struct {
 	InputCashIDs []string `json:"input_cash_ids"`
 }
 
+type QueryOrdersResp struct {
+	Orders []OrderItem `json:"orders"`
+}
+
 func queryOrders(t *testing.T, id core.OrderID) []OrderItem {
 	t.Helper()
 	params := map[string]any{}
@@ -350,9 +355,9 @@ func queryOrders(t *testing.T, id core.OrderID) []OrderItem {
 	if err != nil {
 		t.Fatalf("QueryOrders failed: %v", err)
 	}
-	var orders []OrderItem
-	if err := json.Unmarshal(data, &orders); err != nil {
+	var resp QueryOrdersResp
+	if err := json.Unmarshal(data, &resp); err != nil {
 		t.Fatalf("parse QueryOrders response failed: %v\nraw: %s", err, string(data))
 	}
-	return orders
+	return resp.Orders
 }

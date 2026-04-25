@@ -193,7 +193,7 @@ pub fn sample_orders() -> Vec<Order> {
         let amount = encrypt_amount(amt);
         let fake_cash_id = format!("sample-cash-{}", idx);
         let id = compute_order_id(std::slice::from_ref(&fake_cash_id));
-        Order { id, trade_type, subject, price: Some(price), amount, pubkey: String::new(), input_cash_ids: vec![fake_cash_id], handling_fee: vec!["0".to_string()], status, match_order: None }
+        Order { id, trade_type, subject, price: Some(price), amount, pubkey: String::new(), input_cash_ids: vec![fake_cash_id], handling_fee: vec!["0".to_string()], block_height: 0, status, match_order: None }
     };
 
     vec![

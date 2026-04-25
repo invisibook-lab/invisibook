@@ -19,8 +19,10 @@ type OrderScheme struct {
 	Token2       string `gorm:"column:token2;index:idx_pair_type"`
 	Price        string `gorm:"column:price"`
 	Amount       string `gorm:"column:amount"`
-	Pubkey       string `gorm:"column:pubkey;index"` // owner's ed25519 pubkey (64-char hex)
-	InputCashIDs string `gorm:"column:input_cash_ids"` // JSON array of cash IDs
+	Pubkey       string `gorm:"column:pubkey;index"`    // owner's ed25519 pubkey (64-char hex)
+	InputCashIDs string `gorm:"column:input_cash_ids"`  // JSON array of cash IDs
+	HandlingFee  string `gorm:"column:handling_fee"`     // JSON array of fee strings
+	BlockHeight  uint32 `gorm:"column:block_height"`
 	Status       int    `gorm:"column:status;index"`
 	MatchOrder   string `gorm:"column:match_order"`
 }
@@ -154,6 +156,12 @@ func orderToScheme(o *Order) *OrderScheme {
 			cashIDsJSON = string(b)
 		}
 	}
+	feeJSON := "[]"
+	if len(o.HandlingFee) > 0 {
+		if b, err := json.Marshal(o.HandlingFee); err == nil {
+			feeJSON = string(b)
+		}
+	}
 	return &OrderScheme{
 		ID:           string(o.ID),
 		Type:         int(o.Type),
@@ -163,6 +171,8 @@ func orderToScheme(o *Order) *OrderScheme {
 		Amount:       string(o.Amount),
 		Pubkey:       o.Pubkey,
 		InputCashIDs: cashIDsJSON,
+		HandlingFee:  feeJSON,
+		BlockHeight:  o.BlockHeight,
 		Status:       int(o.Status),
 		MatchOrder:   string(o.MatchOrder),
 	}
@@ -178,6 +188,10 @@ func schemeToOrder(s *OrderScheme) *Order {
 	if s.InputCashIDs != "" {
 		_ = json.Unmarshal([]byte(s.InputCashIDs), &cashIDs)
 	}
+	var fees []string
+	if s.HandlingFee != "" {
+		_ = json.Unmarshal([]byte(s.HandlingFee), &fees)
+	}
 	return &Order{
 		ID:   OrderID(s.ID),
 		Type: TradeType(s.Type),
@@ -189,6 +203,8 @@ func schemeToOrder(s *OrderScheme) *Order {
 		Amount:       CipherText(s.Amount),
 		Pubkey:       s.Pubkey,
 		InputCashIDs: cashIDs,
+		HandlingFee:  fees,
+		BlockHeight:  s.BlockHeight,
 		MatchOrder:   OrderID(s.MatchOrder),
 		Status:       OrderStat(s.Status),
 	}

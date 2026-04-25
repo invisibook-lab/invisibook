@@ -149,6 +149,7 @@ pub fn TradeForm(
             pubkey,
             input_cash_ids: input_cash_ids.clone(),
             handling_fee: vec![fee.clone()],
+            block_height: 0,
             status: OrderStatus::Pending,
             match_order: None,
         };

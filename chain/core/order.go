@@ -19,6 +19,8 @@ type Order struct {
 	Amount       CipherText `json:"amount"  validate:"required"`
 	Pubkey       string     `json:"pubkey"  validate:"required"` // owner's ed25519 pubkey (64-char hex)
 	InputCashIDs []string   `json:"input_cash_ids" validate:"required,min=1"`
+	HandlingFee  []string   `json:"handling_fee,omitempty"`
+	BlockHeight  uint32     `json:"block_height"`
 	MatchOrder   OrderID    `json:"match_order,omitempty"`
 	Status       OrderStat  `json:"status"  validate:"oneof=0 1 2 3 4"`
 }

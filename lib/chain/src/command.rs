@@ -93,6 +93,7 @@ pub fn parse_command(input: &str) -> CommandResult {
         pubkey: String::new(),
         input_cash_ids: Vec::new(),
         handling_fee: vec!["0".to_string()],
+        block_height: 0,
         status: OrderStatus::Pending,
         match_order: None,
     };

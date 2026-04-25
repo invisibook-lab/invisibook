@@ -86,6 +86,10 @@ pub struct QueryOrderItem {
     pub amount: CipherText,
     pub pubkey: String,
     pub input_cash_ids: Vec<String>,
+    #[serde(default)]
+    pub handling_fee: Vec<String>,
+    #[serde(default)]
+    pub block_height: u32,
     pub status: u8,
     #[serde(default)]
     pub match_order: Option<String>,
@@ -507,7 +511,8 @@ fn query_item_to_order(item: QueryOrderItem) -> Order {
         amount: item.amount,
         pubkey: item.pubkey,
         input_cash_ids: item.input_cash_ids,
-        handling_fee: Vec::new(),
+        handling_fee: item.handling_fee,
+        block_height: item.block_height,
         status,
         match_order: item.match_order,
     }

@@ -120,6 +120,7 @@ pub struct Order {
     pub pubkey: String, // owner's ed25519 pubkey (64-char hex)
     pub input_cash_ids: Vec<String>,
     pub handling_fee: Vec<String>,
+    pub block_height: u32,
     pub status: OrderStatus,
     pub match_order: Option<OrderID>,
 }
