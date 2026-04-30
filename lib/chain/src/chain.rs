@@ -174,10 +174,10 @@ struct CashItemResponse {
 // ────────────────────── WebSocket Event Types ──────────────────────
 
 /// Raw event from the yu Receipt WebSocket stream.
-/// `value` is a base64-encoded JSON payload (Go encodes []byte as base64).
+/// Go's `json.Marshal([]byte)` encodes as a base64 string, so `value` is a String here.
 #[derive(Deserialize)]
 struct YuEvent {
-    value: Vec<u8>, // serde_json auto-decodes base64 → raw bytes
+    value: String, // base64-encoded JSON bytes
 }
 
 /// Partial Receipt structure — only the fields we care about.
@@ -445,11 +445,13 @@ impl ChainClient {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
 
         let handle = tokio::spawn(async move {
+            use base64::Engine;
+
             eprintln!("[ws] subscription connected");
             while let Some(Ok(msg)) = read.next().await {
                 let Ok(text) = msg.into_text() else { continue };
                 let Ok(receipt) = serde_json::from_str::<YuReceipt>(&text) else {
-                    eprintln!("[ws] failed to parse receipt");
+                    eprintln!("[ws] failed to parse receipt: {}", &text[..text.len().min(200)]);
                     continue;
                 };
                 eprintln!(
@@ -467,7 +469,15 @@ impl ChainClient {
                     continue;
                 }
                 for event in receipt.events {
-                    match serde_json::from_slice::<ChainOrderEvent>(&event.value) {
+                    // Go encodes []byte as base64 — decode first
+                    let decoded = match base64::engine::general_purpose::STANDARD.decode(&event.value) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            eprintln!("[ws] base64 decode failed: {e}");
+                            continue;
+                        }
+                    };
+                    match serde_json::from_slice::<ChainOrderEvent>(&decoded) {
                         Ok(chain_event) => {
                             let _ = tx.send(OrderEvent::Confirmed(query_item_to_order(chain_event.order))).await;
                             if let Some(matched) = chain_event.matched {

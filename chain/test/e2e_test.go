@@ -3,6 +3,7 @@ package test
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/invisibook-lab/invisibook/core"
 )
 
@@ -133,6 +135,66 @@ func TestFullOrderLifecycle(t *testing.T) {
 	// Wait for chain to start and produce first block
 	time.Sleep(6 * time.Second)
 
+	// ═══════════════════ WS Event Subscriber ═══════════════════
+	t.Log("=== Starting WS event subscriber ===")
+	wsURL := "ws://localhost:8999/subscribe/results"
+	wsConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Logf("[ws] WARNING: failed to connect: %v (continuing without WS)", err)
+	} else {
+		t.Log("[ws] connected to", wsURL)
+		defer wsConn.Close()
+		go func() {
+			for {
+				_, msg, err := wsConn.ReadMessage()
+				if err != nil {
+					fmt.Printf("[ws] read error (connection closed): %v\n", err)
+					return
+				}
+				// Pretty-print: try to parse as JSON
+				var raw map[string]any
+				if json.Unmarshal(msg, &raw) == nil {
+					tripod, _ := raw["tripod_name"].(string)
+					writing, _ := raw["writing_name"].(string)
+					errStr, _ := raw["error"].(string)
+					events, _ := raw["events"].([]any)
+					fmt.Printf("\n[ws] ════════════ RECEIPT ════════════\n")
+					fmt.Printf("[ws]   tripod:  %s\n", tripod)
+					fmt.Printf("[ws]   writing: %s\n", writing)
+					if errStr != "" {
+						fmt.Printf("[ws]   error:   %s\n", errStr)
+					}
+					fmt.Printf("[ws]   events:  %d\n", len(events))
+					for i, ev := range events {
+						evMap, ok := ev.(map[string]any)
+						if !ok {
+							fmt.Printf("[ws]   event[%d]: %v\n", i, ev)
+							continue
+						}
+						// Go json.Marshal([]byte) → base64 string
+						valueB64, _ := evMap["value"].(string)
+						valueBytes, decErr := base64.StdEncoding.DecodeString(valueB64)
+						if decErr != nil {
+							fmt.Printf("[ws]   event[%d] raw: %s\n", i, valueB64)
+							continue
+						}
+						// Pretty-print the decoded JSON
+						var eventData map[string]any
+						if json.Unmarshal(valueBytes, &eventData) == nil {
+							pretty, _ := json.MarshalIndent(eventData, "[ws]     ", "  ")
+							fmt.Printf("[ws]   event[%d]: %s\n", i, string(pretty))
+						} else {
+							fmt.Printf("[ws]   event[%d]: %s\n", i, string(valueBytes))
+						}
+					}
+					fmt.Printf("[ws] ════════════════════════════════\n\n")
+				} else {
+					fmt.Printf("[ws] raw: %s\n", string(msg))
+				}
+			}
+		}()
+	}
+
 	// ═══════════════════ Step 1: Query genesis accounts ═══════════════════
 	t.Log("=== Step 1: Query genesis accounts ===")
 
@@ -159,7 +221,7 @@ func TestFullOrderLifecycle(t *testing.T) {
 	t.Logf("  sell order ID: %s", sellOrderID)
 	sellSig := signOrderID(alicePriv, string(sellOrderID))
 
-	err := wrCall("orderbook", "SendOrder", map[string]any{
+	err = wrCall("orderbook", "SendOrder", map[string]any{
 		"id":             sellOrderID,
 		"type":           1, // Sell
 		"subject":        map[string]string{"token1": "ETH", "token2": "USDT"},
@@ -175,11 +237,18 @@ func TestFullOrderLifecycle(t *testing.T) {
 	}
 	waitBlock()
 
-	// Verify alice's ETH cash is now Locked
+	// Verify alice's ETH cash is now Locked (GetAccount returns Active+Locked, not Spent)
 	aliceETHAfterSell := getAccount(t, alicePubkey, "ETH")
-	t.Logf("Alice ETH after sell order: %d active cash", len(aliceETHAfterSell))
-	if len(aliceETHAfterSell) != 0 {
-		t.Fatalf("expected 0 active ETH cash for alice (should be locked), got %d", len(aliceETHAfterSell))
+	t.Logf("Alice ETH after sell order: %d non-spent cash", len(aliceETHAfterSell))
+	activeCount := 0
+	for _, c := range aliceETHAfterSell {
+		t.Logf("  cash id=%s status=%d", c.ID, c.Status)
+		if c.Status == 0 { // Active
+			activeCount++
+		}
+	}
+	if activeCount != 0 {
+		t.Fatalf("expected 0 active ETH cash for alice (should be locked), got %d active", activeCount)
 	}
 
 	// Verify sell order is Pending (no counter yet)

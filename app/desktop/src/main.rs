@@ -46,9 +46,6 @@ fn App() -> Element {
         }
     };
 
-    // Clone for the WS coroutine before moving into the signal
-    let client_for_ws = initial_client.clone();
-
     let client: Signal<Option<Arc<ChainClient>>> = use_signal(|| initial_client);
     let my_address: Signal<String> = use_signal(|| initial_address);
 
@@ -81,38 +78,53 @@ fn App() -> Element {
     });
 
     // ── Background coroutine: subscribe to chain events via WebSocket ──
-    // When SendOrder is confirmed on-chain, upsert the order into the book.
-    use_coroutine(move |_: UnboundedReceiver<()>| {
-        // Clone here so the FnMut closure can yield the value into the async block.
-        let c = client_for_ws.clone();
-        async move {
-        let Some(c) = c else { return };
-        let Ok((mut rx, _handle)) = c.subscribe_order_events().await else {
-            message.set(Some(("✗ Failed to subscribe to chain events".into(), true)));
-            return;
-        };
-        while let Some(event) = rx.recv().await {
-            match event {
-                OrderEvent::Confirmed(order) => {
-                    let short = order.id[..order.id.len().min(7)].to_string();
-                    {
-                        let mut o = orders.write();
-                        if let Some(existing) = o.iter_mut().find(|x| x.id == order.id) {
-                            *existing = order;
-                        } else {
-                            o.push(order);
-                            orderbook::sort_orders(&mut *o);
+    // Waits for a client, subscribes, and auto-reconnects on drop.
+    use_coroutine(move |_: UnboundedReceiver<()>| async move {
+        loop {
+            // Wait until a client is available (may not exist until key import)
+            let c = loop {
+                if let Some(c) = client.read().clone() {
+                    break c;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            };
+
+            match c.subscribe_order_events().await {
+                Ok((mut rx, _handle)) => {
+                    while let Some(event) = rx.recv().await {
+                        match event {
+                            OrderEvent::Confirmed(order) => {
+                                let short = order.id[..order.id.len().min(7)].to_string();
+                                let status_str = order.status.to_string();
+                                {
+                                    let mut o = orders.write();
+                                    if let Some(existing) = o.iter_mut().find(|x| x.id == order.id) {
+                                        *existing = order;
+                                    } else {
+                                        o.push(order);
+                                        orderbook::sort_orders(&mut *o);
+                                    }
+                                }
+                                message.set(Some((
+                                    format!("✓ Order {short} [{status_str}]"),
+                                    false,
+                                )));
+                            }
+                            OrderEvent::Error(e) => {
+                                message.set(Some((format!("✗ Chain event error: {e}"), true)));
+                            }
                         }
                     }
-                    message.set(Some((format!("✓ Order {short} confirmed on chain"), false)));
+                    // WS connection dropped — retry after short delay
+                    eprintln!("[ws] connection dropped, reconnecting in 3s...");
                 }
-                OrderEvent::Error(e) => {
-                    message.set(Some((format!("✗ Chain error: {e}"), true)));
+                Err(e) => {
+                    eprintln!("[ws] subscribe failed: {e}, retrying in 5s...");
                 }
             }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
-        } // end async move
-    }); // end use_coroutine
+    });
 
     let (t1, t2) = {
         let list = orders.read();
