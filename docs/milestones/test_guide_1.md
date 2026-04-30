@@ -1,88 +1,88 @@
-# Invisibook 测试验收指南
+# Invisibook Test & Acceptance Guide
 
-## 环境准备
+## Setup
 
-### 编译
+### Build
 
 ```bash
-# 编译链
+# Build the chain
 cd chain
 go build -o invisibook .
 
-# 编译 Desktop App
+# Build the Desktop App
 cd app/desktop
 cargo build --release
 ```
 
-### 测试账号
+### Test Account
 
-| 角色 | 助记词 | 初始余额 |
-|------|--------|---------|
+| Role | Mnemonic | Initial Balance |
+|------|----------|----------------|
 | Alice | `test test test test test test test test test test test junk` | 1000 ETH, 500000 USDT |
 
-Cash 文件：`chain/cfg/tests/alice_plain_cash.json`
+Cash file: `chain/cfg/tests/alice_plain_cash.json`
 
 ---
 
-## 测试步骤
+## Test Steps
 
-### 1. 启动链
+### 1. Start the Chain
 
 ```bash
 cd chain
-rm -rf data/   
+rm -rf data/
 rm ~/.invisibook/cash.json
 ./invisibook
 ```
 
-等待看到 `start a new block` 后继续。
+Wait until you see `start a new block` before continuing.
 
-### 2. 启动 Desktop 并导入账户
+### 2. Launch Desktop and Import Account
 
-1. 启动 Desktop App
-2. 点击右上角 **Import Key**
-3. 输入助记词：`test test test test test test test test test test test junk`
-4. 拖入 `chain/cfg/tests/alice_plain_cash.json`
-5. 点击 **Import**
+1. Start the Desktop App
+2. Click **Import Key** in the top-right corner
+3. Enter mnemonic: `test test test test test test test test test test test junk`
+4. Drag in `chain/cfg/tests/alice_plain_cash.json`
+5. Click **Import**
 
-**验证**：右上角显示地址，右侧面板显示 `ETH: 1000` 和 `USDT: 500000`
+**Verify**: The address appears in the top-right corner, and the right panel shows `ETH: 1000` and `USDT: 500000`
 
-### 3. 提交卖单
+### 3. Submit a Sell Order
 
-1. 右侧面板选择 **Sell**
-2. 交易对选 **ETH / USDT**
-3. Price 输入 `3500`，Amount 输入 `100`
-4. 点击 **Sell ETH**
+1. Select **Sell** on the right panel
+2. Choose trading pair **ETH / USDT**
+3. Enter Price `3500`, Amount `100`
+4. Click **Sell ETH**
 
-**验证**：等待约 3 秒后，Order Book 出现一笔订单，状态为 **Pending**
+**Verify**: After ~3 seconds, an order appears in the Order Book with status **Pending**
 
-### 4. 提交买单（触发撮合）
+### 4. Submit a Buy Order (Triggers Matching)
 
-1. 切换到 **Buy**
-2. 交易对 **ETH / USDT**，Price 输入 `3500`，Amount 输入 `100`
-3. 点击 **Buy ETH**
+1. Switch to **Buy**
+2. Trading pair **ETH / USDT**, enter Price `3500`, Amount `100`
+3. Click **Buy ETH**
 
-**验证**：等待约 3 秒后，Order Book 中两笔订单状态都变为 **Matched**
-
----
-
-## 撮合规则
-
-| 优先级 | 规则 | 说明 |
-|--------|------|------|
-| 1 | 价格优先 | Buy 方选最低卖价，Sell 方选最高买价 |
-| 2 | 区块高度优先 | 同价格时，更早上链的订单优先 |
-| 3 | 手续费优先 | 同区块时，手续费更高的订单优先 |
-
-价格兼容条件：Buy price >= Sell price（例：Buy@3500 + Sell@3500 可匹配）
+**Verify**: After ~3 seconds, both orders in the Order Book change to status **Matched**
 
 ---
 
-## 常见问题
+## Matching Rules
 
-| 现象 | 解决方式 |
-|------|---------|
-| Order Book 没有变化 | 确认链进程正在运行 |
-| 两笔订单都是 Pending | 确认交易对一致，且 Buy price >= Sell price |
-| 提示余额不足 | 检查 Active Token 余额 |
-| 导入后没有余额 | 重新 Import Key 并拖入 cash.json 文件 |
+| Priority | Rule | Description |
+|----------|------|-------------|
+| 1 | Price Priority | Buyer gets the lowest sell price; Seller gets the highest buy price |
+| 2 | Block Height Priority | When prices are equal, earlier on-chain orders take precedence |
+| 3 | Fee Priority | When in the same block, orders with higher fees take precedence |
+
+Price compatibility condition: Buy price >= Sell price (e.g., Buy@3500 + Sell@3500 can match)
+
+---
+
+## Troubleshooting
+
+| Symptom | Solution |
+|---------|----------|
+| Order Book not updating | Confirm the chain process is running |
+| Both orders stuck at Pending | Verify the trading pair is the same and Buy price >= Sell price |
+| Insufficient balance error | Check Active Token balance |
+| No balance after import | Re-import the key and drag in the cash.json file again |
