@@ -1,0 +1,6 @@
+# Built/generated files
+build/
+third_party/
+
+# Generated circuits (keep .gitkeep and compose script)
+circuits/*.txt
