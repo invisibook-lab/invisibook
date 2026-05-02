@@ -1,5 +1,4 @@
-use crate::orderbook;
-use crate::types::*;
+use crate::{orderbook, types::*};
 
 // ────────────────────── Suggestion Pools ──────────────────────
 

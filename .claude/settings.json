@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/liutianyi/.rustup/toolchains/**)",
+      "Bash(cargo test *)",
+      "Bash(cargo run *)"
+    ]
+  }
+}

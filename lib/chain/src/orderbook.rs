@@ -19,7 +19,11 @@ pub fn compute_order_id(input_cash_ids: &[String]) -> OrderID {
     for id in input_cash_ids {
         hasher.update(id.as_bytes());
     }
-    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 // ────────────────────── Cipher ──────────────────────
@@ -197,11 +201,51 @@ pub fn sample_orders() -> Vec<Order> {
     };
 
     vec![
-        make(TradeType::Buy,  "ETH", "USDT",  3500,  "10", OrderStatus::Pending, 1),
-        make(TradeType::Sell, "ETH", "USDT",  3600,   "5", OrderStatus::Pending, 2),
-        make(TradeType::Buy,  "BTC", "USDT", 65000,   "2", OrderStatus::Pending, 3),
-        make(TradeType::Sell, "BTC", "USDT", 64500,   "1", OrderStatus::Matched, 4),
-        make(TradeType::Buy,  "SOL", "USDT",   180,  "50", OrderStatus::Pending, 5),
+        make(
+            TradeType::Buy,
+            "ETH",
+            "USDT",
+            3500,
+            "10",
+            OrderStatus::Pending,
+            1,
+        ),
+        make(
+            TradeType::Sell,
+            "ETH",
+            "USDT",
+            3600,
+            "5",
+            OrderStatus::Pending,
+            2,
+        ),
+        make(
+            TradeType::Buy,
+            "BTC",
+            "USDT",
+            65000,
+            "2",
+            OrderStatus::Pending,
+            3,
+        ),
+        make(
+            TradeType::Sell,
+            "BTC",
+            "USDT",
+            64500,
+            "1",
+            OrderStatus::Matched,
+            4,
+        ),
+        make(
+            TradeType::Buy,
+            "SOL",
+            "USDT",
+            180,
+            "50",
+            OrderStatus::Pending,
+            5,
+        ),
     ]
 }
 
