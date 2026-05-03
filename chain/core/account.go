@@ -13,12 +13,17 @@ import (
 
 // ────────────────────── Tripod ──────────────────────
 
+// Account is the tripod that owns the cash table: balances are tracked as
+// individual Cash UTXO-style records rather than aggregate balances, since
+// amounts are encrypted ciphertext and cannot be summed on-chain.
 type Account struct {
 	*tripod.Tripod
 	db  *gorm.DB
 	cfg *AccountConfig
 }
 
+// NewAccount constructs the Account tripod and registers its writings and readings.
+// `cfg` must carry a valid SQLite DSN — a bad DSN panics during DB init.
 func NewAccount(cfg *AccountConfig) *Account {
 	tri := tripod.NewTripodWithName("account")
 	a := &Account{Tripod: tri, db: InitAccountDB(cfg.DBPath), cfg: cfg}
@@ -48,6 +53,7 @@ func (a *Account) InitChain(block *types.Block) {
 
 // ────────────────────── Reading: GetAccount ──────────────────────
 
+// GetAccountRequest queries every non-Spent Cash for `Pubkey` under `Token`.
 type GetAccountRequest struct {
 	Pubkey string  `json:"pubkey" validate:"required"`
 	Token  TokenID `json:"token"  validate:"required"`
@@ -81,6 +87,8 @@ func (a *Account) GetAccount(ctx *context.ReadContext) {
 
 // ────────────────────── Writing: Deposit ──────────────────────
 
+// DepositRequest carries a bridge proof that the user deposited `Amount` of
+// `Token` into the Invisibook bridge contract on a source chain.
 type DepositRequest struct {
 	Pubkey  string     `json:"pubkey"   validate:"required"` // depositor's ed25519 pubkey (64-char hex)
 	Token   TokenID    `json:"token"    validate:"required"`
@@ -122,8 +130,11 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 
 // ────────────────────── Writing: Withdraw ──────────────────────
 
+// WithdrawRequest spends `Inputs` Cash IDs and optionally mints a `Change` Cash
+// back to the withdrawer. ZkProof must prove sum(inputs) >= withdrawn amount
+// and that the change commitment is correct.
 type WithdrawRequest struct {
-	Pubkey  string        `json:"pubkey"   validate:"required"`      // withdrawer's ed25519 pubkey (64-char hex)
+	Pubkey  string        `json:"pubkey"   validate:"required"` // withdrawer's ed25519 pubkey (64-char hex)
 	Token   TokenID       `json:"token"    validate:"required"`
 	Inputs  []string      `json:"inputs"   validate:"required,min=1"` // Cash IDs to consume
 	Change  *ChangeOutput `json:"change,omitempty"`                   // optional change Cash

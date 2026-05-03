@@ -26,12 +26,17 @@ type OrderEvent struct {
 
 // ────────────────────── Tripod ──────────────────────
 
+// OrderBook is the tripod that owns the order table: it accepts new orders,
+// runs the matching engine, and settles matched pairs. It depends on the
+// Account tripod (injected via the `tripod` struct tag) for Cash state changes.
 type OrderBook struct {
 	*tripod.Tripod
 	Account *Account `tripod:"account"`
 	db      *gorm.DB
 }
 
+// NewOrderBook constructs the OrderBook tripod and registers its writings and
+// readings. `cfg` must carry a valid SQLite DSN — a bad DSN panics during DB init.
 func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	tri := tripod.NewTripodWithName("orderbook")
 	ot := &OrderBook{Tripod: tri, db: InitOrderDB(cfg.DBPath)}
@@ -49,16 +54,19 @@ type CashChangeOutput struct {
 	Amount CipherText `json:"amount"  validate:"required"` // encrypted change amount
 }
 
+// SendOrderRequest is the JSON payload accepted by SendOrder. The client
+// pre-computes the order ID (SHA-256 over input cash IDs), signs it with their
+// ed25519 key, and lists the input Cash they want to lock or split.
 type SendOrderRequest struct {
-	ID           OrderID          `json:"id"             validate:"required"`
-	Type         TradeType        `json:"type"           validate:"oneof=0 1"`
-	Subject      TradePair        `json:"subject"`
-	Price        *big.Int         `json:"price,omitempty"`
-	Amount       CipherText       `json:"amount"         validate:"required"`
-	Pubkey       string           `json:"pubkey"         validate:"required"` // sender's ed25519 pubkey (64-char hex)
-	Signature    string           `json:"signature"      validate:"required"` // ed25519 sig over order ID bytes (128-char hex)
-	InputCashIDs []string         `json:"input_cash_ids" validate:"required,min=1"`
-	HandlingFee  []string         `json:"handling_fee"   validate:"required,min=1"` // must be plaintext.
+	ID           OrderID           `json:"id"             validate:"required"`
+	Type         TradeType         `json:"type"           validate:"oneof=0 1"`
+	Subject      TradePair         `json:"subject"`
+	Price        *big.Int          `json:"price,omitempty"`
+	Amount       CipherText        `json:"amount"         validate:"required"`
+	Pubkey       string            `json:"pubkey"         validate:"required"` // sender's ed25519 pubkey (64-char hex)
+	Signature    string            `json:"signature"      validate:"required"` // ed25519 sig over order ID bytes (128-char hex)
+	InputCashIDs []string          `json:"input_cash_ids" validate:"required,min=1"`
+	HandlingFee  []string          `json:"handling_fee"   validate:"required,min=1"` // must be plaintext.
 	Change       *CashChangeOutput `json:"change,omitempty"`
 }
 
@@ -192,6 +200,8 @@ type CashOutput struct {
 	Amount CipherText `json:"amount" validate:"required"`
 }
 
+// SettleOrderRequest is the JSON payload accepted by SettleOrder.
+// `OrderIDs` must reference exactly two orders that are matched with each other.
 type SettleOrderRequest struct {
 	OrderIDs []OrderID    `json:"order_ids" validate:"required,len=2"` // matched pair
 	Outputs  []CashOutput `json:"outputs"   validate:"required,min=1"` // output Cash

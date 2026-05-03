@@ -19,14 +19,15 @@ type OrderScheme struct {
 	Token2       string `gorm:"column:token2;index:idx_pair_type"`
 	Price        string `gorm:"column:price"`
 	Amount       string `gorm:"column:amount"`
-	Pubkey       string `gorm:"column:pubkey;index"`    // owner's ed25519 pubkey (64-char hex)
-	InputCashIDs string `gorm:"column:input_cash_ids"`  // JSON array of cash IDs
-	HandlingFee  string `gorm:"column:handling_fee"`     // JSON array of fee strings
+	Pubkey       string `gorm:"column:pubkey;index"`   // owner's ed25519 pubkey (64-char hex)
+	InputCashIDs string `gorm:"column:input_cash_ids"` // JSON array of cash IDs
+	HandlingFee  string `gorm:"column:handling_fee"`   // JSON array of fee strings
 	BlockHeight  uint32 `gorm:"column:block_height"`
 	Status       int    `gorm:"column:status;index"`
 	MatchOrder   string `gorm:"column:match_order"`
 }
 
+// TableName returns the SQL table name used by GORM for OrderScheme rows.
 func (OrderScheme) TableName() string {
 	return "orders"
 }
@@ -110,7 +111,7 @@ type OrderFilter struct {
 }
 
 // FindOrdersByFilter queries orders matching the given filter criteria with pagination.
-// Every condition is applied via parameterized placeholders (防止 SQL 注入).
+// Every condition is applied via parameterized placeholders to prevent SQL injection.
 func (ot *OrderBook) FindOrdersByFilter(f OrderFilter) ([]*Order, error) {
 	query := ot.db.Model(&OrderScheme{})
 
@@ -145,6 +146,9 @@ func (ot *OrderBook) FindOrdersByFilter(f OrderFilter) ([]*Order, error) {
 
 // ────────────────────── Order ↔ Scheme Conversion ──────────────────────
 
+// orderToScheme flattens a domain Order into its SQL row representation.
+// Slice fields are JSON-encoded; *big.Int Price becomes its base-10 string form
+// (empty string when nil).
 func orderToScheme(o *Order) *OrderScheme {
 	priceStr := ""
 	if o.Price != nil {
@@ -178,6 +182,10 @@ func orderToScheme(o *Order) *OrderScheme {
 	}
 }
 
+// schemeToOrder rebuilds a domain Order from a SQL row, parsing the JSON-encoded
+// slice fields and the base-10 string price. Malformed JSON yields a nil/empty
+// slice rather than an error — rows are written by orderToScheme so corruption
+// would indicate a schema bug.
 func schemeToOrder(s *OrderScheme) *Order {
 	var price *big.Int
 	if s.Price != "" {
@@ -210,6 +218,7 @@ func schemeToOrder(s *OrderScheme) *Order {
 	}
 }
 
+// schemesToOrders maps a slice of SQL rows to domain Orders.
 func schemesToOrders(rows []OrderScheme) []*Order {
 	orders := make([]*Order, 0, len(rows))
 	for i := range rows {
