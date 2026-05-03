@@ -1,15 +1,14 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use dioxus::prelude::*;
 
-use invisibook_lib::cash_store::CashStore;
-use invisibook_lib::chain::ChainClient;
-use invisibook_lib::config::ClientConfig;
-use invisibook_lib::orderbook;
-use invisibook_lib::types::*;
-use invisibook_ui::components::{Header, OrderBook, Toast, TradeForm};
-use invisibook_ui::style_mobile::CSS_MOBILE;
+use invisibook_lib::{
+    cash_store::CashStore, chain::ChainClient, config::ClientConfig, orderbook, types::*,
+};
+use invisibook_ui::{
+    components::{Header, OrderBook, Toast, TradeForm},
+    style_mobile::CSS_MOBILE,
+};
 
 fn main() {
     dioxus::launch(App);
@@ -29,7 +28,12 @@ fn App() -> Element {
             Ok(seed) => {
                 let kp = yu_sdk::KeyPair::from_ed25519_bytes(&seed);
                 let addr = hex::encode(kp.pubkey_bytes());
-                let c = ChainClient::new(&cfg.chain.http_url, &cfg.chain.ws_url, seed, cfg.chain.chain_id);
+                let c = ChainClient::new(
+                    &cfg.chain.http_url,
+                    &cfg.chain.ws_url,
+                    seed,
+                    cfg.chain.chain_id,
+                );
                 (Some(Arc::new(c)), addr)
             }
             Err(_) => (None, String::new()),
@@ -50,7 +54,10 @@ fn App() -> Element {
         let client = client.read().clone();
         async move {
             if let Some(c) = client {
-                match c.query_orders(None, None, None, None, None, Some(100), Some(0)).await {
+                match c
+                    .query_orders(None, None, None, None, None, Some(100), Some(0))
+                    .await
+                {
                     Ok(mut chain_orders) => {
                         orderbook::sort_orders(&mut chain_orders);
                         orders.set(chain_orders);

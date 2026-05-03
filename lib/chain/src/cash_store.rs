@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 /// A locally-kept record of a cash output the client owns.
 /// The chain stores only `amount = poseidon(amount_plaintext, random)`;
@@ -57,10 +56,7 @@ impl CashStore {
     /// same tokens. This prevents stale cash IDs (from old sessions or old
     /// pubkeys) from being mixed with fresh ones.
     /// Returns the number of records loaded from the file.
-    pub fn load_from_file(
-        &mut self,
-        path: &PathBuf,
-    ) -> Result<usize, Box<dyn std::error::Error>> {
+    pub fn load_from_file(&mut self, path: &PathBuf) -> Result<usize, Box<dyn std::error::Error>> {
         let content = fs::read_to_string(path)?;
         let incoming: Vec<CashRecord> = serde_json::from_str(&content)?;
         // Collect the tokens present in the file

@@ -75,10 +75,9 @@ mod tests {
         println!("bob  pubkey: {}", hex::encode(bob_kp.pubkey_bytes()));
 
         // Alice mnemonic
-        let alice_mnemonic = bip39::Mnemonic::parse(
-            "test test test test test test test test test test test junk",
-        )
-        .unwrap();
+        let alice_mnemonic =
+            bip39::Mnemonic::parse("test test test test test test test test test test test junk")
+                .unwrap();
         let alice_bip39_seed = alice_mnemonic.to_seed("");
         let alice_seed = derive_ed25519_key(&alice_bip39_seed, 60, 0);
         let alice_kp = yu_sdk::KeyPair::from_ed25519_bytes(&alice_seed);

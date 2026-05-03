@@ -342,11 +342,7 @@ impl ChainClient {
             .read_chain("orderbook", "QueryOrders", &params)
             .await?;
         let resp: QueryOrdersResponse = serde_json::from_value(value)?;
-        Ok(resp
-            .orders
-            .into_iter()
-            .map(query_item_to_order)
-            .collect())
+        Ok(resp.orders.into_iter().map(query_item_to_order).collect())
     }
 
     /// Gets account details for the given pubkey and token.
@@ -432,7 +428,10 @@ impl ChainClient {
     pub async fn subscribe_order_events(
         &self,
     ) -> Result<
-        (tokio::sync::mpsc::Receiver<OrderEvent>, tokio::task::JoinHandle<()>),
+        (
+            tokio::sync::mpsc::Receiver<OrderEvent>,
+            tokio::task::JoinHandle<()>,
+        ),
         Box<dyn std::error::Error + Send + Sync>,
     > {
         use futures_util::StreamExt;
@@ -451,12 +450,18 @@ impl ChainClient {
             while let Some(Ok(msg)) = read.next().await {
                 let Ok(text) = msg.into_text() else { continue };
                 let Ok(receipt) = serde_json::from_str::<YuReceipt>(&text) else {
-                    eprintln!("[ws] failed to parse receipt: {}", &text[..text.len().min(200)]);
+                    eprintln!(
+                        "[ws] failed to parse receipt: {}",
+                        &text[..text.len().min(200)]
+                    );
                     continue;
                 };
                 eprintln!(
                     "[ws] receipt: tripod={:?} writing={:?} error={:?} events={}",
-                    receipt.tripod_name, receipt.writing_name, receipt.error, receipt.events.len()
+                    receipt.tripod_name,
+                    receipt.writing_name,
+                    receipt.error,
+                    receipt.events.len()
                 );
                 if receipt.tripod_name.as_deref() != Some("orderbook") {
                     continue;
@@ -470,22 +475,33 @@ impl ChainClient {
                 }
                 for event in receipt.events {
                     // Go encodes []byte as base64 — decode first
-                    let decoded = match base64::engine::general_purpose::STANDARD.decode(&event.value) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            eprintln!("[ws] base64 decode failed: {e}");
-                            continue;
-                        }
-                    };
+                    let decoded =
+                        match base64::engine::general_purpose::STANDARD.decode(&event.value) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                eprintln!("[ws] base64 decode failed: {e}");
+                                continue;
+                            }
+                        };
                     match serde_json::from_slice::<ChainOrderEvent>(&decoded) {
                         Ok(chain_event) => {
-                            let _ = tx.send(OrderEvent::Confirmed(query_item_to_order(chain_event.order))).await;
+                            let _ = tx
+                                .send(OrderEvent::Confirmed(query_item_to_order(
+                                    chain_event.order,
+                                )))
+                                .await;
                             if let Some(matched) = chain_event.matched {
-                                let _ = tx.send(OrderEvent::Confirmed(query_item_to_order(matched))).await;
+                                let _ = tx
+                                    .send(OrderEvent::Confirmed(query_item_to_order(matched)))
+                                    .await;
                             }
                         }
                         Err(e) => {
-                            let _ = tx.send(OrderEvent::Error(format!("Failed to parse chain event: {e}"))).await;
+                            let _ = tx
+                                .send(OrderEvent::Error(format!(
+                                    "Failed to parse chain event: {e}"
+                                )))
+                                .await;
                         }
                     }
                 }
