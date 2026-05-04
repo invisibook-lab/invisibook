@@ -1,32 +1,133 @@
 pub mod circom_bridge;
+pub mod prover;
+pub mod setup;
 pub mod test_circuit;
+pub mod wallet;
 
-use std::{env, fs, path::PathBuf, process::Command};
+use std::{
+    any::TypeId,
+    env,
+    fs::{File, create_dir_all},
+    io::{BufReader, BufWriter},
+    path::{Path, PathBuf},
+    process::Command,
+};
 
-use anyhow::ensure;
-use ark_bn254::{Bn254, Fr};
+use anyhow::{Context, ensure};
+use ark_bn254::Bn254;
 use ark_crypto_primitives::snark::SNARK;
-use ark_groth16::{Groth16, Proof, VerifyingKey, prepare_verifying_key};
+use ark_ec::pairing::Pairing;
+use ark_groth16::{Groth16, Proof, ProvingKey, VerifyingKey, prepare_verifying_key};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use rand::thread_rng;
 use serde_json::Value;
 
 use crate::{circom_bridge::CircomCircuit, test_circuit::TestCircuitHandle};
 
-/// The result of a Groth16 proof generation for any circuit in `templates/`.
-pub struct CircuitProof {
-    pub proof: Proof<Bn254>,
-    pub public_inputs: Vec<Fr>,
-    pub vk: VerifyingKey<Bn254>,
+/// A Groth16 proof together with its public inputs.
+///
+/// The verifying key is intentionally not bundled here — under the trusted-setup
+/// model the verifier holds its own canonical VK (e.g. hardcoded into the
+/// settlement contract). Anything the prover ships could otherwise be replaced
+/// with an attacker-controlled VK paired with a forged proof.
+pub struct CircuitProof<E: Pairing> {
+    pub proof: Proof<E>,
+    pub public_inputs: Vec<E::ScalarField>,
 }
 
-/// Generate a Groth16 proof for the named circuit (`templates/<name>.circom`).
+/// Output of a Groth16 trusted setup ceremony for one specific circuit.
 ///
-/// This function:
-/// 1. Compiles the circuit if needed (cached under `target/circuit-build/<name>/`)
-/// 2. Generates the witness via node.js (circom WASM witness generator)
-/// 3. Runs a random trusted setup (dev/test only)
-/// 4. Generates and returns the Groth16 proof
-pub fn generate_proof(name: &str, input: &Value) -> anyhow::Result<CircuitProof> {
+/// `pk` lives on the prover; `vk` lives on the verifier. They must originate
+/// from the same multi-party ceremony — Groth16's verification equation only
+/// holds when both keys encode the same `(τ, α, β, γ, δ)` trapdoor.
+pub struct CircuitParams<E: Pairing> {
+    pub pk: ProvingKey<E>,
+    pub vk: VerifyingKey<E>,
+}
+
+/// Asserts at runtime that `E` is BN254. circom only emits BN254 R1CS, so
+/// any code path that proves a circom-compiled circuit is BN254-only.
+fn assert_bn254<E: 'static>() {
+    assert_eq!(
+        TypeId::of::<E>(),
+        TypeId::of::<Bn254>(),
+        "zk currently supports only BN254"
+    );
+}
+
+/// Production trusted-setup loader: reads circuit parameters from a file
+/// produced by `save_params`, which in turn should be written from a
+/// multi-party ceremony output (Powers of Tau phase 1 + circuit-specific
+/// phase 2).
+///
+/// File format is arkworks's canonical-serialize, compressed encoding. The
+/// expected pipeline is: run the ceremony with snarkjs (`.zkey`), convert
+/// once offline into this format, then ship the result to the prover.
+///
+/// The resulting params are only safe to use if at least one ceremony
+/// participant honestly destroyed their share of the toxic waste — see
+/// `dev_setup` for the security difference.
+///
+/// Loading is intended to happen once at process startup; a `ProvingKey` is
+/// large (tens of MB to GB depending on the circuit), so the caller should
+/// keep the result in memory and reuse it across every proof for that circuit.
+pub fn load_params<E: Pairing + 'static>(path: &Path) -> anyhow::Result<CircuitParams<E>> {
+    assert_bn254::<E>();
+    let file = File::open(path)
+        .with_context(|| format!("opening trusted-setup file {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let pk = ProvingKey::<E>::deserialize_compressed(&mut reader)
+        .with_context(|| format!("deserializing ProvingKey from {}", path.display()))?;
+    let vk = pk.vk.clone();
+    Ok(CircuitParams { pk, vk })
+}
+
+/// Persist circuit parameters in arkworks's canonical-serialize, compressed
+/// encoding. Companion to `load_params`. Typically used by the offline tool
+/// that converts a ceremony output (e.g. snarkjs `.zkey`) into the on-disk
+/// format the prover service consumes.
+pub fn save_params<E: Pairing>(params: &CircuitParams<E>, path: &Path) -> anyhow::Result<()> {
+    let file = File::create(path)
+        .with_context(|| format!("creating trusted-setup file {}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    params
+        .pk
+        .serialize_compressed(&mut writer)
+        .with_context(|| format!("serializing ProvingKey to {}", path.display()))?;
+    Ok(())
+}
+
+/// **DEV/TEST ONLY.** Generates Groth16 parameters via a single-party local
+/// random setup, with the toxic waste held in this process's memory.
+///
+/// In a real deployment this is fatally insecure: anyone with access to the
+/// generating process can recover `(τ, α, β, γ, δ)` and forge proofs against
+/// the resulting VK without satisfying the circuit. Production must call
+/// `load_params` against a multi-party ceremony output instead.
+pub fn dev_setup<E: Pairing + 'static>(name: &str) -> anyhow::Result<CircuitParams<E>> {
+    assert_bn254::<E>();
+    let out_dir = compile_circuit(name)?;
+    let r1cs_path = out_dir.join(format!("{name}.r1cs"));
+
+    // Setup only consumes the R1CS shape; no witness is needed.
+    let circuit_empty = CircomCircuit::<E>::from_r1cs(&r1cs_path, None)?;
+    let mut rng = thread_rng();
+    let pk = Groth16::<E>::generate_random_parameters_with_reduction(circuit_empty, &mut rng)?;
+    let vk = pk.vk.clone();
+
+    Ok(CircuitParams { pk, vk })
+}
+
+/// Generate a Groth16 proof for the named circuit using a pre-computed
+/// proving key. `params` must come from `load_params` in production
+/// (or `dev_setup` in tests) — never from a setup the prover ran herself
+/// without trusted-ceremony provenance.
+pub fn generate_proof<E: Pairing + 'static>(
+    name: &str,
+    input: &Value,
+    params: &CircuitParams<E>,
+) -> anyhow::Result<CircuitProof<E>> {
+    assert_bn254::<E>();
     let out_dir = compile_circuit(name)?;
     let r1cs_path = out_dir.join(format!("{name}.r1cs"));
 
@@ -34,38 +135,49 @@ pub fn generate_proof(name: &str, input: &Value) -> anyhow::Result<CircuitProof>
     let handle = TestCircuitHandle::from_compiled(&out_dir)?;
     let witness_path = handle.gen_witness(input)?;
 
-    // Load R1CS as empty circuit for trusted setup
-    let circuit_empty = CircomCircuit::from_r1cs(&r1cs_path, None)?;
-
-    // Random trusted setup (dev/test only)
-    let mut rng = thread_rng();
-    let params =
-        Groth16::<Bn254>::generate_random_parameters_with_reduction(circuit_empty, &mut rng)?;
-
     // Load circuit with witness for proving
-    let circuit_with_witness = CircomCircuit::from_r1cs_and_wtns(&r1cs_path, &witness_path)?;
-    let public_inputs = circuit_with_witness.public_inputs();
+    let circuit = CircomCircuit::<E>::from_r1cs_and_wtns(&r1cs_path, &witness_path)?;
+    let public_inputs = circuit.public_inputs();
 
-    // Generate the proof
-    let proof = Groth16::<Bn254>::prove(&params, circuit_with_witness, &mut rng)?;
+    let mut rng = thread_rng();
+    let proof = Groth16::<E>::prove(&params.pk, circuit, &mut rng)?;
 
-    // Verify locally
+    // Local sanity check — fails early if the prover's params have drifted
+    // from the verifier's. Production verifiers run their own check anyway
+    // against their canonical VK.
     let pvk = prepare_verifying_key(&params.vk);
-    let verified = Groth16::<Bn254>::verify_proof(&pvk, &proof, &public_inputs)?;
+    let verified = Groth16::<E>::verify_proof(&pvk, &proof, &public_inputs)?;
     ensure!(verified, "Proof verification failed");
 
     Ok(CircuitProof {
         proof,
         public_inputs,
-        vk: params.vk,
     })
+}
+
+/// Verify a Groth16 proof against a verifying key the verifier holds
+/// canonically (from its own copy of the trusted-setup ceremony output).
+pub fn verify_proof<E: Pairing>(
+    proof: &CircuitProof<E>,
+    vk: &VerifyingKey<E>,
+) -> anyhow::Result<bool> {
+    let pvk = prepare_verifying_key(vk);
+    Ok(Groth16::<E>::verify_proof(
+        &pvk,
+        &proof.proof,
+        &proof.public_inputs,
+    )?)
 }
 
 /// Compile `templates/<name>.circom` if its artifacts are missing.
 /// Output is cached under `lib/target/circuit-build/<name>/` so each circuit has
 /// an isolated build directory and they do not clobber each other.
+///
+/// `CARGO_MANIFEST_DIR` is baked in at compile time via `env!()` so this works
+/// from any process (test, example, or shipped binary) — not just under
+/// `cargo test`, where the env var is set live.
 fn compile_circuit(name: &str) -> anyhow::Result<PathBuf> {
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out_dir = manifest_dir.join(format!("../target/circuit-build/{name}"));
     let circuit_path = manifest_dir.join(format!("templates/{name}.circom"));
     let include_dir = manifest_dir.join("templates");
@@ -77,7 +189,7 @@ fn compile_circuit(name: &str) -> anyhow::Result<PathBuf> {
         return Ok(out_dir);
     }
 
-    fs::create_dir_all(&out_dir)?;
+    create_dir_all(&out_dir)?;
 
     let output = Command::new("circom")
         .args([
@@ -110,23 +222,69 @@ fn compile_circuit(name: &str) -> anyhow::Result<PathBuf> {
 mod tests {
     use super::*;
 
+    use std::{
+        collections::HashMap,
+        sync::{Mutex, OnceLock},
+    };
+
+    use ark_bn254::Fr;
     use circom_bridge::fr_to_decimal_string;
 
-    /// Compute circomlib-compatible Poseidon hash of a single u64 value.
-    fn poseidon_hash(val: u64) -> Fr {
+    /// Cached `dev_setup` result per circuit name. A real ceremony's PK is
+    /// loaded once at startup; mirroring that here also avoids paying ~200 ms
+    /// of random-setup cost on every test.
+    fn cached_params(name: &str) -> &'static CircuitParams<Bn254> {
+        static CACHE: OnceLock<Mutex<HashMap<String, &'static CircuitParams<Bn254>>>> =
+            OnceLock::new();
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut guard = cache.lock().unwrap();
+        if let Some(p) = guard.get(name) {
+            return p;
+        }
+        let params = dev_setup::<Bn254>(name).expect("dev_setup failed");
+        let leaked: &'static CircuitParams<Bn254> = Box::leak(Box::new(params));
+        guard.insert(name.to_string(), leaked);
+        leaked
+    }
+
+    /// Deterministic per-amount blinding factor for tests. Using a fixed-but-
+    /// distinct r per amount keeps tests reproducible while still exercising
+    /// the two-input Poseidon commitment path. Production code must draw r
+    /// from a CSPRNG (256-bit) per the protocol spec.
+    fn test_r(amount: u64) -> Fr {
+        // Hash the amount with a constant tag to derive an r that varies per
+        // amount but is deterministic across runs. The Poseidon parity tests
+        // already cover the hash itself; here we just want a reproducible r.
         use light_poseidon::{Poseidon, PoseidonHasher};
-        let mut hasher = Poseidon::<Fr>::new_circom(1).unwrap();
-        hasher.hash(&[Fr::from(val)]).unwrap()
+        let mut hasher = Poseidon::<Fr>::new_circom(2).unwrap();
+        hasher
+            .hash(&[Fr::from(amount), Fr::from(0xA11CE_u64)])
+            .unwrap()
     }
 
-    /// Convert a u64 amount into its decimal-string Poseidon hash representation.
+    /// Compute the commitment `Poseidon(2)([amount, r])` matching the circom
+    /// circuit's `Poseidon(2)([amount, r])` evaluation.
+    fn poseidon_hash(amount: u64, r: Fr) -> Fr {
+        use light_poseidon::{Poseidon, PoseidonHasher};
+        let mut hasher = Poseidon::<Fr>::new_circom(2).unwrap();
+        hasher.hash(&[Fr::from(amount), r]).unwrap()
+    }
+
+    /// Decimal-string commitment for amount `val` under the test blinding factor.
     fn hash_str(val: u64) -> String {
-        fr_to_decimal_string(&poseidon_hash(val))
+        fr_to_decimal_string(&poseidon_hash(val, test_r(val)))
     }
 
-    /// Convert a slice of u64 amounts into their decimal-string Poseidon hashes.
+    /// Decimal-string commitments for a slice of amounts, each with its test r.
     fn hash_strs(vals: &[u64]) -> Vec<String> {
         vals.iter().copied().map(hash_str).collect()
+    }
+
+    /// Decimal-string blinding factors corresponding to `vals` (same indexing).
+    fn r_strs(vals: &[u64]) -> Vec<String> {
+        vals.iter()
+            .map(|v| fr_to_decimal_string(&test_r(*v)))
+            .collect()
     }
 
     /// Convert a slice of u64 amounts into their decimal-string representations.
@@ -134,143 +292,180 @@ mod tests {
         vals.iter().map(|v| v.to_string()).collect()
     }
 
-    #[test]
-    fn main_template_should_compile() {
-        TestCircuitHandle::new("templates/main.circom").unwrap();
+    /// Bridge-side blinding factor for tests, distinct from the per-output `test_r`
+    /// so that bridge_commitment binds (deposit_amount, r_bridge) independently of
+    /// any output's blinding factor.
+    fn bridge_r(deposit_amount: u64) -> Fr {
+        test_r(deposit_amount.wrapping_add(0xB81D6E))
     }
 
-    #[test]
-    fn main_template_witness_gen_valid() {
-        let handle = TestCircuitHandle::new("templates/main.circom").unwrap();
-
-        let input = serde_json::json!({
-            "larger_amount": "100",
-            "smaller_amount": "50",
-            "larger_amount_hash": hash_str(100),
-            "smaller_amount_hash": hash_str(50),
-        });
-
-        let witness_path = handle.gen_witness(&input).unwrap();
-        assert!(witness_path.exists(), "Witness file should exist");
+    /// Decimal-string Poseidon commitment of (deposit_amount, bridge_r(deposit_amount)).
+    fn bridge_commit_str(deposit_amount: u64) -> String {
+        fr_to_decimal_string(&poseidon_hash(deposit_amount, bridge_r(deposit_amount)))
     }
 
-    #[test]
-    fn generate_proof_and_verify() {
-        let input = serde_json::json!({
-            "larger_amount": "100",
-            "smaller_amount": "50",
-            "larger_amount_hash": hash_str(100),
-            "smaller_amount_hash": hash_str(50),
-        });
-
-        let result = generate_proof("main", &input);
-        assert!(
-            result.is_ok(),
-            "Proof generation failed: {:?}",
-            result.err()
-        );
-
-        let proof = result.unwrap();
-        let pvk = prepare_verifying_key(&proof.vk);
-        let verified =
-            Groth16::<Bn254>::verify_proof(&pvk, &proof.proof, &proof.public_inputs).unwrap();
-        assert!(verified, "Proof should verify");
+    /// Withdraw-side bridge_out blinding factor for tests, distinct from both
+    /// per-cash `test_r` and the deposit-side `bridge_r` so the three never
+    /// alias.
+    fn bridge_out_r(withdraw_amount: u64) -> Fr {
+        test_r(withdraw_amount.wrapping_add(0xB7DDA7))
     }
 
-    #[test]
-    fn generate_proof_fails_when_smaller_gt_larger() {
-        // larger_amount=50, smaller_amount=100 with correct hashes
-        // Should fail: 100 > 50, violating LessEqThan constraint
-        let input = serde_json::json!({
-            "larger_amount": "50",
-            "smaller_amount": "100",
-            "larger_amount_hash": hash_str(50),
-            "smaller_amount_hash": hash_str(100),
-        });
-
-        let result = generate_proof("main", &input);
-        assert!(
-            result.is_err(),
-            "Should fail when smaller_amount > larger_amount"
-        );
+    /// Decimal-string `Poseidon(withdraw_amount, bridge_out_r(withdraw_amount))`.
+    fn bridge_out_commit_str(withdraw_amount: u64) -> String {
+        fr_to_decimal_string(&poseidon_hash(
+            withdraw_amount,
+            bridge_out_r(withdraw_amount),
+        ))
     }
 
     // ────────────────────── DepositVerify ──────────────────────
 
     #[test]
     fn deposit_proof_verifies_when_outputs_sum_to_deposit() {
-        // Bridged 150; mint as two output cashes 100 + 50
+        // Bridged 150 (hidden); mint as two output cashes 100 + 50.
+        // Public inputs the verifier sees: bridge_commitment + output_hashes.
         let input = serde_json::json!({
-            "deposit_amount": "150",
-            "output_amounts": amount_strs(&[100, 50]),
+            "bridge_commitment": bridge_commit_str(150),
             "output_hashes": hash_strs(&[100, 50]),
+            "deposit_amount": "150",
+            "r_bridge": fr_to_decimal_string(&bridge_r(150)),
+            "output_amounts": amount_strs(&[100, 50]),
+            "output_randomness": r_strs(&[100, 50]),
         });
-        let proof = generate_proof("deposit", &input).expect("deposit proof should succeed");
-        let pvk = prepare_verifying_key(&proof.vk);
-        assert!(Groth16::<Bn254>::verify_proof(&pvk, &proof.proof, &proof.public_inputs).unwrap());
+        let params = cached_params("deposit");
+        let proof = generate_proof::<Bn254>("deposit", &input, params)
+            .expect("deposit proof should succeed");
+        assert!(verify_proof(&proof, &params.vk).unwrap());
     }
 
     #[test]
     fn deposit_proof_supports_single_output_with_zero_padding() {
-        // Bridged 100; only one real output, second slot padded with amount=0
+        // Bridged 100 (hidden); only one real output, second slot padded with amount=0
         let input = serde_json::json!({
-            "deposit_amount": "100",
-            "output_amounts": amount_strs(&[100, 0]),
+            "bridge_commitment": bridge_commit_str(100),
             "output_hashes": hash_strs(&[100, 0]),
+            "deposit_amount": "100",
+            "r_bridge": fr_to_decimal_string(&bridge_r(100)),
+            "output_amounts": amount_strs(&[100, 0]),
+            "output_randomness": r_strs(&[100, 0]),
         });
-        generate_proof("deposit", &input).expect("padded deposit proof should succeed");
+        let params = cached_params("deposit");
+        generate_proof::<Bn254>("deposit", &input, params)
+            .expect("padded deposit proof should succeed");
     }
 
     #[test]
     fn deposit_proof_fails_when_outputs_overshoot_deposit() {
-        // Bridged 100 but outputs claim 100 + 1 — would mint value out of nothing
+        // bridge_commitment binds deposit_amount=100, but outputs claim 100 + 1 —
+        // would mint value out of nothing. Conservation constraint must reject.
         let input = serde_json::json!({
-            "deposit_amount": "100",
-            "output_amounts": amount_strs(&[100, 1]),
+            "bridge_commitment": bridge_commit_str(100),
             "output_hashes": hash_strs(&[100, 1]),
+            "deposit_amount": "100",
+            "r_bridge": fr_to_decimal_string(&bridge_r(100)),
+            "output_amounts": amount_strs(&[100, 1]),
+            "output_randomness": r_strs(&[100, 1]),
         });
-        assert!(generate_proof("deposit", &input).is_err());
+        let params = cached_params("deposit");
+        assert!(generate_proof::<Bn254>("deposit", &input, params).is_err());
+    }
+
+    #[test]
+    fn deposit_proof_fails_when_amount_does_not_match_bridge() {
+        // Malicious prover: bridge_commitment is for amount=100, but the prover
+        // privately claims deposit_amount=200 and outputs 200. The Poseidon
+        // bridge-binding constraint must reject because Poseidon(200, r_for_100)
+        // ≠ bridge_commitment(100, r_for_100).
+        let input = serde_json::json!({
+            "bridge_commitment": bridge_commit_str(100),
+            "output_hashes": hash_strs(&[200, 0]),
+            "deposit_amount": "200",
+            "r_bridge": fr_to_decimal_string(&bridge_r(100)),
+            "output_amounts": amount_strs(&[200, 0]),
+            "output_randomness": r_strs(&[200, 0]),
+        });
+        let params = cached_params("deposit");
+        assert!(generate_proof::<Bn254>("deposit", &input, params).is_err());
     }
 
     // ────────────────────── WithdrawVerify ──────────────────────
 
     #[test]
     fn withdraw_proof_verifies_with_change() {
-        // Spend 70 + 40 = 110; withdraw 100; mint 10 as change
+        // Spend 70 + 40 = 110; withdraw 100 (hidden); mint 10 as change.
+        // Public inputs the verifier sees: bridge_out_commitment + input/output hashes.
         let input = serde_json::json!({
-            "withdraw_amount": "100",
-            "input_amounts": amount_strs(&[70, 40]),
+            "bridge_out_commitment": bridge_out_commit_str(100),
             "input_hashes": hash_strs(&[70, 40]),
-            "output_amounts": amount_strs(&[10, 0]),
             "output_hashes": hash_strs(&[10, 0]),
+            "withdraw_amount": "100",
+            "r_bridge_out": fr_to_decimal_string(&bridge_out_r(100)),
+            "input_amounts": amount_strs(&[70, 40]),
+            "input_randomness": r_strs(&[70, 40]),
+            "output_amounts": amount_strs(&[10, 0]),
+            "output_randomness": r_strs(&[10, 0]),
         });
-        generate_proof("withdraw", &input).expect("withdraw with change should prove");
+        let params = cached_params("withdraw");
+        generate_proof::<Bn254>("withdraw", &input, params)
+            .expect("withdraw with change should prove");
     }
 
     #[test]
     fn withdraw_proof_verifies_without_change() {
-        // Spend 60 + 40 = 100; withdraw 100; no change
+        // Spend 60 + 40 = 100; withdraw 100; no change (both output slots zero-padded).
         let input = serde_json::json!({
-            "withdraw_amount": "100",
-            "input_amounts": amount_strs(&[60, 40]),
+            "bridge_out_commitment": bridge_out_commit_str(100),
             "input_hashes": hash_strs(&[60, 40]),
-            "output_amounts": amount_strs(&[0, 0]),
             "output_hashes": hash_strs(&[0, 0]),
+            "withdraw_amount": "100",
+            "r_bridge_out": fr_to_decimal_string(&bridge_out_r(100)),
+            "input_amounts": amount_strs(&[60, 40]),
+            "input_randomness": r_strs(&[60, 40]),
+            "output_amounts": amount_strs(&[0, 0]),
+            "output_randomness": r_strs(&[0, 0]),
         });
-        generate_proof("withdraw", &input).expect("exact withdraw should prove");
+        let params = cached_params("withdraw");
+        generate_proof::<Bn254>("withdraw", &input, params).expect("exact withdraw should prove");
     }
 
     #[test]
     fn withdraw_proof_fails_when_inputs_insufficient() {
         // Spend 30 + 20 = 50; try to withdraw 100 — would create value
         let input = serde_json::json!({
-            "withdraw_amount": "100",
-            "input_amounts": amount_strs(&[30, 20]),
+            "bridge_out_commitment": bridge_out_commit_str(100),
             "input_hashes": hash_strs(&[30, 20]),
-            "output_amounts": amount_strs(&[0, 0]),
             "output_hashes": hash_strs(&[0, 0]),
+            "withdraw_amount": "100",
+            "r_bridge_out": fr_to_decimal_string(&bridge_out_r(100)),
+            "input_amounts": amount_strs(&[30, 20]),
+            "input_randomness": r_strs(&[30, 20]),
+            "output_amounts": amount_strs(&[0, 0]),
+            "output_randomness": r_strs(&[0, 0]),
         });
-        assert!(generate_proof("withdraw", &input).is_err());
+        let params = cached_params("withdraw");
+        assert!(generate_proof::<Bn254>("withdraw", &input, params).is_err());
+    }
+
+    #[test]
+    fn withdraw_proof_fails_when_amount_does_not_match_bridge() {
+        // Malicious prover: bridge_out_commitment is for amount=100, but the
+        // prover privately claims withdraw_amount=200 and the inputs sum to 200.
+        // The Poseidon bridge-binding constraint must reject because
+        // Poseidon(200, r_for_100) ≠ bridge_out_commitment(100, r_for_100).
+        let input = serde_json::json!({
+            "bridge_out_commitment": bridge_out_commit_str(100),
+            "input_hashes": hash_strs(&[200, 0]),
+            "output_hashes": hash_strs(&[0, 0]),
+            "withdraw_amount": "200",
+            "r_bridge_out": fr_to_decimal_string(&bridge_out_r(100)),
+            "input_amounts": amount_strs(&[200, 0]),
+            "input_randomness": r_strs(&[200, 0]),
+            "output_amounts": amount_strs(&[0, 0]),
+            "output_randomness": r_strs(&[0, 0]),
+        });
+        let params = cached_params("withdraw");
+        assert!(generate_proof::<Bn254>("withdraw", &input, params).is_err());
     }
 
     // ────────────────────── SplitVerify ──────────────────────
@@ -280,59 +475,169 @@ mod tests {
         // One 100-cash split into a 60 locked cash + a 40 change cash
         let input = serde_json::json!({
             "input_amounts": amount_strs(&[100, 0]),
+            "input_randomness": r_strs(&[100, 0]),
             "input_hashes": hash_strs(&[100, 0]),
             "output_amounts": amount_strs(&[60, 40]),
+            "output_randomness": r_strs(&[60, 40]),
             "output_hashes": hash_strs(&[60, 40]),
         });
-        generate_proof("split", &input).expect("split conservation should prove");
+        let params = cached_params("split");
+        generate_proof::<Bn254>("split", &input, params).expect("split conservation should prove");
     }
 
     #[test]
     fn split_proof_fails_when_outputs_exceed_inputs() {
         let input = serde_json::json!({
             "input_amounts": amount_strs(&[100, 0]),
+            "input_randomness": r_strs(&[100, 0]),
             "input_hashes": hash_strs(&[100, 0]),
             "output_amounts": amount_strs(&[60, 50]),
+            "output_randomness": r_strs(&[60, 50]),
             "output_hashes": hash_strs(&[60, 50]),
         });
-        assert!(generate_proof("split", &input).is_err());
+        let params = cached_params("split");
+        assert!(generate_proof::<Bn254>("split", &input, params).is_err());
     }
 
-    // ────────────────────── SettleVerify ──────────────────────
+    // ────────────────────── SettleLargerVerify / SettleSmallerVerify ──────────────────────
 
-    #[test]
-    fn settle_proof_verifies_when_inputs_equal_outputs() {
-        // Token-group example: two locked inputs (80 + 20) flow to two recipients (50 + 50)
-        let input = serde_json::json!({
-            "input_amounts": amount_strs(&[80, 20]),
-            "input_hashes": hash_strs(&[80, 20]),
-            "output_amounts": amount_strs(&[50, 50]),
-            "output_hashes": hash_strs(&[50, 50]),
-        });
-        generate_proof("settle", &input).expect("settle conservation should prove");
+    /// Convenience: distinct blinding factor for the counterparty's recv cash so
+    /// it doesn't collide with the per-amount `test_r`.
+    fn recv_r(amount: u64) -> Fr {
+        test_r(amount.wrapping_add(0xCEC2EC))
     }
 
-    #[test]
-    fn settle_proof_fails_when_inputs_exceed_outputs() {
-        // Inputs 100 but only 90 minted — burning value should also be rejected
-        let input = serde_json::json!({
-            "input_amounts": amount_strs(&[80, 20]),
-            "input_hashes": hash_strs(&[80, 20]),
-            "output_amounts": amount_strs(&[50, 40]),
-            "output_hashes": hash_strs(&[50, 40]),
-        });
-        assert!(generate_proof("settle", &input).is_err());
+    fn recv_commit_str(amount: u64) -> String {
+        fr_to_decimal_string(&poseidon_hash(amount, recv_r(amount)))
     }
 
+    /// Larger side: alice locked [80, 0], change=20, my_fill=60, other_fill=60, price=1, sender of Token1.
     #[test]
-    fn settle_proof_fails_when_commitment_does_not_open() {
-        // Output amount 60 but its hash is for 50 — commitment opening must fail
+    fn settle_larger_proof_verifies_with_change() {
         let input = serde_json::json!({
-            "input_amounts": amount_strs(&[100, 0]),
-            "input_hashes": hash_strs(&[100, 0]),
-            "output_amounts": amount_strs(&[60, 40]),
-            "output_hashes": [hash_str(50), hash_str(40)],
+            "my_match_commitment":          fr_to_decimal_string(&poseidon_hash(60, test_r(60))),
+            "other_match_commitment":       fr_to_decimal_string(&poseidon_hash(60, test_r(61))),
+            "price":                        "1",
+            "is_token2_sender":             "0",
+            "input_hashes":                 hash_strs(&[80, 0]),
+            "change_commitment":            hash_str(20),
+            "counterparty_recv_commitment": recv_commit_str(60),
+            "r_my":                         fr_to_decimal_string(&test_r(60)),
+            "other_fill":                   "60",
+            "r_other":                      fr_to_decimal_string(&test_r(61)),
+            "input_amounts":                amount_strs(&[80, 0]),
+            "input_randomness":             r_strs(&[80, 0]),
+            "change_amount":                "20",
+            "change_random":                fr_to_decimal_string(&test_r(20)),
         });
-        assert!(generate_proof("settle", &input).is_err());
+        let params = cached_params("settle_larger");
+        generate_proof::<Bn254>("settle_larger", &input, params)
+            .expect("settle_larger should prove with valid change");
+    }
+
+    /// Larger side, no-change variant (alice locked exactly fill: 60). change_amount=0,
+    /// change_commitment = Poseidon(0, 0) — the same constant chain rebuilds.
+    #[test]
+    fn settle_larger_proof_verifies_with_zero_change() {
+        let zero_random = Fr::from(0u64);
+        let zero_commit = fr_to_decimal_string(&poseidon_hash(0, zero_random));
+        let input = serde_json::json!({
+            "my_match_commitment":          fr_to_decimal_string(&poseidon_hash(60, test_r(60))),
+            "other_match_commitment":       fr_to_decimal_string(&poseidon_hash(60, test_r(61))),
+            "price":                        "1",
+            "is_token2_sender":             "0",
+            "input_hashes":                 hash_strs(&[60, 0]),
+            "change_commitment":            zero_commit,
+            "counterparty_recv_commitment": recv_commit_str(60),
+            "r_my":                         fr_to_decimal_string(&test_r(60)),
+            "other_fill":                   "60",
+            "r_other":                      fr_to_decimal_string(&test_r(61)),
+            "input_amounts":                amount_strs(&[60, 0]),
+            "input_randomness":             r_strs(&[60, 0]),
+            "change_amount":                "0",
+            "change_random":                fr_to_decimal_string(&zero_random),
+        });
+        let params = cached_params("settle_larger");
+        generate_proof::<Bn254>("settle_larger", &input, params)
+            .expect("settle_larger should prove with zero change");
+    }
+
+    /// Larger side: cross-leg ratio violated (other_fill should be 60 but prover claims 50).
+    /// fill_t2 (= other_fill = 50) ≠ fill_t1 (= my_fill = 60) * price (= 1) → reject.
+    #[test]
+    fn settle_larger_proof_fails_when_ratio_mismatches() {
+        let input = serde_json::json!({
+            "my_match_commitment":          fr_to_decimal_string(&poseidon_hash(60, test_r(60))),
+            "other_match_commitment":       fr_to_decimal_string(&poseidon_hash(50, test_r(50))),
+            "price":                        "1",
+            "is_token2_sender":             "0",
+            "input_hashes":                 hash_strs(&[80, 0]),
+            "change_commitment":            hash_str(20),
+            "counterparty_recv_commitment": recv_commit_str(50),
+            "r_my":                         fr_to_decimal_string(&test_r(60)),
+            "other_fill":                   "50",
+            "r_other":                      fr_to_decimal_string(&test_r(50)),
+            "input_amounts":                amount_strs(&[80, 0]),
+            "input_randomness":             r_strs(&[80, 0]),
+            "change_amount":                "20",
+            "change_random":                fr_to_decimal_string(&test_r(20)),
+        });
+        let params = cached_params("settle_larger");
+        assert!(generate_proof::<Bn254>("settle_larger", &input, params).is_err());
+    }
+
+    /// Larger side: change_amount > inputs.sum → my_fill underflows → range check rejects.
+    #[test]
+    fn settle_larger_proof_fails_when_change_exceeds_inputs() {
+        let input = serde_json::json!({
+            "my_match_commitment":          fr_to_decimal_string(&poseidon_hash(60, test_r(60))),
+            "other_match_commitment":       fr_to_decimal_string(&poseidon_hash(60, test_r(61))),
+            "price":                        "1",
+            "is_token2_sender":             "0",
+            "input_hashes":                 hash_strs(&[50, 0]),
+            "change_commitment":            hash_str(80),
+            "counterparty_recv_commitment": recv_commit_str(60),
+            "r_my":                         fr_to_decimal_string(&test_r(60)),
+            "other_fill":                   "60",
+            "r_other":                      fr_to_decimal_string(&test_r(61)),
+            "input_amounts":                amount_strs(&[50, 0]),
+            "input_randomness":             r_strs(&[50, 0]),
+            "change_amount":                "80",
+            "change_random":                fr_to_decimal_string(&test_r(80)),
+        });
+        let params = cached_params("settle_larger");
+        assert!(generate_proof::<Bn254>("settle_larger", &input, params).is_err());
+    }
+
+    /// Smaller side: bob locked exactly 60 USDT, no change, fill = inputs.sum = 60.
+    #[test]
+    fn settle_smaller_proof_verifies() {
+        let input = serde_json::json!({
+            "match_commitment":             fr_to_decimal_string(&poseidon_hash(60, test_r(61))),
+            "input_hashes":                 hash_strs(&[60, 0]),
+            "counterparty_recv_commitment": recv_commit_str(60),
+            "r_match":                      fr_to_decimal_string(&test_r(61)),
+            "input_amounts":                amount_strs(&[60, 0]),
+            "input_randomness":             r_strs(&[60, 0]),
+        });
+        let params = cached_params("settle_smaller");
+        generate_proof::<Bn254>("settle_smaller", &input, params)
+            .expect("settle_smaller should prove");
+    }
+
+    /// Smaller side: match_commitment doesn't match Poseidon(inputs.sum, r_match).
+    /// Prover supplied r for value 60 but inputs sum to 50 — binding rejects.
+    #[test]
+    fn settle_smaller_proof_fails_when_match_does_not_open() {
+        let input = serde_json::json!({
+            "match_commitment":             fr_to_decimal_string(&poseidon_hash(60, test_r(61))),
+            "input_hashes":                 hash_strs(&[50, 0]),
+            "counterparty_recv_commitment": recv_commit_str(60),
+            "r_match":                      fr_to_decimal_string(&test_r(61)),
+            "input_amounts":                amount_strs(&[50, 0]),
+            "input_randomness":             r_strs(&[50, 0]),
+        });
+        let params = cached_params("settle_smaller");
+        assert!(generate_proof::<Bn254>("settle_smaller", &input, params).is_err());
     }
 }
