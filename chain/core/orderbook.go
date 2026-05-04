@@ -321,7 +321,6 @@ func (ot *OrderBook) SettleOrder(ctx *context.WriteContext) error {
 	if err := ctx.BindJson(req); err != nil {
 		return err
 	}
-
 	if err := Validator.Struct(req); err != nil {
 		return err
 	}
@@ -335,7 +334,6 @@ func (ot *OrderBook) SettleOrder(ctx *context.WriteContext) error {
 	if err != nil {
 		return fmt.Errorf("order %s not found: %w", req.OrderIDs[1], err)
 	}
-
 	if order0.Status != Matched {
 		return fmt.Errorf("order %s is not Matched (current: %s)", order0.ID, order0.Status.String())
 	}
@@ -345,37 +343,152 @@ func (ot *OrderBook) SettleOrder(ctx *context.WriteContext) error {
 	if order0.MatchOrder != order1.ID || order1.MatchOrder != order0.ID {
 		return fmt.Errorf("orders %s and %s are not matched with each other", order0.ID, order1.ID)
 	}
+	expectedPrice := order0.Price.Uint64()
+	if order0.Price.Uint64() != order1.Price.Uint64() {
+		return fmt.Errorf("matched orders %s and %s disagree on price", order0.ID, order1.ID)
+	}
 
-	// TODO: verify ZkProof — proves that sum(inputs) == sum(outputs)
+	// Index each leg's matched order (the order whose locked input is in this leg's token).
+	// One order locks Token1 (Sell side) or Token2 (Buy side); chain looks up which by token.
+	orderForLeg := map[TokenID]*Order{}
+	for _, ord := range []*Order{order0, order1} {
+		if len(ord.InputCashIDs) == 0 {
+			return fmt.Errorf("order %s has no locked input cash", ord.ID)
+		}
+		// Peek at the first locked cash to identify the order's lock token.
+		// All input cashes of an order share the same Token (enforced at SendOrder time).
+		firstCash, err := ot.Account.GetCash(ord.InputCashIDs[0])
+		if err != nil {
+			return fmt.Errorf("locked cash %s not found: %w", ord.InputCashIDs[0], err)
+		}
+		orderForLeg[firstCash.Token] = ord
+	}
 
-	// Spend locked Cash from both orders
+	// Verify each leg's proof and collect cross-leg match commitments.
+	var (
+		largerLeg, smallerLeg                 *SettleTokenLeg
+		largerOrder, smallerOrder             *Order
+		largerCounterpartyMatchCommitmentHex  string // = larger.OtherMatchCommitment (the smaller-side fill commitment)
+		smallerOwnMatchCommitmentHex          string // = smaller.MatchCommitment
+	)
+	for i := range req.Legs {
+		leg := &req.Legs[i]
+		ord, ok := orderForLeg[leg.Token]
+		if !ok {
+			return fmt.Errorf("leg token %s does not match either order's locked token", leg.Token)
+		}
+
+		// Build per-leg public-input vector + verify against the right VK.
+		switch leg.Side {
+		case SideLarger:
+			if leg.MyMatchCommitment == "" || leg.OtherMatchCommitment == "" || leg.ChangeCommitment == "" {
+				return fmt.Errorf("larger leg %s missing required commitment field(s)", leg.Token)
+			}
+			if leg.Price != expectedPrice {
+				return fmt.Errorf("larger leg %s price %d != order price %d", leg.Token, leg.Price, expectedPrice)
+			}
+			// Validate IsToken2Sender flag matches Token (Token1 sender → false, Token2 sender → true)
+			isT2 := leg.Token == ord.Subject.Token2
+			if leg.IsToken2Sender != isT2 {
+				return fmt.Errorf("larger leg %s IsToken2Sender %v inconsistent with token", leg.Token, leg.IsToken2Sender)
+			}
+			signals, err := buildSettleLargerPublicSignals(leg, ord, ot.Account)
+			if err != nil {
+				return fmt.Errorf("larger leg %s public signals: %w", leg.Token, err)
+			}
+			if err := VerifyGroth16(ot.settleLargerVK, leg.ZkProof, signals); err != nil {
+				return fmt.Errorf("larger leg %s proof verification failed: %w", leg.Token, err)
+			}
+			if largerLeg != nil {
+				return fmt.Errorf("two larger legs but the design requires at most two with side != larger")
+			}
+			largerLeg = leg
+			largerOrder = ord
+			largerCounterpartyMatchCommitmentHex = leg.OtherMatchCommitment
+
+		case SideSmaller:
+			if leg.MatchCommitment == "" {
+				return fmt.Errorf("smaller leg %s missing match_commitment", leg.Token)
+			}
+			signals, err := buildSettleSmallerPublicSignals(leg, ord, ot.Account)
+			if err != nil {
+				return fmt.Errorf("smaller leg %s public signals: %w", leg.Token, err)
+			}
+			if err := VerifyGroth16(ot.settleSmallerVK, leg.ZkProof, signals); err != nil {
+				return fmt.Errorf("smaller leg %s proof verification failed: %w", leg.Token, err)
+			}
+			if smallerLeg != nil {
+				return fmt.Errorf("two smaller legs but each side must own one token group")
+			}
+			smallerLeg = leg
+			smallerOrder = ord
+			smallerOwnMatchCommitmentHex = leg.MatchCommitment
+		}
+	}
+
+	// Cross-leg consistency: the larger side's commitment to the smaller side's
+	// fill must equal the smaller side's own match commitment. This is the
+	// chain's substitute for an on-chain `fill_t2 == fill_t1 * price` check
+	// (which can't be done because both fills are private).
+	if largerLeg != nil && smallerLeg != nil {
+		if largerCounterpartyMatchCommitmentHex != smallerOwnMatchCommitmentHex {
+			return fmt.Errorf(
+				"cross-leg mismatch: larger.other_match_commitment != smaller.match_commitment",
+			)
+		}
+	} else {
+		// Both legs are "larger" (exact-fill case where neither side has change=0 and fill==locked
+		// for both). Each leg's other_match_commitment must equal the OTHER leg's my_match_commitment.
+		if req.Legs[0].Side != SideLarger || req.Legs[1].Side != SideLarger {
+			return fmt.Errorf("legs must be one larger + one smaller, or both larger")
+		}
+		if req.Legs[0].MyMatchCommitment != req.Legs[1].OtherMatchCommitment ||
+			req.Legs[1].MyMatchCommitment != req.Legs[0].OtherMatchCommitment {
+			return fmt.Errorf("dual-larger cross-leg mismatch: my/other commitments must mirror across legs")
+		}
+	}
+	_, _ = largerOrder, smallerOrder // available for future telemetry; silence unused
+
+	// All proofs verified — mutate state.
 	settleBy := fmt.Sprintf("settle:%s:%s", order0.ID[:8], order1.ID[:8])
-	if len(order0.InputCashIDs) > 0 {
-		if err := ot.Account.SpendCash(order0.InputCashIDs, settleBy); err != nil {
-			return fmt.Errorf("failed to spend cash for order %s: %w", order0.ID, err)
-		}
+	if err := ot.Account.SpendCash(order0.InputCashIDs, settleBy); err != nil {
+		return fmt.Errorf("failed to spend cash for order %s: %w", order0.ID, err)
 	}
-	if len(order1.InputCashIDs) > 0 {
-		if err := ot.Account.SpendCash(order1.InputCashIDs, settleBy); err != nil {
-			return fmt.Errorf("failed to spend cash for order %s: %w", order1.ID, err)
-		}
+	if err := ot.Account.SpendCash(order1.InputCashIDs, settleBy); err != nil {
+		return fmt.Errorf("failed to spend cash for order %s: %w", order1.ID, err)
 	}
 
-	// Mint output Cash
-	for _, out := range req.Outputs {
-		if err := Validator.Struct(&out); err != nil {
-			return fmt.Errorf("invalid cash output: %w", err)
-		}
-		newCash := &Cash{
-			ID:      computeCashID(out.Pubkey, out.Token, out.Amount),
-			Pubkey:  out.Pubkey,
-			Token:   out.Token,
-			Amount:  out.Amount,
-			ZkProof: req.ZkProof,
+	// Mint outputs per leg: counterparty receive + (larger only) change
+	for i := range req.Legs {
+		leg := &req.Legs[i]
+		recvCash := &Cash{
+			ID:      computeCashID(leg.RecvPubkey, leg.Token, CipherText(leg.RecvCommitment)),
+			Pubkey:  leg.RecvPubkey,
+			Token:   leg.Token,
+			Amount:  CipherText(leg.RecvCommitment),
+			ZkProof: leg.ZkProof,
 			Status:  Active,
 		}
-		if err := ot.Account.CreateCash(newCash); err != nil {
-			return fmt.Errorf("failed to create output cash: %w", err)
+		if err := ot.Account.CreateCash(recvCash); err != nil {
+			return fmt.Errorf("failed to create recv cash for leg %s: %w", leg.Token, err)
+		}
+		if leg.Side == SideLarger && leg.ChangeCommitment != PoseidonZeroCommitmentHex {
+			senderOrder := orderForLeg[leg.Token]
+			changePubkey := leg.ChangePubkey
+			if changePubkey == "" {
+				changePubkey = senderOrder.Pubkey
+			}
+			changeCash := &Cash{
+				ID:      computeCashID(changePubkey, leg.Token, CipherText(leg.ChangeCommitment)),
+				Pubkey:  changePubkey,
+				Token:   leg.Token,
+				Amount:  CipherText(leg.ChangeCommitment),
+				ZkProof: leg.ZkProof,
+				Status:  Active,
+			}
+			if err := ot.Account.CreateCash(changeCash); err != nil {
+				return fmt.Errorf("failed to create change cash for leg %s: %w", leg.Token, err)
+			}
 		}
 	}
 
@@ -387,9 +500,99 @@ func (ot *OrderBook) SettleOrder(ctx *context.WriteContext) error {
 		return fmt.Errorf("failed to settle order %s: %w", order1.ID, err)
 	}
 
-	ctx.EmitStringEvent("orders settled: %s <-> %s, %d outputs minted",
-		order0.ID, order1.ID, len(req.Outputs))
+	ctx.EmitStringEvent("orders settled: %s <-> %s, %d legs", order0.ID, order1.ID, len(req.Legs))
 	return nil
+}
+
+// buildSettleLargerPublicSignals lays out 8 signals matching settle_larger.circom's
+// `public [my_match_commitment, other_match_commitment, price, is_token2_sender,
+//          input_hashes, change_commitment, counterparty_recv_commitment]`.
+// `input_hashes` is N=2; chain pads with PoseidonZeroCommitment when the order
+// has fewer locked cashes (the prover does the same — see wallet.rs::pad_to).
+func buildSettleLargerPublicSignals(leg *SettleTokenLeg, ord *Order, acc *Account) ([]string, error) {
+	myMatchDec, err := HexToDecimal(leg.MyMatchCommitment)
+	if err != nil {
+		return nil, err
+	}
+	otherMatchDec, err := HexToDecimal(leg.OtherMatchCommitment)
+	if err != nil {
+		return nil, err
+	}
+	changeDec, err := HexToDecimal(leg.ChangeCommitment)
+	if err != nil {
+		return nil, err
+	}
+	recvDec, err := HexToDecimal(leg.RecvCommitment)
+	if err != nil {
+		return nil, err
+	}
+	inputHashesDec, err := lockedInputHashesPadded(ord, acc, 2, leg.Token)
+	if err != nil {
+		return nil, err
+	}
+	isT2 := "0"
+	if leg.IsToken2Sender {
+		isT2 = "1"
+	}
+	signals := []string{
+		myMatchDec,
+		otherMatchDec,
+		fmt.Sprintf("%d", leg.Price),
+		isT2,
+	}
+	signals = append(signals, inputHashesDec...)
+	signals = append(signals, changeDec, recvDec)
+	return signals, nil
+}
+
+// buildSettleSmallerPublicSignals lays out 4 signals matching
+// settle_smaller.circom's `public [match_commitment, input_hashes,
+// counterparty_recv_commitment]`.
+func buildSettleSmallerPublicSignals(leg *SettleTokenLeg, ord *Order, acc *Account) ([]string, error) {
+	matchDec, err := HexToDecimal(leg.MatchCommitment)
+	if err != nil {
+		return nil, err
+	}
+	recvDec, err := HexToDecimal(leg.RecvCommitment)
+	if err != nil {
+		return nil, err
+	}
+	inputHashesDec, err := lockedInputHashesPadded(ord, acc, 2, leg.Token)
+	if err != nil {
+		return nil, err
+	}
+	signals := []string{matchDec}
+	signals = append(signals, inputHashesDec...)
+	signals = append(signals, recvDec)
+	return signals, nil
+}
+
+// lockedInputHashesPadded fetches each locked input cash for `ord`, asserts
+// it's the expected token, and returns N decimal-string commitments (pad with
+// PoseidonZeroCommitment when ord has fewer than N inputs).
+func lockedInputHashesPadded(ord *Order, acc *Account, n int, expectedToken TokenID) ([]string, error) {
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		var hex string
+		if i < len(ord.InputCashIDs) {
+			cash, err := acc.GetCash(ord.InputCashIDs[i])
+			if err != nil {
+				return nil, fmt.Errorf("locked cash %s not found: %w", ord.InputCashIDs[i], err)
+			}
+			if cash.Token != expectedToken {
+				return nil, fmt.Errorf("locked cash %s token %s != expected %s", cash.ID, cash.Token, expectedToken)
+			}
+			hex = string(cash.Amount)
+		} else {
+			hex = PoseidonZeroCommitmentHex
+		}
+		dec, err := HexToDecimal(hex)
+		if err != nil {
+			return nil, fmt.Errorf("input commitment hex at slot %d: %w", i, err)
+		}
+		out = append(out, dec)
+	}
+	return out, nil
 }
 
 // ────────────────────── Reading: QueryOrders ──────────────────────

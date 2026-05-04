@@ -7,9 +7,11 @@ edition = "2021"
 anyhow = "1.0"
 ark-bn254 = "0.5"
 ark-crypto-primitives = { version = "0.5", features = ["snark"] }
+ark-ec = "0.5"
 ark-ff = "0.5"
 ark-groth16 = "0.5"
 ark-relations = "0.5"
+ark-serialize = "0.5"
 ark-std = { version = "0.5", features = ["std"] }
 byteorder = "1.5"
 light-poseidon = "0.4"

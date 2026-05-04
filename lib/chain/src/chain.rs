@@ -45,15 +45,36 @@ struct TradePairJson {
 #[derive(Debug, Serialize)]
 struct SettleOrderParams {
     order_ids: Vec<OrderID>,
-    outputs: Vec<CashOutputParams>,
-    zk_proof: String,
+    legs: Vec<SettleTokenLegParam>,
 }
 
+/// Mirror of chain Go `SettleTokenLeg`. `side` is `"larger"` or `"smaller"`;
+/// only the fields applicable to that side need to be populated (the rest are
+/// `None` and skipped from the JSON via `serde`).
 #[derive(Debug, Serialize)]
-struct CashOutputParams {
-    pubkey: String, // recipient's ed25519 pubkey (64-char hex)
-    token: TokenID,
-    amount: CipherText,
+pub struct SettleTokenLegParam {
+    pub side: String,
+    pub token: TokenID,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub my_match_commitment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other_match_commitment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_token2_sender: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_commitment: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub change_pubkey: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_commitment: Option<String>,
+
+    pub recv_commitment: String,
+    pub recv_pubkey: String,
+    pub zk_proof: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -301,31 +322,23 @@ impl ChainClient {
                 cash_id: c.cash_id.clone(),
                 amount: c.amount.clone(),
             }),
+            zk_proof: split_proof_json,
         };
         self.client
             .write_chain("orderbook", "SendOrder", &params, self.chain_id, 100, 0)
             .await
     }
 
-    /// Requests settlement of a matched order pair (writing request to OrderBook.SettleOrder).
+    /// Requests settlement of a matched order pair. `legs` must be the two
+    /// pre-proven token legs (one larger + one smaller, or two larger when both
+    /// orders fully fill); the wallet builds these by running rapidsnark for
+    /// each side. See `cli_settle` for the demo driver that produces them.
     pub async fn settle_order(
         &self,
         order_ids: Vec<OrderID>,
-        outputs: Vec<CashOutput>,
-        zk_proof: &str,
+        legs: Vec<SettleTokenLegParam>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let params = SettleOrderParams {
-            order_ids,
-            outputs: outputs
-                .into_iter()
-                .map(|o| CashOutputParams {
-                    pubkey: o.pubkey,
-                    token: o.token,
-                    amount: o.amount,
-                })
-                .collect(),
-            zk_proof: zk_proof.to_string(),
-        };
+        let params = SettleOrderParams { order_ids, legs };
         self.client
             .write_chain("orderbook", "SettleOrder", &params, self.chain_id, 100, 0)
             .await

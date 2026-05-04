@@ -1282,6 +1282,7 @@ dependencies = [
  "crossterm",
  "hex",
  "invisibook-lib",
+ "rand 0.9.4",
  "ratatui",
  "serde_json",
  "tokio",
