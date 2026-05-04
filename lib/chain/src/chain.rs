@@ -30,6 +30,10 @@ struct SendOrderParams {
     handling_fee: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     change: Option<CashChangeParam>,
+    /// snarkjs `proof.json` for the split conservation proof. Only required
+    /// when `change.is_some()`; chain rejects empty proof in split mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zk_proof: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -259,12 +263,22 @@ impl ChainClient {
     }
 
     /// Sends a new order to the chain (writing request to OrderBook.SendOrder).
-    /// If `change` is provided, the chain will split the input cash and mint change.
+    /// If `change` is provided, the chain will split the input cash and mint change;
+    /// in that case `split_proof_json` is required (snarkjs `proof.json` from
+    /// rapidsnark) — chain rejects split-mode requests without a proof.
     pub async fn send_order(
         &self,
         order: &Order,
         change: Option<&CashChange>,
+        split_proof_json: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if change.is_some() && split_proof_json.is_none() {
+            return Err("split mode requires a zk_proof".into());
+        }
+        if change.is_none() && split_proof_json.is_some() {
+            return Err("zk_proof supplied without a change output (non-split mode)".into());
+        }
+
         let type_int = match order.trade_type {
             TradeType::Buy => 0u8,
             TradeType::Sell => 1u8,

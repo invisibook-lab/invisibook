@@ -13,8 +13,12 @@ type Config struct {
 }
 
 // OrderBookConfig holds configuration for the OrderBook tripod.
+//
+// `SplitVKPath` is the snarkjs `vk.json` for the split circuit (SendOrder).
+// Required at startup.
 type OrderBookConfig struct {
-	DBPath string `toml:"db_path"`
+	DBPath      string `toml:"db_path"`
+	SplitVKPath string `toml:"split_vk_path"`
 }
 
 // AccountConfig holds configuration for the Account tripod.

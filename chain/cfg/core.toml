@@ -2,6 +2,9 @@
 
 [orderbook]
 db_path = "data/orders.db"
+# Split verification key — produced by `snarkjs zkey export verificationkey`
+# (or by re-running the split `dev_setup_snarkjs` test).
+split_vk_path = "../lib/target/circuit-build/split/vk.json"
 
 [account]
 db_path = "data/accounts.db"

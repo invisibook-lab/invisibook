@@ -31,15 +31,39 @@ type OrderEvent struct {
 // Account tripod (injected via the `tripod` struct tag) for Cash state changes.
 type OrderBook struct {
 	*tripod.Tripod
-	Account *Account `tripod:"account"`
-	db      *gorm.DB
+	Account         *Account `tripod:"account"`
+	db              *gorm.DB
+	splitVK         *CircuitVK
+	settleLargerVK  *CircuitVK
+	settleSmallerVK *CircuitVK
 }
 
 // NewOrderBook constructs the OrderBook tripod and registers its writings and
-// readings. `cfg` must carry a valid SQLite DSN — a bad DSN panics during DB init.
+// readings. `cfg` must carry a valid SQLite DSN plus readable
+// `SplitVKPath` / `SettleLargerVKPath` / `SettleSmallerVKPath`. DB init and
+// VK loading panic on failure — the chain will not start without all three
+// circuits' verifying keys in memory.
 func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	tri := tripod.NewTripodWithName("orderbook")
-	ot := &OrderBook{Tripod: tri, db: InitOrderDB(cfg.DBPath)}
+	splitVK, err := LoadVK("split", cfg.SplitVKPath)
+	if err != nil {
+		panic(fmt.Sprintf("loading split VK: %v", err))
+	}
+	settleLargerVK, err := LoadVK("settle_larger", cfg.SettleLargerVKPath)
+	if err != nil {
+		panic(fmt.Sprintf("loading settle_larger VK: %v", err))
+	}
+	settleSmallerVK, err := LoadVK("settle_smaller", cfg.SettleSmallerVKPath)
+	if err != nil {
+		panic(fmt.Sprintf("loading settle_smaller VK: %v", err))
+	}
+	ot := &OrderBook{
+		Tripod:          tri,
+		db:              InitOrderDB(cfg.DBPath),
+		splitVK:         splitVK,
+		settleLargerVK:  settleLargerVK,
+		settleSmallerVK: settleSmallerVK,
+	}
 	ot.SetWritings(ot.SendOrder, ot.SettleOrder)
 	ot.SetReadings(ot.QueryOrders)
 	return ot
@@ -57,6 +81,11 @@ type CashChangeOutput struct {
 // SendOrderRequest is the JSON payload accepted by SendOrder. The client
 // pre-computes the order ID (SHA-256 over input cash IDs), signs it with their
 // ed25519 key, and lists the input Cash they want to lock or split.
+//
+// `ZkProof` is required only in split mode (when `Change != nil`): it proves
+// `sum(input_commitments) == sum(output_commitments)` where outputs are
+// `[Amount, Change.Amount]`. Non-split lock-the-whole-cash requests don't
+// reshuffle value (the commitment is unchanged) so no proof is needed.
 type SendOrderRequest struct {
 	ID           OrderID           `json:"id"             validate:"required"`
 	Type         TradeType         `json:"type"           validate:"oneof=0 1"`
@@ -65,9 +94,10 @@ type SendOrderRequest struct {
 	Amount       CipherText        `json:"amount"         validate:"required"`
 	Pubkey       string            `json:"pubkey"         validate:"required"` // sender's ed25519 pubkey (64-char hex)
 	Signature    string            `json:"signature"      validate:"required"` // ed25519 sig over order ID bytes (128-char hex)
-	InputCashIDs []string          `json:"input_cash_ids" validate:"required,min=1"`
+	InputCashIDs []string          `json:"input_cash_ids" validate:"required,min=1,max=2"`
 	HandlingFee  []string          `json:"handling_fee"   validate:"required,min=1"` // must be plaintext.
 	Change       *CashChangeOutput `json:"change,omitempty"`
+	ZkProof      string            `json:"zk_proof,omitempty"` // required when Change != nil
 }
 
 // SendOrder creates a new order, locks the input Cash, stores it via SQL, and attempts to match it.
@@ -129,26 +159,72 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	// Lock or split the input Cash
 	var orderInputCashIDs []string
 	if req.Change != nil {
-		// Split mode: spend originals, create one locked cash + one active change cash
+		// Split mode requires a zk proof of conservation:
+		//   sum(input_commitments) == sum(output_commitments)
+		// where outputs are [Amount (locked), Change.Amount].
+		if req.ZkProof == "" {
+			return fmt.Errorf("split mode requires zk_proof")
+		}
+
+		// Rebuild the public-input vector in the order split.circom declares them:
+		//   public[0..N] = input_hashes  (zero-padded to N=2)
+		//   public[N..N+M] = output_hashes  (M=2: locked + change)
+		const splitN = 2
+		publicSignals := make([]string, 0, splitN+2)
+		for i := 0; i < splitN; i++ {
+			var hex string
+			if i < len(req.InputCashIDs) {
+				// We already fetched + validated each input Cash above, but we
+				// re-read here to keep the declaration order tight; the row is
+				// hot in cache so the cost is negligible.
+				cash, err := ot.Account.GetCash(req.InputCashIDs[i])
+				if err != nil {
+					return fmt.Errorf("input cash %s lookup failed: %w", req.InputCashIDs[i], err)
+				}
+				hex = string(cash.Amount)
+			} else {
+				hex = PoseidonZeroCommitmentHex
+			}
+			dec, err := HexToDecimal(hex)
+			if err != nil {
+				return fmt.Errorf("invalid input commitment hex at slot %d: %w", i, err)
+			}
+			publicSignals = append(publicSignals, dec)
+		}
+		lockedDec, err := HexToDecimal(string(req.Amount))
+		if err != nil {
+			return fmt.Errorf("invalid locked Amount: %w", err)
+		}
+		changeDec, err := HexToDecimal(string(req.Change.Amount))
+		if err != nil {
+			return fmt.Errorf("invalid Change.Amount: %w", err)
+		}
+		publicSignals = append(publicSignals, lockedDec, changeDec)
+
+		if err := VerifyGroth16(ot.splitVK, req.ZkProof, publicSignals); err != nil {
+			return fmt.Errorf("split proof verification failed: %w", err)
+		}
+
+		// Spend originals, create one locked cash + one active change cash.
 		if err := ot.Account.SpendCash(req.InputCashIDs, string(req.ID)); err != nil {
 			return fmt.Errorf("failed to spend cash for split: %w", err)
 		}
 		lockedCashID := computeCashID(req.Pubkey, expectedToken, req.Amount)
 		if err := ot.Account.CreateCash(&Cash{
 			ID: lockedCashID, Pubkey: req.Pubkey, Token: expectedToken,
-			Amount: req.Amount, ZkProof: "split", Status: Locked, By: string(req.ID),
+			Amount: req.Amount, ZkProof: req.ZkProof, Status: Locked, By: string(req.ID),
 		}); err != nil {
 			return fmt.Errorf("failed to create locked split cash: %w", err)
 		}
 		if err := ot.Account.CreateCash(&Cash{
 			ID: req.Change.CashID, Pubkey: req.Pubkey, Token: expectedToken,
-			Amount: req.Change.Amount, ZkProof: "split", Status: Active,
+			Amount: req.Change.Amount, ZkProof: req.ZkProof, Status: Active,
 		}); err != nil {
 			return fmt.Errorf("failed to create change cash: %w", err)
 		}
 		orderInputCashIDs = []string{lockedCashID}
 	} else {
-		// Normal mode: lock entire cash (existing behavior)
+		// Normal mode: lock entire cash (existing behavior, no proof needed).
 		if err := ot.Account.LockCash(req.InputCashIDs, string(req.ID)); err != nil {
 			return fmt.Errorf("failed to lock cash: %w", err)
 		}
@@ -193,22 +269,51 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 
 // ────────────────────── Writing: SettleOrder ──────────────────────
 
-// CashOutput describes a new Cash to be minted as settlement output.
-type CashOutput struct {
-	Pubkey string     `json:"pubkey" validate:"required"` // recipient's ed25519 pubkey (64-char hex)
-	Token  TokenID    `json:"token"  validate:"required"`
-	Amount CipherText `json:"amount" validate:"required"`
+// SettleSide is which side of the asymmetric settle protocol a leg is on.
+// "larger" → has change cash + cross-leg ratio check (settle_larger circuit).
+// "smaller" → fully fills with no change (settle_smaller circuit).
+type SettleSide string
+
+const (
+	SideLarger  SettleSide = "larger"
+	SideSmaller SettleSide = "smaller"
+)
+
+// SettleTokenLeg is one half of a settlement: the side responsible for moving
+// `Token` from one party to the other. `Side` selects the verifier and which
+// fields are required (larger fields vs smaller fields). Each side produces its
+// own proof; chain pairs them via cross-leg match-commitment equality.
+type SettleTokenLeg struct {
+	Side  SettleSide `json:"side"  validate:"required,oneof=larger smaller"`
+	Token TokenID    `json:"token" validate:"required"`
+
+	// Required when Side == "larger":
+	MyMatchCommitment    string `json:"my_match_commitment,omitempty"    validate:"omitempty,len=64"`
+	OtherMatchCommitment string `json:"other_match_commitment,omitempty" validate:"omitempty,len=64"`
+	Price                uint64 `json:"price,omitempty"`
+	IsToken2Sender       bool   `json:"is_token2_sender,omitempty"`
+	ChangeCommitment     string `json:"change_commitment,omitempty"      validate:"omitempty,len=64"`
+	ChangePubkey         string `json:"change_pubkey,omitempty"`
+
+	// Required when Side == "smaller":
+	MatchCommitment string `json:"match_commitment,omitempty" validate:"omitempty,len=64"`
+
+	// Required for both sides:
+	RecvCommitment string `json:"recv_commitment" validate:"required,len=64"`
+	RecvPubkey     string `json:"recv_pubkey"     validate:"required,len=64"`
+	ZkProof        string `json:"zk_proof"        validate:"required"`
 }
 
-// SettleOrderRequest is the JSON payload accepted by SettleOrder.
-// `OrderIDs` must reference exactly two orders that are matched with each other.
+// SettleOrderRequest carries one leg per token group (always 2 legs).
 type SettleOrderRequest struct {
-	OrderIDs []OrderID    `json:"order_ids" validate:"required,len=2"` // matched pair
-	Outputs  []CashOutput `json:"outputs"   validate:"required,min=1"` // output Cash
-	ZkProof  string       `json:"zk_proof"  validate:"required"`
+	OrderIDs []OrderID        `json:"order_ids" validate:"required,len=2"`
+	Legs     []SettleTokenLeg `json:"legs"      validate:"required,len=2,dive"`
 }
 
-// SettleOrder spends the locked Cash of a matched pair, mints output Cash, and marks orders Done.
+// SettleOrder verifies each leg's zk proof, enforces the cross-leg
+// match-commitment equality (replaces an on-chain ratio check that fill is
+// hidden from), spends the locked Cash of both orders, mints the output Cash
+// per leg, and marks both orders Done.
 func (ot *OrderBook) SettleOrder(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
 

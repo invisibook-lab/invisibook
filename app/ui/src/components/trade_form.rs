@@ -167,7 +167,11 @@ pub fn TradeForm(
         submitting.set(true);
         let amount_str_clone = amount_str.clone();
         spawn(async move {
-            match client.send_order(&order, change_ref.as_ref()).await {
+            // App-side split proof generation isn't wired yet — pass None so
+            // ChainClient::send_order errors out cleanly if the order needs a
+            // split. Non-split orders (exact-cover) still work.
+            // TODO: integrate zk::wallet::prove_split here once mobile target supports it.
+            match client.send_order(&order, change_ref.as_ref(), None).await {
                 Ok(()) => {
                     own_order_ids
                         .write()

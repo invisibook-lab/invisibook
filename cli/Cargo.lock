@@ -1283,6 +1283,7 @@ dependencies = [
  "hex",
  "invisibook-lib",
  "ratatui",
+ "serde_json",
  "tokio",
  "yu-sdk",
  "zk",
