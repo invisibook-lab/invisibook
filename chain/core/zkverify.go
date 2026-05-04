@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"os"
 
@@ -65,20 +66,30 @@ func LoadVK(name, path string) (*CircuitVK, error) {
 // rapidsnark) against `vk` and the supplied public signals. Public signals
 // must be decimal-string field elements in the order the circuit declares
 // them — caller is responsible for assembling them from request fields.
+//
+// Emits two log lines per call so a chain operator can watch zk activity:
+//
+//	[zk] verifying <circuit>: <N> public signals
+//	[zk] <circuit> ok      OR      [zk] <circuit> REJECTED: <reason>
 func VerifyGroth16(vk *CircuitVK, proofJSON string, publicSignals []string) error {
+	log.Printf("[zk] verifying %s: %d public signals", vk.Name, len(publicSignals))
+
 	// Trim trailing NUL bytes — rapidsnark pads its output buffer to a fixed
 	// block size, so a proof piped straight from disk often ends with `\0`s.
 	proofTrimmed := trimTrailingNuls(proofJSON)
 
 	var proof types.ProofData
 	if err := json.Unmarshal([]byte(proofTrimmed), &proof); err != nil {
+		log.Printf("[zk] %s REJECTED: parse error: %v", vk.Name, err)
 		return fmt.Errorf("parsing proof for %s: %w", vk.Name, err)
 	}
 
 	zk := types.ZKProof{Proof: &proof, PubSignals: publicSignals}
 	if err := verifier.VerifyGroth16(zk, vk.VKBytes); err != nil {
+		log.Printf("[zk] %s REJECTED: %v", vk.Name, err)
 		return fmt.Errorf("groth16 verification failed for %s: %w", vk.Name, err)
 	}
+	log.Printf("[zk] %s ok", vk.Name)
 	return nil
 }
 
