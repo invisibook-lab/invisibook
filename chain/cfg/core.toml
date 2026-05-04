@@ -5,6 +5,11 @@ db_path = "data/orders.db"
 
 [account]
 db_path = "data/accounts.db"
+# Deposit / Withdraw verification keys — produced by `snarkjs zkey export verificationkey`
+# (or by re-running the corresponding `dev_setup_snarkjs` test). Paths are
+# relative to wherever you launch the chain from.
+deposit_vk_path  = "../lib/target/circuit-build/deposit/vk.json"
+withdraw_vk_path = "../lib/target/circuit-build/withdraw/vk.json"
 
 # Genesis cash: explicit Cash records inserted at chain startup.
 # IDs and ciphertexts must match cfg/tests/alice_cash.json and bob_cash.json.

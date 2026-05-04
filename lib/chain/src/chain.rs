@@ -128,7 +128,13 @@ struct GetAccountParams {
 struct DepositParams {
     pubkey: String,
     token: TokenID,
-    amount: CipherText,
+    /// Hex commitment to the (hidden) plaintext amount the source-chain bridge
+    /// attested. Until the bridge proof is verified on-chain, this field is
+    /// trusted blindly (testnet/demo only).
+    bridge_commitment: String,
+    /// Hex commitment that becomes the new `Cash.Amount`.
+    output_commitment: String,
+    /// snarkjs `proof.json` produced by rapidsnark.
     zk_proof: String,
 }
 
@@ -137,14 +143,18 @@ struct WithdrawParams {
     pubkey: String,
     token: TokenID,
     inputs: Vec<String>,
-    change: ChangeOutputParams,
+    /// Hex commitment to the (hidden) withdrawn amount. Trusted by chain
+    /// until the destination-chain bridge release proof lands.
+    bridge_out_commitment: String,
+    /// Always length 2: `[change_commitment, zero_pad_commitment]`. When the
+    /// withdrawal has no change, slot 0 is the well-known `Poseidon(0,0)` hex.
+    output_commitments: Vec<String>,
+    /// Empty string means "mint change back to the withdrawer" (chain
+    /// substitutes `pubkey`).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    change_pubkey: String,
+    /// snarkjs `proof.json` produced by rapidsnark.
     zk_proof: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ChangeOutputParams {
-    pubkey: String,
-    amount: CipherText,
 }
 
 #[derive(Debug, Deserialize)]
@@ -379,46 +389,167 @@ impl ChainClient {
         })
     }
 
-    /// Deposits funds into an account (requires zk proof of bridge deposit).
+    /// Deposits `plaintext_amount` of `token` into the depositor's account.
+    ///
+    /// Generates a fresh blinding factor for the new Cash and a separate one
+    /// for the (placeholder) bridge commitment, runs rapidsnark to produce the
+    /// deposit proof, sends the writing request to chain, and on success
+    /// appends the new Cash to the local store so the wallet can spend it.
+    ///
+    /// `circuit_handle` carries the compiled `deposit.circom` artifacts;
+    /// `zkey` is the path to the rapidsnark proving key. Both come from a
+    /// `lib_zk::setup::DevSetup` (or a production ceremony output).
+    ///
+    /// Returns `(cash_id, output_random_hex)` so the caller can persist the
+    /// random alongside the cash for future spend operations.
     pub async fn deposit(
         &self,
-        pubkey: &str,
         token: &str,
-        amount: &str,
-        zk_proof: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+        plaintext_amount: u64,
+        circuit_handle: &zk::test_circuit::TestCircuitHandle,
+        zkey: &std::path::Path,
+    ) -> Result<(String, String), Box<dyn std::error::Error>> {
+        use rand::RngCore;
+
+        let mut output_random = [0u8; 32];
+        let mut r_bridge = [0u8; 32];
+        rand::rng().fill_bytes(&mut output_random);
+        rand::rng().fill_bytes(&mut r_bridge);
+
+        let dp = zk::wallet::prove_deposit(
+            zk::wallet::DepositWitness {
+                deposit_amount: plaintext_amount,
+                r_bridge,
+                output_amount: plaintext_amount,
+                output_random,
+            },
+            circuit_handle,
+            zkey,
+        )?;
+
+        let cash_id = crate::orderbook::compute_cash_id(
+            &self.pubkey_hex,
+            token,
+            &dp.output_commitment_hex,
+        );
+
         let params = DepositParams {
-            pubkey: pubkey.to_string(),
+            pubkey: self.pubkey_hex.clone(),
             token: token.to_string(),
-            amount: amount.to_string(),
-            zk_proof: zk_proof.to_string(),
+            bridge_commitment: dp.bridge_commitment_hex,
+            output_commitment: dp.output_commitment_hex,
+            zk_proof: serde_json::to_string(&dp.proof_json)?,
         };
         self.client
             .write_chain("account", "Deposit", &params, self.chain_id, 100, 0)
-            .await
+            .await?;
+
+        Ok((cash_id, hex::encode(output_random)))
     }
 
-    /// Withdraws funds from the account (requires zk proof that amount <= balance).
+    /// Withdraws `plaintext_amount` of `token` to the destination chain.
+    /// Spends `input_records` (must total ≥ `plaintext_amount`), generates a
+    /// rapidsnark withdraw proof binding the hidden amount to a fresh
+    /// bridge_out commitment, and submits the writing request.
+    ///
+    /// On success returns `Some((change_cash_id, change_random_hex))` if a
+    /// change Cash was minted, or `None` if the inputs covered the withdraw
+    /// exactly. The caller is responsible for updating the local CashStore.
+    ///
+    /// Errors out (without touching chain) if `input_records` is empty, has
+    /// more than 2 entries (matches the N=2 circuit), or doesn't cover the
+    /// requested amount.
     pub async fn withdraw(
         &self,
         token: &str,
-        inputs: Vec<String>,
-        change: ChangeOutput,
-        zk_proof: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+        plaintext_amount: u64,
+        input_records: &[crate::cash_store::CashRecord],
+        circuit_handle: &zk::test_circuit::TestCircuitHandle,
+        zkey: &std::path::Path,
+    ) -> Result<Option<(String, String)>, Box<dyn std::error::Error>> {
+        use rand::RngCore;
+
+        if input_records.is_empty() || input_records.len() > 2 {
+            return Err(format!(
+                "withdraw circuit takes 1..=2 inputs, got {}",
+                input_records.len()
+            )
+            .into());
+        }
+        let input_total: u64 = input_records.iter().map(|r| r.amount).sum();
+        if input_total < plaintext_amount {
+            return Err(format!(
+                "input cash totals {input_total}, need at least {plaintext_amount}"
+            )
+            .into());
+        }
+        let change_amount = input_total - plaintext_amount;
+
+        // Decode each record's stored random hex back into 32-byte BE form.
+        let mut inputs_for_witness: Vec<(u64, [u8; 32])> = Vec::with_capacity(input_records.len());
+        for rec in input_records {
+            let raw = hex::decode(&rec.random)?;
+            if raw.len() != 32 {
+                return Err(format!(
+                    "cash {} random must decode to 32 bytes, got {}",
+                    rec.cash_id,
+                    raw.len()
+                )
+                .into());
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&raw);
+            inputs_for_witness.push((rec.amount, arr));
+        }
+
+        let mut r_bridge_out = [0u8; 32];
+        let mut change_random = [0u8; 32];
+        rand::rng().fill_bytes(&mut r_bridge_out);
+        rand::rng().fill_bytes(&mut change_random);
+
+        let wp = zk::wallet::prove_withdraw(
+            zk::wallet::WithdrawWitness {
+                withdraw_amount: plaintext_amount,
+                r_bridge_out,
+                inputs: inputs_for_witness,
+                change_amount,
+                change_random,
+            },
+            circuit_handle,
+            zkey,
+        )?;
+
+        // Always M=2 outputs: slot[0] = change (or zero pad if no change),
+        // slot[1] = zero pad. The chain detects "no change" by comparing
+        // slot[0] against the well-known PoseidonZeroCommitmentHex constant.
+        let zero_commitment_hex = zk::wallet::fr_to_hex(
+            &zk::wallet::poseidon_commit(0, &[0u8; 32]),
+        );
+        let output_commitments = vec![wp.change_commitment_hex.clone(), zero_commitment_hex.clone()];
+
         let params = WithdrawParams {
             pubkey: self.pubkey_hex.clone(),
             token: token.to_string(),
-            inputs,
-            change: ChangeOutputParams {
-                pubkey: change.pubkey,
-                amount: change.amount,
-            },
-            zk_proof: zk_proof.to_string(),
+            inputs: input_records.iter().map(|r| r.cash_id.clone()).collect(),
+            bridge_out_commitment: wp.bridge_out_commitment_hex,
+            output_commitments,
+            change_pubkey: String::new(), // chain defaults to req.Pubkey
+            zk_proof: serde_json::to_string(&wp.proof_json)?,
         };
         self.client
             .write_chain("account", "Withdraw", &params, self.chain_id, 100, 0)
-            .await
+            .await?;
+
+        if change_amount == 0 {
+            Ok(None)
+        } else {
+            let change_cash_id = crate::orderbook::compute_cash_id(
+                &self.pubkey_hex,
+                token,
+                &wp.change_commitment_hex,
+            );
+            Ok(Some((change_cash_id, hex::encode(change_random))))
+        }
     }
 
     /// Subscribe to on-chain order events via WebSocket.

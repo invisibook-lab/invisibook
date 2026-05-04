@@ -18,9 +18,16 @@ type OrderBookConfig struct {
 }
 
 // AccountConfig holds configuration for the Account tripod.
+//
+// `DepositVKPath` and `WithdrawVKPath` point at the snarkjs `vk.json` files
+// produced by `snarkjs zkey export verificationkey <circuit>.zkey vk.json`.
+// Both are required at startup — chain refuses to boot if any path is unset
+// or the file is missing/malformed.
 type AccountConfig struct {
-	DBPath      string        `toml:"db_path"`
-	GenesisCash []GenesisCash `toml:"genesis_cash"`
+	DBPath         string        `toml:"db_path"`
+	DepositVKPath  string        `toml:"deposit_vk_path"`
+	WithdrawVKPath string        `toml:"withdraw_vk_path"`
+	GenesisCash    []GenesisCash `toml:"genesis_cash"`
 }
 
 // GenesisCash defines a Cash record to be inserted at chain initialization.

@@ -28,37 +28,32 @@ pub fn compute_order_id(input_cash_ids: &[String]) -> OrderID {
 
 // ────────────────────── Cipher ──────────────────────
 
-/// Core implementation: returns ciphertext = poseidon(amount, random).
+/// Core implementation: returns ciphertext = `Poseidon(2)([amount, random])`.
 /// `random_bytes` is provided by the caller so genesis cash can use a fixed value.
+///
+/// On non-Android targets this delegates to `zk::wallet::poseidon_commit` so
+/// wallet-side commitments are byte-identical to what the circuits constrain.
+/// Android falls back to SHA-256, which is **incompatible** with the circuits —
+/// any cash created via that path cannot be deposited / withdrawn / settled.
 fn encrypt_with_random(plaintext: &str, random_bytes: [u8; 32]) -> (CipherText, u64) {
     let amount: u64 = plaintext.parse().unwrap_or(0);
 
     #[cfg(not(target_os = "android"))]
     {
-        use ark_bn254::Fr;
-        use ark_ff::{BigInteger, PrimeField};
-        use light_poseidon::{Poseidon, PoseidonHasher};
-
-        let result = (|| -> Option<String> {
-            let amount_fr = Fr::from(amount);
-            let random_fr = Fr::from_be_bytes_mod_order(&random_bytes);
-            let mut hasher = Poseidon::<Fr>::new_circom(2).ok()?;
-            let hash = hasher.hash(&[amount_fr, random_fr]).ok()?;
-            let bytes = hash.into_bigint().to_bytes_be();
-            Some(bytes.iter().map(|b| format!("{:02x}", b)).collect())
-        })();
-
-        if let Some(hex) = result {
-            return (hex, amount);
-        }
+        let commitment = zk::wallet::poseidon_commit(amount, &random_bytes);
+        return (zk::wallet::fr_to_hex(&commitment), amount);
     }
 
-    // Android fallback: SHA-256(amount || random)
-    let mut hasher = Sha256::new();
-    hasher.update(plaintext.as_bytes());
-    hasher.update(random_bytes);
-    let cipher = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-    (cipher, amount)
+    // Android fallback: SHA-256(amount || random). TODO: light-poseidon should
+    // build for Android too — wire it up so deposits work on mobile.
+    #[cfg(target_os = "android")]
+    {
+        let mut hasher = Sha256::new();
+        hasher.update(plaintext.as_bytes());
+        hasher.update(random_bytes);
+        let cipher = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        (cipher, amount)
+    }
 }
 
 /// Core implementation: returns (ciphertext, amount_u64, random_bytes).
