@@ -28,11 +28,24 @@ use crate::poseidon;
 
 type Curve = Projective<BnConfig>;
 
+/// Order side: determines party role in the MPC protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Side {
+    /// Buy order = party 0.
+    Buy = 0,
+    /// Sell order = party 1.
+    Sell = 1,
+}
+
+impl Side {
+    fn party_id(self) -> u64 {
+        self as u64
+    }
+}
+
 /// Configuration for the MPC settlement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettleConfig {
-    /// Party ID: 0 for Alice, 1 for Bob.
-    pub party_id: u64,
     /// Local address to bind for QUIC transport.
     pub local_addr: SocketAddr,
     /// Peer address to connect to.
@@ -56,16 +69,18 @@ fn to_scalar(fr: Fr) -> Scalar<Curve> {
 /// Run the MPC settlement protocol.
 ///
 /// # Arguments
-/// - `config`: Network and party configuration.
+/// - `config`: Network configuration (local/peer addresses).
+/// - `side`: This party's order side (`Buy` = party 0, `Sell` = party 1).
 /// - `my_value`: This party's secret amount (u64).
 /// - `my_random`: This party's secret randomness (BN254 Fr, decimal string).
-/// - `c1`: Commitment 1 = poseidon(v1, r1) (decimal string).
-/// - `c2`: Commitment 2 = poseidon(v2, r2) (decimal string).
+/// - `c1`: Commitment 1 = poseidon(v1, r1) from the buy side (decimal string).
+/// - `c2`: Commitment 2 = poseidon(v2, r2) from the sell side (decimal string).
 ///
 /// # Returns
 /// `SettleResult` with comparison outcome and the loser's revealed randomness.
 pub async fn settle(
     config: &SettleConfig,
+    side: Side,
     my_value: u64,
     my_random: &str,
     c1: &str,
@@ -79,14 +94,14 @@ pub async fn settle(
 
     // Setup network
     let mut net =
-        QuicTwoPartyNet::<Curve>::new(config.party_id, config.local_addr, config.peer_addr);
+        QuicTwoPartyNet::<Curve>::new(side.party_id(), config.local_addr, config.peer_addr);
     net.connect()
         .await
         .map_err(|e| MpcError::Network(e.to_string()))?;
 
     // Use PartyIDBeaverSource for development/testing.
     // Production would use OT-based triple generation.
-    let beaver = PartyIDBeaverSource::new(config.party_id);
+    let beaver = PartyIDBeaverSource::new(side.party_id());
     let fabric = MpcFabric::new(net, beaver);
 
     let dummy = Scalar::<Curve>::from(0u64);
@@ -94,7 +109,7 @@ pub async fn settle(
     // --- Share inputs ---
     // Party 0 shares v1, r1; Party 1 shares v2, r2.
     // Sender provides real value, receiver provides dummy (ignored by the protocol).
-    let (v1, v2) = if config.party_id == 0 {
+    let (v1, v2) = if side.party_id() == 0 {
         let v1 = fabric.share_scalar(to_scalar(my_v_fr), PARTY0);
         let v2 = fabric.share_scalar(dummy, PARTY1);
         (v1, v2)
@@ -104,7 +119,7 @@ pub async fn settle(
         (v1, v2)
     };
 
-    let (r1, r2) = if config.party_id == 0 {
+    let (r1, r2) = if side.party_id() == 0 {
         let r1 = fabric.share_scalar(to_scalar(my_r), PARTY0);
         let r2 = fabric.share_scalar(dummy, PARTY1);
         (r1, r2)
@@ -115,7 +130,7 @@ pub async fn settle(
     };
 
     // Share commitments from both parties
-    let (c1_a, c2_a) = if config.party_id == 0 {
+    let (c1_a, c2_a) = if side.party_id() == 0 {
         (
             fabric.share_scalar(to_scalar(c1_fr), PARTY0),
             fabric.share_scalar(to_scalar(c2_fr), PARTY0),
@@ -127,7 +142,7 @@ pub async fn settle(
         )
     };
 
-    let (c1_b, c2_b) = if config.party_id == 1 {
+    let (c1_b, c2_b) = if side.party_id() == 1 {
         (
             fabric.share_scalar(to_scalar(c1_fr), PARTY1),
             fabric.share_scalar(to_scalar(c2_fr), PARTY1),
