@@ -7,7 +7,8 @@
 //! 2. Verify commitment consistency (C1_a == C1_b, C2_a == C2_b)
 //! 3. Compute Poseidon hashes in MPC and verify against commitments
 //! 4. Compare v1 vs v2
-//! 5. Reveal loser's randomness
+//! 5. MUX to select loser's randomness without opening
+//! 6. Output additive shares + MAC shares for on-chain verification
 
 use std::net::SocketAddr;
 
@@ -52,13 +53,23 @@ pub struct SettleConfig {
     pub peer_addr: SocketAddr,
 }
 
-/// Result of the MPC settlement.
+/// Each party's output from the MPC settlement (to be submitted to chain).
+///
+/// Neither party learns the result. Both submit additive shares to the chain,
+/// which reconstructs and verifies MAC integrity:
+/// `(mac_A + mac_B) == (δ_A + δ_B) × (share_A + share_B) mod P`
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SettleResult {
-    /// `true` if party 0's value >= party 1's value.
-    pub cmp: bool,
-    /// The loser's randomness (decimal string of BN254 field element).
-    pub revealed_r: String,
+pub struct SettleShare {
+    /// Comparison bit: my additive share (decimal Fr).
+    pub cmp_share: String,
+    /// Comparison bit: my MAC share (decimal Fr).
+    pub cmp_mac: String,
+    /// Loser's randomness: my additive share (decimal Fr).
+    pub r_loser_share: String,
+    /// Loser's randomness: my MAC share (decimal Fr).
+    pub r_loser_mac: String,
+    /// Session MAC key: my share of δ (decimal Fr).
+    pub mac_key_share: String,
 }
 
 /// Convert Fr to Scalar for use with ark-mpc share_scalar.
@@ -77,7 +88,7 @@ fn to_scalar(fr: Fr) -> Scalar<Curve> {
 /// - `c2`: Commitment 2 = poseidon(v2, r2) from the sell side (decimal string).
 ///
 /// # Returns
-/// `SettleResult` with comparison outcome and the loser's revealed randomness.
+/// `SettleShare` with additive shares and MAC shares for on-chain verification.
 pub async fn settle(
     config: &SettleConfig,
     side: Side,
@@ -85,7 +96,7 @@ pub async fn settle(
     my_random: &str,
     c1: &str,
     c2: &str,
-) -> Result<SettleResult, MpcError> {
+) -> Result<SettleShare, MpcError> {
     // Parse field elements
     let my_r = fr_from_decimal(my_random);
     let c1_fr = fr_from_decimal(c1);
@@ -194,36 +205,36 @@ pub async fn settle(
     }
 
     // --- Step 3: Compare v1 >= v2 (zero-leakage) ---
-    // Only opens a statistically-masked value and the 1-bit result.
-    // Never reveals v1 - v2.
+    // Only opens a statistically-masked value internally.
+    // Never reveals v1 - v2 or the comparison bit itself.
     let cmp_bit = compare::compare_geq(&v1, &v2).await?;
-    let cmp_open = cmp_bit
-        .open_authenticated()
-        .await
-        .map_err(|e| MpcError::Auth(format!("comparison bit MAC failed: {e}")))?;
-    let cmp = cmp_open.inner() == Fr::from(1u64);
 
-    // --- Step 4: Reveal loser's randomness ---
-    let revealed_r = if cmp {
-        // v1 >= v2: Bob loses, reveal r2
-        let r2_open = r2.open_authenticated();
-        let r2_val = r2_open
-            .await
-            .map_err(|e| MpcError::Auth(format!("r2 reveal MAC failed: {e}")))?;
-        fr_to_decimal(&r2_val.inner())
-    } else {
-        // v1 < v2: Alice loses, reveal r1
-        let r1_open = r1.open_authenticated();
-        let r1_val = r1_open
-            .await
-            .map_err(|e| MpcError::Auth(format!("r1 reveal MAC failed: {e}")))?;
-        fr_to_decimal(&r1_val.inner())
-    };
+    // --- Step 4: MUX for loser's randomness (no opening) ---
+    // [r_loser] = [cmp] * [r2] + (1 - [cmp]) * [r1]
+    // If cmp=1 (v1>=v2), loser is party1 → r_loser = r2
+    // If cmp=0 (v1< v2), loser is party0 → r_loser = r1
+    let one = fabric.one_authenticated();
+    let one_minus_cmp = &one - &cmp_bit;
+    let r_loser = &(&cmp_bit * &r2) + &(&one_minus_cmp * &r1);
+
+    // --- Step 5: Extract shares (NO opening to either party) ---
+    let auth_one = fabric.one_authenticated();
+    let delta_i = auth_one.mac_share().await;
+    let cmp_s = cmp_bit.share().await;
+    let cmp_m = cmp_bit.mac_share().await;
+    let r_s = r_loser.share().await;
+    let r_m = r_loser.mac_share().await;
 
     // Shutdown the fabric
     fabric.shutdown();
 
-    Ok(SettleResult { cmp, revealed_r })
+    Ok(SettleShare {
+        cmp_share: fr_to_decimal(&cmp_s.inner()),
+        cmp_mac: fr_to_decimal(&cmp_m.inner()),
+        r_loser_share: fr_to_decimal(&r_s.inner()),
+        r_loser_mac: fr_to_decimal(&r_m.inner()),
+        mac_key_share: fr_to_decimal(&delta_i.inner()),
+    })
 }
 
 /// Convert a BN254 field element to its decimal string representation.
