@@ -58,6 +58,12 @@ jobs:
             lib/target
           key: ${{ runner.os }}-cargo-lib-${{ hashFiles('lib/Cargo.lock') }}
 
+      - name: Cache circuit build (ptau + zkey)
+        uses: actions/cache@v4
+        with:
+          path: lib/target/circuit-build
+          key: ${{ runner.os }}-circuit-build-${{ hashFiles('lib/zk/templates/**/*.circom') }}
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:

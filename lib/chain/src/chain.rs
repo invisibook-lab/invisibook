@@ -454,11 +454,8 @@ impl ChainClient {
             zkey,
         )?;
 
-        let cash_id = crate::orderbook::compute_cash_id(
-            &self.pubkey_hex,
-            token,
-            &dp.output_commitment_hex,
-        );
+        let cash_id =
+            crate::orderbook::compute_cash_id(&self.pubkey_hex, token, &dp.output_commitment_hex);
 
         let params = DepositParams {
             pubkey: self.pubkey_hex.clone(),
@@ -549,10 +546,12 @@ impl ChainClient {
         // Always M=2 outputs: slot[0] = change (or zero pad if no change),
         // slot[1] = zero pad. The chain detects "no change" by comparing
         // slot[0] against the well-known PoseidonZeroCommitmentHex constant.
-        let zero_commitment_hex = zk::wallet::fr_to_hex(
-            &zk::wallet::poseidon_commit(0, &[0u8; 32]),
-        );
-        let output_commitments = vec![wp.change_commitment_hex.clone(), zero_commitment_hex.clone()];
+        let zero_commitment_hex =
+            zk::wallet::fr_to_hex(&zk::wallet::poseidon_commit(0, &[0u8; 32]));
+        let output_commitments = vec![
+            wp.change_commitment_hex.clone(),
+            zero_commitment_hex.clone(),
+        ];
 
         let params = WithdrawParams {
             pubkey: self.pubkey_hex.clone(),
