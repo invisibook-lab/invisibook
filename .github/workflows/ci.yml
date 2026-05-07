@@ -74,6 +74,15 @@ jobs:
       - name: Install snarkjs
         run: npm install -g snarkjs
 
+      - name: Install rapidsnark
+        run: |
+          git clone https://github.com/iden3/rapidsnark.git /tmp/rapidsnark
+          cd /tmp/rapidsnark
+          git submodule update --init --recursive
+          ./build_gmp.sh host
+          make host -j$(nproc)
+          sudo cp /tmp/rapidsnark/package/bin/prover /usr/local/bin/rapidsnark
+
       - name: Build lib
         working-directory: lib
         run: cargo build

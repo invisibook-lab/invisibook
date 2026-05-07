@@ -68,7 +68,6 @@ pub fn run_rapidsnark(zkey: &Path, witness: &Path) -> Result<(Value, Value)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{
         setup::dev_setup_snarkjs,
         test_circuit::TestCircuitHandle,
