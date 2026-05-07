@@ -65,9 +65,10 @@ jobs:
 
       - name: Install circom
         run: |
+          rustup toolchain install stable
           git clone https://github.com/iden3/circom.git /tmp/circom
           cd /tmp/circom
-          cargo build --release
+          cargo +stable build --release
           sudo cp target/release/circom /usr/local/bin/
 
       - name: Install snarkjs
