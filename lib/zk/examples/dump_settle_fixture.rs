@@ -10,14 +10,15 @@
 // Run with:
 //   cargo run -p zk --example dump_settle_fixture -- <out_path>
 
-use std::env;
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
 
-use zk::setup::dev_setup_snarkjs;
-use zk::test_circuit::TestCircuitHandle;
-use zk::wallet::{
-    SettleLargerWitness, SettleSmallerWitness, fr_to_hex, poseidon_commit, prove_settle_larger,
-    prove_settle_smaller,
+use zk::{
+    setup::dev_setup_snarkjs,
+    test_circuit::TestCircuitHandle,
+    wallet::{
+        SettleLargerWitness, SettleSmallerWitness, fr_to_hex, poseidon_commit, prove_settle_larger,
+        prove_settle_smaller,
+    },
 };
 
 fn main() {

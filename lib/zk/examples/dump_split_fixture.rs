@@ -7,12 +7,13 @@
 // Run with:
 //   cargo run -p zk --example dump_split_fixture -- <out_path>
 
-use std::env;
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
 
-use zk::setup::dev_setup_snarkjs;
-use zk::test_circuit::TestCircuitHandle;
-use zk::wallet::{SplitWitness, prove_split};
+use zk::{
+    setup::dev_setup_snarkjs,
+    test_circuit::TestCircuitHandle,
+    wallet::{SplitWitness, prove_split},
+};
 
 fn main() {
     let out_path = env::args()

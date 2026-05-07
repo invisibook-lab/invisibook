@@ -104,8 +104,8 @@ pub struct ChangeOutput {
 /// Change output attached to a SendOrder when splitting cash.
 #[derive(Debug, Clone)]
 pub struct CashChange {
-    pub cash_id: String,      // client-generated change cash ID
-    pub amount: CipherText,   // encrypted change amount
+    pub cash_id: String,    // client-generated change cash ID
+    pub amount: CipherText, // encrypted change amount
 }
 
 // ────────────────────── Order ──────────────────────

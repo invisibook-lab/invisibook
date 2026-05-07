@@ -69,12 +69,14 @@ pub fn run_rapidsnark(zkey: &Path, witness: &Path) -> Result<(Value, Value)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::setup::dev_setup_snarkjs;
-    use crate::test_circuit::TestCircuitHandle;
-    use crate::wallet::{
-        DepositWitness, SettleLargerWitness, SettleSmallerWitness, SplitWitness, WithdrawWitness,
-        fr_to_hex, poseidon_commit, prove_deposit, prove_settle_larger, prove_settle_smaller,
-        prove_split, prove_withdraw,
+    use crate::{
+        setup::dev_setup_snarkjs,
+        test_circuit::TestCircuitHandle,
+        wallet::{
+            DepositWitness, SettleLargerWitness, SettleSmallerWitness, SplitWitness,
+            WithdrawWitness, fr_to_hex, poseidon_commit, prove_deposit, prove_settle_larger,
+            prove_settle_smaller, prove_split, prove_withdraw,
+        },
     };
 
     #[test]
@@ -105,8 +107,14 @@ mod tests {
 
         // Sanity: the off-circuit commitments echoed by prove_deposit must match
         // recomputing them — chain re-derives these to assemble the public-input vector.
-        assert_eq!(dp.bridge_commitment_hex, fr_to_hex(&poseidon_commit(150, &[0x11u8; 32])));
-        assert_eq!(dp.output_commitment_hex, fr_to_hex(&poseidon_commit(150, &[0x22u8; 32])));
+        assert_eq!(
+            dp.bridge_commitment_hex,
+            fr_to_hex(&poseidon_commit(150, &[0x11u8; 32]))
+        );
+        assert_eq!(
+            dp.output_commitment_hex,
+            fr_to_hex(&poseidon_commit(150, &[0x22u8; 32]))
+        );
     }
 
     #[test]
@@ -134,12 +142,24 @@ mod tests {
 
         // Real input commitments echoed in unpadded order
         assert_eq!(wp.input_commitments_hex.len(), 2);
-        assert_eq!(wp.input_commitments_hex[0], fr_to_hex(&poseidon_commit(70, &in_a_random)));
-        assert_eq!(wp.input_commitments_hex[1], fr_to_hex(&poseidon_commit(40, &in_b_random)));
+        assert_eq!(
+            wp.input_commitments_hex[0],
+            fr_to_hex(&poseidon_commit(70, &in_a_random))
+        );
+        assert_eq!(
+            wp.input_commitments_hex[1],
+            fr_to_hex(&poseidon_commit(40, &in_b_random))
+        );
 
         // Bridge + change commitments match an off-circuit recomputation
-        assert_eq!(wp.bridge_out_commitment_hex, fr_to_hex(&poseidon_commit(100, &[0x11u8; 32])));
-        assert_eq!(wp.change_commitment_hex, fr_to_hex(&poseidon_commit(10, &[0xC3u8; 32])));
+        assert_eq!(
+            wp.bridge_out_commitment_hex,
+            fr_to_hex(&poseidon_commit(100, &[0x11u8; 32]))
+        );
+        assert_eq!(
+            wp.change_commitment_hex,
+            fr_to_hex(&poseidon_commit(10, &[0xC3u8; 32]))
+        );
     }
 
     #[test]
@@ -166,9 +186,18 @@ mod tests {
         assert_eq!(public.len(), 4);
 
         assert_eq!(sp.input_commitments_hex.len(), 1);
-        assert_eq!(sp.input_commitments_hex[0], fr_to_hex(&poseidon_commit(100, &in_random)));
-        assert_eq!(sp.locked_commitment_hex, fr_to_hex(&poseidon_commit(60, &locked_random)));
-        assert_eq!(sp.change_commitment_hex, fr_to_hex(&poseidon_commit(40, &change_random)));
+        assert_eq!(
+            sp.input_commitments_hex[0],
+            fr_to_hex(&poseidon_commit(100, &in_random))
+        );
+        assert_eq!(
+            sp.locked_commitment_hex,
+            fr_to_hex(&poseidon_commit(60, &locked_random))
+        );
+        assert_eq!(
+            sp.change_commitment_hex,
+            fr_to_hex(&poseidon_commit(40, &change_random))
+        );
     }
 
     #[test]
@@ -187,7 +216,10 @@ mod tests {
         };
         let sp = prove_split(witness, &handle, &setup.zkey).expect("exact-lock split");
         // Without explicit change, the change commitment should equal Poseidon(0,0).
-        assert_eq!(sp.change_commitment_hex, fr_to_hex(&poseidon_commit(0, &[0u8; 32])));
+        assert_eq!(
+            sp.change_commitment_hex,
+            fr_to_hex(&poseidon_commit(0, &[0u8; 32]))
+        );
     }
 
     #[test]
@@ -225,9 +257,18 @@ mod tests {
         assert_eq!(public.len(), 8);
 
         // commitments echoed match recomputing them off-circuit
-        assert_eq!(sp.my_match_commitment_hex, fr_to_hex(&poseidon_commit(60, &r_my)));
-        assert_eq!(sp.other_match_commitment_hex, fr_to_hex(&poseidon_commit(60, &r_other)));
-        assert_eq!(sp.change_commitment_hex, fr_to_hex(&poseidon_commit(20, &change_random)));
+        assert_eq!(
+            sp.my_match_commitment_hex,
+            fr_to_hex(&poseidon_commit(60, &r_my))
+        );
+        assert_eq!(
+            sp.other_match_commitment_hex,
+            fr_to_hex(&poseidon_commit(60, &r_other))
+        );
+        assert_eq!(
+            sp.change_commitment_hex,
+            fr_to_hex(&poseidon_commit(20, &change_random))
+        );
     }
 
     #[test]
@@ -251,7 +292,10 @@ mod tests {
         // public.json: [match_commitment, input_hashes[0], input_hashes[1], recv]
         let public = sp.public_json.as_array().expect("public is array");
         assert_eq!(public.len(), 4);
-        assert_eq!(sp.match_commitment_hex, fr_to_hex(&poseidon_commit(60, &r_match)));
+        assert_eq!(
+            sp.match_commitment_hex,
+            fr_to_hex(&poseidon_commit(60, &r_match))
+        );
     }
 
     #[test]

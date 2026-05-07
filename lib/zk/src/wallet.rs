@@ -13,9 +13,9 @@ use ark_ff::{BigInteger, PrimeField};
 use light_poseidon::{Poseidon, PoseidonHasher};
 use serde_json::{Value, json};
 
-use crate::circom_bridge::fr_to_decimal_string;
-use crate::prover::run_rapidsnark;
-use crate::test_circuit::TestCircuitHandle;
+use crate::{
+    circom_bridge::fr_to_decimal_string, prover::run_rapidsnark, test_circuit::TestCircuitHandle,
+};
 
 /// Compute `Poseidon(2)([amount, r])` — the canonical commitment shape used by
 /// every wallet circuit. `random` is interpreted as a 32-byte big-endian field
@@ -227,10 +227,7 @@ pub fn prove_withdraw(
         &zero_random_dec,
     );
     let input_hashes_dec = pad_to(
-        input_commitments
-            .iter()
-            .map(fr_to_decimal_string)
-            .collect(),
+        input_commitments.iter().map(fr_to_decimal_string).collect(),
         WITHDRAW_N,
         &fr_to_decimal_string(&zero_commitment),
     );
@@ -351,10 +348,7 @@ pub fn prove_split(
         &zero_random_dec,
     );
     let input_hashes_dec = pad_to(
-        input_commitments
-            .iter()
-            .map(fr_to_decimal_string)
-            .collect(),
+        input_commitments.iter().map(fr_to_decimal_string).collect(),
         SPLIT_N,
         &fr_to_decimal_string(&zero_commitment),
     );
@@ -524,10 +518,7 @@ pub fn prove_settle_larger(
         &zero_random_dec,
     );
     let input_hashes_dec = pad_to(
-        input_commitments
-            .iter()
-            .map(fr_to_decimal_string)
-            .collect(),
+        input_commitments.iter().map(fr_to_decimal_string).collect(),
         SETTLE_LARGER_N,
         &fr_to_decimal_string(&zero_commitment),
     );
@@ -535,7 +526,8 @@ pub fn prove_settle_larger(
     let r_my_fr = Fr::from_be_bytes_mod_order(&w.r_my);
     let r_other_fr = Fr::from_be_bytes_mod_order(&w.r_other);
     let change_random_fr = Fr::from_be_bytes_mod_order(&w.change_random);
-    let counterparty_recv_dec = fr_to_decimal_string(&hex_to_fr(&w.counterparty_recv_commitment_hex)?);
+    let counterparty_recv_dec =
+        fr_to_decimal_string(&hex_to_fr(&w.counterparty_recv_commitment_hex)?);
 
     let input = json!({
         "my_match_commitment":          fr_to_decimal_string(&my_match),
@@ -635,7 +627,8 @@ pub fn prove_settle_smaller(
     );
 
     let r_match_fr = Fr::from_be_bytes_mod_order(&w.r_match);
-    let counterparty_recv_dec = fr_to_decimal_string(&hex_to_fr(&w.counterparty_recv_commitment_hex)?);
+    let counterparty_recv_dec =
+        fr_to_decimal_string(&hex_to_fr(&w.counterparty_recv_commitment_hex)?);
 
     let input = json!({
         "match_commitment":             fr_to_decimal_string(&match_commitment),

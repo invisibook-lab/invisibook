@@ -2,8 +2,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 
-use crate::cash_store::CashRecord;
-use crate::types::*;
+use crate::{cash_store::CashRecord, types::*};
 
 // ────────────────────── ID Generator ──────────────────────
 
@@ -51,7 +50,11 @@ fn encrypt_with_random(plaintext: &str, random_bytes: [u8; 32]) -> (CipherText, 
         let mut hasher = Sha256::new();
         hasher.update(plaintext.as_bytes());
         hasher.update(random_bytes);
-        let cipher = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        let cipher = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
         (cipher, amount)
     }
 }
@@ -117,7 +120,11 @@ pub fn select_cash(records: &[CashRecord], token: &str, total: u64) -> CashSelec
     }
 
     // 2) Combine smaller cash (amount < total), sorted desc, greedy
-    let mut smaller: Vec<&CashRecord> = active.iter().copied().filter(|r| r.amount < total).collect();
+    let mut smaller: Vec<&CashRecord> = active
+        .iter()
+        .copied()
+        .filter(|r| r.amount < total)
+        .collect();
     smaller.sort_by(|a, b| b.amount.cmp(&a.amount)); // descending
     let mut sum = 0u64;
     let mut picked: Vec<String> = Vec::new();
@@ -156,7 +163,11 @@ pub fn compute_cash_id(pubkey: &str, token: &str, amount: &str) -> String {
     hasher.update(pubkey.as_bytes());
     hasher.update(token.as_bytes());
     hasher.update(amount.as_bytes());
-    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 // ────────────────────── Order Helpers ──────────────────────
@@ -187,12 +198,33 @@ pub fn genesis_encrypt(cash_id: &str, amount_plaintext: &str) -> (CipherText, St
 // ────────────────────── Sample Data ──────────────────────
 
 pub fn sample_orders() -> Vec<Order> {
-    let make = |trade_type: TradeType, t1: &str, t2: &str, price: u64, amt: &str, status: OrderStatus, idx: u32| {
-        let subject = TradePair { token1: t1.into(), token2: t2.into() };
+    let make = |trade_type: TradeType,
+                t1: &str,
+                t2: &str,
+                price: u64,
+                amt: &str,
+                status: OrderStatus,
+                idx: u32| {
+        let subject = TradePair {
+            token1: t1.into(),
+            token2: t2.into(),
+        };
         let amount = encrypt_amount(amt);
         let fake_cash_id = format!("sample-cash-{}", idx);
         let id = compute_order_id(std::slice::from_ref(&fake_cash_id));
-        Order { id, trade_type, subject, price: Some(price), amount, pubkey: String::new(), input_cash_ids: vec![fake_cash_id], handling_fee: vec!["0".to_string()], block_height: 0, status, match_order: None }
+        Order {
+            id,
+            trade_type,
+            subject,
+            price: Some(price),
+            amount,
+            pubkey: String::new(),
+            input_cash_ids: vec![fake_cash_id],
+            handling_fee: vec!["0".to_string()],
+            block_height: 0,
+            status,
+            match_order: None,
+        }
     };
 
     vec![
@@ -251,14 +283,22 @@ mod tests {
     #[test]
     fn print_genesis_ciphertexts() {
         let entries = [
-            ("f8c0ea0222c6acba512cc9ed613b64e3", "ETH",  "1000",   "alice"),
-            ("68ff80c3b73a39798be67087fb9f97ed", "USDT", "500000", "alice"),
-            ("4e88dd94be4154a37da7dd5b9d06a4a1", "ETH",  "1000",   "bob"),
+            ("f8c0ea0222c6acba512cc9ed613b64e3", "ETH", "1000", "alice"),
+            (
+                "68ff80c3b73a39798be67087fb9f97ed",
+                "USDT",
+                "500000",
+                "alice",
+            ),
+            ("4e88dd94be4154a37da7dd5b9d06a4a1", "ETH", "1000", "bob"),
             ("ddada5eb9484fa322a931d53bb945431", "USDT", "500000", "bob"),
         ];
         for (cash_id, token, amount, who) in entries {
             let (cipher, random) = genesis_encrypt(cash_id, amount);
-            println!("{} {} cash_id={} cipher={} random={}", who, token, cash_id, cipher, random);
+            println!(
+                "{} {} cash_id={} cipher={} random={}",
+                who, token, cash_id, cipher, random
+            );
         }
     }
 }

@@ -44,7 +44,10 @@ pub struct DevSetup {
 pub fn dev_setup_snarkjs(circuit_name: &str) -> Result<DevSetup> {
     let circuit_dir = compile_circuit(circuit_name)?;
     let r1cs = circuit_dir.join(format!("{circuit_name}.r1cs"));
-    ensure!(r1cs.exists(), "r1cs file missing after circom compile: {r1cs:?}");
+    ensure!(
+        r1cs.exists(),
+        "r1cs file missing after circom compile: {r1cs:?}"
+    );
 
     let zkey = circuit_dir.join(format!("{circuit_name}.zkey"));
     let vk_json = circuit_dir.join("vk.json");
@@ -143,12 +146,15 @@ fn ensure_dev_ptau(circuit_dir: &Path) -> Result<PathBuf> {
 }
 
 fn snarkjs(args: &[&str]) -> Result<()> {
-    let output = Command::new("snarkjs").args(args).output().with_context(|| {
-        format!(
-            "spawning `snarkjs {}` failed; install with `npm i -g snarkjs`",
-            args.join(" ")
-        )
-    })?;
+    let output = Command::new("snarkjs")
+        .args(args)
+        .output()
+        .with_context(|| {
+            format!(
+                "spawning `snarkjs {}` failed; install with `npm i -g snarkjs`",
+                args.join(" ")
+            )
+        })?;
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -168,7 +174,11 @@ mod tests {
     fn deposit_dev_setup_produces_zkey_and_vk() {
         let setup = super::dev_setup_snarkjs("deposit").expect("snarkjs setup must succeed");
         assert!(setup.zkey.exists(), "zkey should exist at {:?}", setup.zkey);
-        assert!(setup.vk_json.exists(), "vk.json should exist at {:?}", setup.vk_json);
+        assert!(
+            setup.vk_json.exists(),
+            "vk.json should exist at {:?}",
+            setup.vk_json
+        );
 
         // vk.json must be valid snarkjs format with the fields go-rapidsnark expects
         let vk: serde_json::Value =
