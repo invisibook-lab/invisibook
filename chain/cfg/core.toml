@@ -2,9 +2,21 @@
 
 [orderbook]
 db_path = "data/orders.db"
+# Verification keys for the OrderBook tripod's circuits. Split is for
+# SendOrder's split branch; settle_larger / settle_smaller are the two
+# asymmetric SettleOrder circuits (larger side has change + cross-leg ratio
+# check, smaller side fully fills with no change).
+split_vk_path          = "../lib/target/circuit-build/split/vk.json"
+settle_larger_vk_path  = "../lib/target/circuit-build/settle_larger/vk.json"
+settle_smaller_vk_path = "../lib/target/circuit-build/settle_smaller/vk.json"
 
 [account]
 db_path = "data/accounts.db"
+# Deposit / Withdraw verification keys — produced by `snarkjs zkey export verificationkey`
+# (or by re-running the corresponding `dev_setup_snarkjs` test). Paths are
+# relative to wherever you launch the chain from.
+deposit_vk_path  = "../lib/target/circuit-build/deposit/vk.json"
+withdraw_vk_path = "../lib/target/circuit-build/withdraw/vk.json"
 
 # Genesis cash: explicit Cash records inserted at chain startup.
 # IDs and ciphertexts must match cfg/tests/alice_cash.json and bob_cash.json.

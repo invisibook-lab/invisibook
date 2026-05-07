@@ -13,14 +13,29 @@ type Config struct {
 }
 
 // OrderBookConfig holds configuration for the OrderBook tripod.
+//
+// `SplitVKPath` is the snarkjs `vk.json` for the split circuit (SendOrder).
+// `SettleLargerVKPath` and `SettleSmallerVKPath` are the two settle circuits
+// (the larger side of a matched pair has change + a cross-leg ratio check; the
+// smaller side has no change). All three are required at startup.
 type OrderBookConfig struct {
-	DBPath string `toml:"db_path"`
+	DBPath              string `toml:"db_path"`
+	SplitVKPath         string `toml:"split_vk_path"`
+	SettleLargerVKPath  string `toml:"settle_larger_vk_path"`
+	SettleSmallerVKPath string `toml:"settle_smaller_vk_path"`
 }
 
 // AccountConfig holds configuration for the Account tripod.
+//
+// `DepositVKPath` and `WithdrawVKPath` point at the snarkjs `vk.json` files
+// produced by `snarkjs zkey export verificationkey <circuit>.zkey vk.json`.
+// Both are required at startup — chain refuses to boot if any path is unset
+// or the file is missing/malformed.
 type AccountConfig struct {
-	DBPath      string        `toml:"db_path"`
-	GenesisCash []GenesisCash `toml:"genesis_cash"`
+	DBPath         string        `toml:"db_path"`
+	DepositVKPath  string        `toml:"deposit_vk_path"`
+	WithdrawVKPath string        `toml:"withdraw_vk_path"`
+	GenesisCash    []GenesisCash `toml:"genesis_cash"`
 }
 
 // GenesisCash defines a Cash record to be inserted at chain initialization.

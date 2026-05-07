@@ -13,15 +13,38 @@ import (
 
 // ────────────────────── Tripod ──────────────────────
 
+// Account is the tripod that owns the cash table: balances are tracked as
+// individual Cash UTXO-style records rather than aggregate balances, since
+// amounts are encrypted ciphertext and cannot be summed on-chain.
 type Account struct {
 	*tripod.Tripod
-	db  *gorm.DB
-	cfg *AccountConfig
+	db         *gorm.DB
+	cfg        *AccountConfig
+	depositVK  *CircuitVK
+	withdrawVK *CircuitVK
 }
 
+// NewAccount constructs the Account tripod and registers its writings and readings.
+// `cfg` must carry a valid SQLite DSN and readable `DepositVKPath` /
+// `WithdrawVKPath`. DB init and VK loading panic on failure — the chain will
+// not start without all wallet circuits' verifying keys in memory.
 func NewAccount(cfg *AccountConfig) *Account {
 	tri := tripod.NewTripodWithName("account")
-	a := &Account{Tripod: tri, db: InitAccountDB(cfg.DBPath), cfg: cfg}
+	depositVK, err := LoadVK("deposit", cfg.DepositVKPath)
+	if err != nil {
+		panic(fmt.Sprintf("loading deposit VK: %v", err))
+	}
+	withdrawVK, err := LoadVK("withdraw", cfg.WithdrawVKPath)
+	if err != nil {
+		panic(fmt.Sprintf("loading withdraw VK: %v", err))
+	}
+	a := &Account{
+		Tripod:     tri,
+		db:         InitAccountDB(cfg.DBPath),
+		cfg:        cfg,
+		depositVK:  depositVK,
+		withdrawVK: withdrawVK,
+	}
 	a.SetWritings(a.Deposit, a.Withdraw)
 	a.SetReadings(a.GetAccount)
 	return a
@@ -48,6 +71,7 @@ func (a *Account) InitChain(block *types.Block) {
 
 // ────────────────────── Reading: GetAccount ──────────────────────
 
+// GetAccountRequest queries every non-Spent Cash for `Pubkey` under `Token`.
 type GetAccountRequest struct {
 	Pubkey string  `json:"pubkey" validate:"required"`
 	Token  TokenID `json:"token"  validate:"required"`
@@ -81,14 +105,24 @@ func (a *Account) GetAccount(ctx *context.ReadContext) {
 
 // ────────────────────── Writing: Deposit ──────────────────────
 
+// DepositRequest carries a Groth16 deposit proof binding the new Cash's hidden
+// amount to a `BridgeCommitment` that the (future) bridge inclusion proof will
+// attest. `OutputCommitment` is the Poseidon commitment of the new Cash's
+// amount and becomes its on-chain `Cash.Amount` field.
 type DepositRequest struct {
-	Pubkey  string     `json:"pubkey"   validate:"required"` // depositor's ed25519 pubkey (64-char hex)
-	Token   TokenID    `json:"token"    validate:"required"`
-	Amount  CipherText `json:"amount"   validate:"required"` // encrypted amount
-	ZkProof string     `json:"zk_proof" validate:"required"` // bridge deposit proof
+	Pubkey           string  `json:"pubkey"            validate:"required"` // depositor's ed25519 pubkey (64-char hex)
+	Token            TokenID `json:"token"             validate:"required"`
+	BridgeCommitment string  `json:"bridge_commitment" validate:"required,len=64"` // Poseidon(deposit_amount, r_bridge) hex
+	OutputCommitment string  `json:"output_commitment" validate:"required,len=64"` // Poseidon(output_amount, r_output) hex
+	ZkProof          string  `json:"zk_proof"          validate:"required"`        // snarkjs proof.json string
 }
 
-// Deposit verifies the bridge proof then mints a new Active Cash for the depositor.
+// Deposit verifies the deposit zk proof then mints a new Active Cash whose
+// `Amount` is the proof's output commitment.
+//
+// The bridge inclusion proof attesting `BridgeCommitment` is **not** verified
+// in this revision — until that lands, any client can fabricate a
+// `BridgeCommitment` and mint arbitrary value. Suitable for testnet/demo only.
 func (a *Account) Deposit(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
 
@@ -100,14 +134,32 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 		return err
 	}
 
-	// TODO: verify zk_proof that the user deposited the corresponding assets
-	// into the Invisibook bridge contract on another chain.
+	// TODO: verify a bridge inclusion proof attesting that `BridgeCommitment`
+	// was logged by the Invisibook bridge contract on the source chain.
+
+	// Rebuild the public-input vector in the order deposit.circom declares them:
+	//   public[0] = bridge_commitment
+	//   public[1] = output_hashes[0]   (real cash)
+	//   public[2] = output_hashes[1]   (zero-padded slot, Poseidon(0, 0))
+	bridgeDecimal, err := HexToDecimal(req.BridgeCommitment)
+	if err != nil {
+		return fmt.Errorf("invalid bridge_commitment: %w", err)
+	}
+	outputDecimal, err := HexToDecimal(req.OutputCommitment)
+	if err != nil {
+		return fmt.Errorf("invalid output_commitment: %w", err)
+	}
+	publicSignals := []string{bridgeDecimal, outputDecimal, PoseidonZeroCommitment}
+
+	if err := VerifyGroth16(a.depositVK, req.ZkProof, publicSignals); err != nil {
+		return fmt.Errorf("deposit proof verification failed: %w", err)
+	}
 
 	cash := &Cash{
-		ID:      computeCashID(req.Pubkey, req.Token, req.Amount),
+		ID:      computeCashID(req.Pubkey, req.Token, CipherText(req.OutputCommitment)),
 		Pubkey:  req.Pubkey,
 		Token:   req.Token,
-		Amount:  req.Amount,
+		Amount:  CipherText(req.OutputCommitment),
 		ZkProof: req.ZkProof,
 		Status:  Active,
 	}
@@ -122,17 +174,32 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 
 // ────────────────────── Writing: Withdraw ──────────────────────
 
+// WithdrawRequest carries a Groth16 withdraw proof binding the (hidden)
+// `withdraw_amount` to a `BridgeOutCommitment` that the (future) destination-
+// chain bridge release proof will attest. Inputs are existing Cash IDs the
+// chain looks up to extract their commitments; `OutputCommitments[0]` is the
+// new change Cash (set to `PoseidonZeroCommitmentHex` when no change is
+// produced) and `OutputCommitments[1]` is always the zero pad.
 type WithdrawRequest struct {
-	Pubkey  string        `json:"pubkey"   validate:"required"`      // withdrawer's ed25519 pubkey (64-char hex)
-	Token   TokenID       `json:"token"    validate:"required"`
-	Inputs  []string      `json:"inputs"   validate:"required,min=1"` // Cash IDs to consume
-	Change  *ChangeOutput `json:"change,omitempty"`                   // optional change Cash
-	ZkProof string        `json:"zk_proof" validate:"required"`       // proves the withdrawal is valid
+	Pubkey              string   `json:"pubkey"                validate:"required"`
+	Token               TokenID  `json:"token"                 validate:"required"`
+	Inputs              []string `json:"inputs"                validate:"required,min=1,max=2"`
+	BridgeOutCommitment string   `json:"bridge_out_commitment" validate:"required,len=64"`
+	OutputCommitments   []string `json:"output_commitments"    validate:"required,len=2,dive,len=64"`
+	// ChangePubkey is the recipient of the change Cash. Defaults to `Pubkey`
+	// when empty so withdrawing-and-keeping-change-yourself is the common path.
+	ChangePubkey string `json:"change_pubkey,omitempty"`
+	ZkProof      string `json:"zk_proof"              validate:"required"`
 }
 
-// Withdraw verifies the overall spend proof, then marks each input Cash as Spent.
-// If the client supplies a change output it is minted as a new Active Cash.
-// Withdraw consumes Active Cash directly (Active → Spent), skipping the Locked state.
+// Withdraw verifies the withdraw zk proof, marks each input Cash as Spent,
+// and (if the change slot is non-zero) mints a new Active change Cash.
+//
+// The destination-chain bridge release proof attesting `BridgeOutCommitment`
+// is **not** verified in this revision — until that lands, any client can
+// fabricate a `BridgeOutCommitment`. The conservation constraint still holds
+// (you can't withdraw more value than you spend), but the destination-chain
+// release amount is currently unbound. Suitable for testnet/demo only.
 func (a *Account) Withdraw(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
 
@@ -144,23 +211,84 @@ func (a *Account) Withdraw(ctx *context.WriteContext) error {
 		return err
 	}
 
-	// TODO: verify req.ZkProof — proves that sum(inputs) >= withdrawn amount
-	// and that the change output commitment is correct.
+	// Look up each input cash and pull its on-chain commitment (= Cash.Amount).
+	// Reject early on missing/wrong-owner/wrong-token/non-Active inputs so a bad
+	// request fails before we even invoke the verifier.
+	inputCommitmentsHex := make([]string, len(req.Inputs))
+	for i, id := range req.Inputs {
+		cash, err := a.GetCash(id)
+		if err != nil {
+			return fmt.Errorf("input cash %s not found: %w", id, err)
+		}
+		if cash.Pubkey != req.Pubkey {
+			return fmt.Errorf("input cash %s pubkey mismatch", id)
+		}
+		if cash.Token != req.Token {
+			return fmt.Errorf("input cash %s token mismatch", id)
+		}
+		if cash.Status != Active {
+			return fmt.Errorf("input cash %s is not Active (current: %s)", id, cash.Status.String())
+		}
+		inputCommitmentsHex[i] = string(cash.Amount)
+	}
 
+	// TODO: verify a destination-chain bridge release proof attesting that
+	// `BridgeOutCommitment` matches what the bridge contract will release.
+
+	// Rebuild the public-input vector in the order withdraw.circom declares them:
+	//   public[0]            = bridge_out_commitment
+	//   public[1..1+N]       = input_hashes (zero-padded to N=2)
+	//   public[1+N..1+N+M]   = output_hashes (M=2: change + zero pad)
+	bridgeDecimal, err := HexToDecimal(req.BridgeOutCommitment)
+	if err != nil {
+		return fmt.Errorf("invalid bridge_out_commitment: %w", err)
+	}
+	publicSignals := make([]string, 0, 1+2+2)
+	publicSignals = append(publicSignals, bridgeDecimal)
+
+	const withdrawN = 2
+	for i := 0; i < withdrawN; i++ {
+		var hex string
+		if i < len(inputCommitmentsHex) {
+			hex = inputCommitmentsHex[i]
+		} else {
+			hex = PoseidonZeroCommitmentHex
+		}
+		dec, err := HexToDecimal(hex)
+		if err != nil {
+			return fmt.Errorf("invalid input commitment hex at slot %d: %w", i, err)
+		}
+		publicSignals = append(publicSignals, dec)
+	}
+	for i, oc := range req.OutputCommitments {
+		dec, err := HexToDecimal(oc)
+		if err != nil {
+			return fmt.Errorf("invalid output_commitments[%d]: %w", i, err)
+		}
+		publicSignals = append(publicSignals, dec)
+	}
+
+	if err := VerifyGroth16(a.withdrawVK, req.ZkProof, publicSignals); err != nil {
+		return fmt.Errorf("withdraw proof verification failed: %w", err)
+	}
+
+	// All checks passed — mutate state.
 	spendBy := fmt.Sprintf("withdraw:%s", req.Pubkey[:8])
 	if err := a.SpendCash(req.Inputs, spendBy); err != nil {
 		return fmt.Errorf("failed to spend cash: %w", err)
 	}
 
-	if req.Change != nil {
-		if err := Validator.Struct(req.Change); err != nil {
-			return fmt.Errorf("invalid change output: %w", err)
+	// Mint change Cash unless slot[0] is the zero-pad constant.
+	if req.OutputCommitments[0] != PoseidonZeroCommitmentHex {
+		changePubkey := req.ChangePubkey
+		if changePubkey == "" {
+			changePubkey = req.Pubkey
 		}
 		changeCash := &Cash{
-			ID:      computeCashID(req.Change.Pubkey, req.Token, req.Change.Amount),
-			Pubkey:  req.Change.Pubkey,
+			ID:      computeCashID(changePubkey, req.Token, CipherText(req.OutputCommitments[0])),
+			Pubkey:  changePubkey,
 			Token:   req.Token,
-			Amount:  req.Change.Amount,
+			Amount:  CipherText(req.OutputCommitments[0]),
 			ZkProof: req.ZkProof,
 			Status:  Active,
 		}

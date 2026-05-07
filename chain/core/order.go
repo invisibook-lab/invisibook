@@ -11,6 +11,9 @@ import (
 // Validator is the shared validator instance for struct tag validation.
 var Validator = validator.New()
 
+// Order is the on-chain domain model of a buy or sell intent.
+// `Amount` is encrypted ciphertext; `InputCashIDs` references the locked Cash
+// that will fund settlement once the order is matched.
 type Order struct {
 	ID           OrderID    `json:"id"      validate:"required"`
 	Type         TradeType  `json:"type"    validate:"oneof=0 1"`
@@ -41,11 +44,12 @@ func ComputeOrderID(inputCashIDs []string) OrderID {
 	return OrderID(hex.EncodeToString(h.Sum(nil)))
 }
 
+// Domain identifier and enum types used across the order/cash modules.
 type (
-	OrderID    string
-	TradeType  int
-	CipherText string
-	OrderStat  int
+	OrderID    string // hex-encoded SHA-256 of the order's input cash IDs
+	TradeType  int    // Buy or Sell
+	CipherText string // opaque encrypted amount, never decrypted on-chain
+	OrderStat  int    // Pending, Matched, Done, Cancelled, Frozen
 )
 
 const (
@@ -61,15 +65,19 @@ const (
 	Frozen
 )
 
+// TradePair names the two tokens involved in an order. By convention Token1
+// is the asset being bought/sold and Token2 is the quote/payment asset.
 type TradePair struct {
 	Token1 TokenID `json:"token1" validate:"required"`
 	Token2 TokenID `json:"token2" validate:"required"`
 }
 
+// String renders the pair as "Token1/Token2".
 func (tp TradePair) String() string {
 	return string(tp.Token1) + "/" + string(tp.Token2)
 }
 
+// String returns "BUY", "SELL", or "UNKNOWN" for unexpected values.
 func (t TradeType) String() string {
 	switch t {
 	case Buy:
@@ -81,6 +89,7 @@ func (t TradeType) String() string {
 	}
 }
 
+// String returns the human-readable name of an OrderStat value.
 func (s OrderStat) String() string {
 	switch s {
 	case Pending:

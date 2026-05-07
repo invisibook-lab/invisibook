@@ -39,7 +39,10 @@ func InitAccountDB(dsn string) *gorm.DB {
 
 // ────────────────────── CRUD Operations ──────────────────────
 
-// CreateCash inserts a new Active Cash into the database.
+// CreateCash inserts a new Cash into the database, honouring the caller's
+// Status + By fields. SendOrder's split branch relies on this to mint a
+// Locked cash for the order's collateral; hardcoding Active here would
+// silently un-lock split outputs and break settlement.
 func (a *Account) CreateCash(cash *Cash) error {
 	return a.db.Create(&CashScheme{
 		CashID:  cash.ID,
@@ -47,8 +50,8 @@ func (a *Account) CreateCash(cash *Cash) error {
 		Token:   string(cash.Token),
 		Amount:  string(cash.Amount),
 		ZkProof: cash.ZkProof,
-		Status:  int(Active),
-		By:      "",
+		Status:  int(cash.Status),
+		By:      cash.By,
 	}).Error
 }
 

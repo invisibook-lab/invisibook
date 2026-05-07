@@ -2,8 +2,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 
-use crate::cash_store::CashRecord;
-use crate::types::*;
+use crate::{cash_store::CashRecord, types::*};
 
 // ────────────────────── ID Generator ──────────────────────
 
@@ -19,42 +18,45 @@ pub fn compute_order_id(input_cash_ids: &[String]) -> OrderID {
     for id in input_cash_ids {
         hasher.update(id.as_bytes());
     }
-    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 // ────────────────────── Cipher ──────────────────────
 
-/// Core implementation: returns ciphertext = poseidon(amount, random).
+/// Core implementation: returns ciphertext = `Poseidon(2)([amount, random])`.
 /// `random_bytes` is provided by the caller so genesis cash can use a fixed value.
+///
+/// On non-Android targets this delegates to `zk::wallet::poseidon_commit` so
+/// wallet-side commitments are byte-identical to what the circuits constrain.
+/// Android falls back to SHA-256, which is **incompatible** with the circuits —
+/// any cash created via that path cannot be deposited / withdrawn / settled.
 fn encrypt_with_random(plaintext: &str, random_bytes: [u8; 32]) -> (CipherText, u64) {
     let amount: u64 = plaintext.parse().unwrap_or(0);
 
     #[cfg(not(target_os = "android"))]
     {
-        use ark_bn254::Fr;
-        use ark_ff::{BigInteger, PrimeField};
-        use light_poseidon::{Poseidon, PoseidonHasher};
-
-        let result = (|| -> Option<String> {
-            let amount_fr = Fr::from(amount);
-            let random_fr = Fr::from_be_bytes_mod_order(&random_bytes);
-            let mut hasher = Poseidon::<Fr>::new_circom(2).ok()?;
-            let hash = hasher.hash(&[amount_fr, random_fr]).ok()?;
-            let bytes = hash.into_bigint().to_bytes_be();
-            Some(bytes.iter().map(|b| format!("{:02x}", b)).collect())
-        })();
-
-        if let Some(hex) = result {
-            return (hex, amount);
-        }
+        let commitment = zk::wallet::poseidon_commit(amount, &random_bytes);
+        return (zk::wallet::fr_to_hex(&commitment), amount);
     }
 
-    // Android fallback: SHA-256(amount || random)
-    let mut hasher = Sha256::new();
-    hasher.update(plaintext.as_bytes());
-    hasher.update(random_bytes);
-    let cipher = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
-    (cipher, amount)
+    // Android fallback: SHA-256(amount || random). TODO: light-poseidon should
+    // build for Android too — wire it up so deposits work on mobile.
+    #[cfg(target_os = "android")]
+    {
+        let mut hasher = Sha256::new();
+        hasher.update(plaintext.as_bytes());
+        hasher.update(random_bytes);
+        let cipher = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        (cipher, amount)
+    }
 }
 
 /// Core implementation: returns (ciphertext, amount_u64, random_bytes).
@@ -118,7 +120,11 @@ pub fn select_cash(records: &[CashRecord], token: &str, total: u64) -> CashSelec
     }
 
     // 2) Combine smaller cash (amount < total), sorted desc, greedy
-    let mut smaller: Vec<&CashRecord> = active.iter().copied().filter(|r| r.amount < total).collect();
+    let mut smaller: Vec<&CashRecord> = active
+        .iter()
+        .copied()
+        .filter(|r| r.amount < total)
+        .collect();
     smaller.sort_by(|a, b| b.amount.cmp(&a.amount)); // descending
     let mut sum = 0u64;
     let mut picked: Vec<String> = Vec::new();
@@ -157,7 +163,11 @@ pub fn compute_cash_id(pubkey: &str, token: &str, amount: &str) -> String {
     hasher.update(pubkey.as_bytes());
     hasher.update(token.as_bytes());
     hasher.update(amount.as_bytes());
-    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 // ────────────────────── Order Helpers ──────────────────────
@@ -188,20 +198,81 @@ pub fn genesis_encrypt(cash_id: &str, amount_plaintext: &str) -> (CipherText, St
 // ────────────────────── Sample Data ──────────────────────
 
 pub fn sample_orders() -> Vec<Order> {
-    let make = |trade_type: TradeType, t1: &str, t2: &str, price: u64, amt: &str, status: OrderStatus, idx: u32| {
-        let subject = TradePair { token1: t1.into(), token2: t2.into() };
+    let make = |trade_type: TradeType,
+                t1: &str,
+                t2: &str,
+                price: u64,
+                amt: &str,
+                status: OrderStatus,
+                idx: u32| {
+        let subject = TradePair {
+            token1: t1.into(),
+            token2: t2.into(),
+        };
         let amount = encrypt_amount(amt);
         let fake_cash_id = format!("sample-cash-{}", idx);
         let id = compute_order_id(std::slice::from_ref(&fake_cash_id));
-        Order { id, trade_type, subject, price: Some(price), amount, pubkey: String::new(), input_cash_ids: vec![fake_cash_id], handling_fee: vec!["0".to_string()], block_height: 0, status, match_order: None }
+        Order {
+            id,
+            trade_type,
+            subject,
+            price: Some(price),
+            amount,
+            pubkey: String::new(),
+            input_cash_ids: vec![fake_cash_id],
+            handling_fee: vec!["0".to_string()],
+            block_height: 0,
+            status,
+            match_order: None,
+        }
     };
 
     vec![
-        make(TradeType::Buy,  "ETH", "USDT",  3500,  "10", OrderStatus::Pending, 1),
-        make(TradeType::Sell, "ETH", "USDT",  3600,   "5", OrderStatus::Pending, 2),
-        make(TradeType::Buy,  "BTC", "USDT", 65000,   "2", OrderStatus::Pending, 3),
-        make(TradeType::Sell, "BTC", "USDT", 64500,   "1", OrderStatus::Matched, 4),
-        make(TradeType::Buy,  "SOL", "USDT",   180,  "50", OrderStatus::Pending, 5),
+        make(
+            TradeType::Buy,
+            "ETH",
+            "USDT",
+            3500,
+            "10",
+            OrderStatus::Pending,
+            1,
+        ),
+        make(
+            TradeType::Sell,
+            "ETH",
+            "USDT",
+            3600,
+            "5",
+            OrderStatus::Pending,
+            2,
+        ),
+        make(
+            TradeType::Buy,
+            "BTC",
+            "USDT",
+            65000,
+            "2",
+            OrderStatus::Pending,
+            3,
+        ),
+        make(
+            TradeType::Sell,
+            "BTC",
+            "USDT",
+            64500,
+            "1",
+            OrderStatus::Matched,
+            4,
+        ),
+        make(
+            TradeType::Buy,
+            "SOL",
+            "USDT",
+            180,
+            "50",
+            OrderStatus::Pending,
+            5,
+        ),
     ]
 }
 
@@ -212,14 +283,22 @@ mod tests {
     #[test]
     fn print_genesis_ciphertexts() {
         let entries = [
-            ("f8c0ea0222c6acba512cc9ed613b64e3", "ETH",  "1000",   "alice"),
-            ("68ff80c3b73a39798be67087fb9f97ed", "USDT", "500000", "alice"),
-            ("4e88dd94be4154a37da7dd5b9d06a4a1", "ETH",  "1000",   "bob"),
+            ("f8c0ea0222c6acba512cc9ed613b64e3", "ETH", "1000", "alice"),
+            (
+                "68ff80c3b73a39798be67087fb9f97ed",
+                "USDT",
+                "500000",
+                "alice",
+            ),
+            ("4e88dd94be4154a37da7dd5b9d06a4a1", "ETH", "1000", "bob"),
             ("ddada5eb9484fa322a931d53bb945431", "USDT", "500000", "bob"),
         ];
         for (cash_id, token, amount, who) in entries {
             let (cipher, random) = genesis_encrypt(cash_id, amount);
-            println!("{} {} cash_id={} cipher={} random={}", who, token, cash_id, cipher, random);
+            println!(
+                "{} {} cash_id={} cipher={} random={}",
+                who, token, cash_id, cipher, random
+            );
         }
     }
 }

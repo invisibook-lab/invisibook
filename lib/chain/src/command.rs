@@ -1,5 +1,4 @@
-use crate::orderbook;
-use crate::types::*;
+use crate::{orderbook, types::*};
 
 // ────────────────────── Suggestion Pools ──────────────────────
 
@@ -11,6 +10,10 @@ const TOKEN_SUGGESTIONS: &[&str] = &["ETH", "BTC", "SOL", "USDT", "USDC", "DAI"]
 pub struct CommandResult {
     pub order: Option<Order>,
     pub plain_amount: Option<String>,
+    /// 32-byte hex blinding factor for the locked-amount commitment in `order.amount`.
+    /// `Some` when an order was successfully constructed (so the caller can later
+    /// open the locked Cash for split / settle proofs); `None` on parse errors.
+    pub locked_random: Option<String>,
     pub message: String,
     pub is_error: bool,
 }
@@ -24,6 +27,7 @@ pub fn parse_command(input: &str) -> CommandResult {
         return CommandResult {
             order: None,
             plain_amount: None,
+            locked_random: None,
             message: "✗ Invalid format! Usage: buy/sell {token_1} {price} {amount} {token_2}"
                 .into(),
             is_error: true,
@@ -44,6 +48,7 @@ pub fn parse_command(input: &str) -> CommandResult {
             return CommandResult {
                 order: None,
                 plain_amount: None,
+                locked_random: None,
                 message: "✗ Unknown action! Please use buy or sell".into(),
                 is_error: true,
             };
@@ -57,6 +62,7 @@ pub fn parse_command(input: &str) -> CommandResult {
             return CommandResult {
                 order: None,
                 plain_amount: None,
+                locked_random: None,
                 message: "✗ price must be a positive integer!".into(),
                 is_error: true,
             };
@@ -70,6 +76,7 @@ pub fn parse_command(input: &str) -> CommandResult {
             return CommandResult {
                 order: None,
                 plain_amount: None,
+                locked_random: None,
                 message: "✗ amount must be a positive integer!".into(),
                 is_error: true,
             };
@@ -80,7 +87,10 @@ pub fn parse_command(input: &str) -> CommandResult {
         token1: token1.clone(),
         token2: token2.clone(),
     };
-    let amount = orderbook::encrypt_amount(amount_str);
+    // Persist the random alongside the commitment so the wallet can later open
+    // this Cash for split / settle proofs. Throwing the random away (the
+    // previous `encrypt_amount` call did) made the locked Cash unspendable.
+    let (amount, _, locked_random) = orderbook::encrypt_amount_with_info(amount_str);
 
     // NOTE: order ID and input_cash_ids will be set when the order is
     // actually submitted with real cash. For local preview we use a placeholder.
@@ -106,6 +116,7 @@ pub fn parse_command(input: &str) -> CommandResult {
     CommandResult {
         order: Some(order),
         plain_amount: Some(amount_str.to_string()),
+        locked_random: Some(locked_random),
         message: format!(
             "✓ Order created: {} {}/{} price {} amount {}",
             type_name, token1, token2, price_str, amount_str

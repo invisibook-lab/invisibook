@@ -7,6 +7,7 @@ import (
 
 // ────────────────────── Cash Status ──────────────────────
 
+// CashStatus is the lifecycle state of a Cash UTXO.
 type CashStatus int
 
 const (
@@ -15,6 +16,7 @@ const (
 	Spent                    // 2 — consumed
 )
 
+// String returns the human-readable name of a CashStatus value.
 func (s CashStatus) String() string {
 	switch s {
 	case Active:
@@ -28,7 +30,6 @@ func (s CashStatus) String() string {
 	}
 }
 
-
 // ────────────────────── Domain Models ──────────────────────
 
 // Cash is the domain model for a single transaction output.
@@ -37,7 +38,7 @@ func (s CashStatus) String() string {
 // verify successfully before this Cash can be consumed.
 type Cash struct {
 	ID      string     `json:"id"`
-	Pubkey  string     `json:"pubkey"`   // owner's raw ed25519 public key (64-char hex)
+	Pubkey  string     `json:"pubkey"` // owner's raw ed25519 public key (64-char hex)
 	Token   TokenID    `json:"token"`
 	Amount  CipherText `json:"amount"`   // encrypted amount
 	ZkProof string     `json:"zk_proof"` // proof committed at creation
@@ -45,6 +46,7 @@ type Cash struct {
 	By      string     `json:"by,omitempty"` // Locked: order ID; Spent: tx/cash ID
 }
 
+// IsNative reports whether this Cash is denominated in the chain's native token.
 func (c *Cash) IsNative() bool {
 	return c.Token.IsNative()
 }
