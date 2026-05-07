@@ -7,8 +7,12 @@ A privacy-preserving order book built on pure cryptography — no TEE, no centra
 ## Prerequisites
 
 - **Go 1.21+** – [install](https://go.dev/dl/)
-- **Rust 1.74+** – [install](https://www.rust-lang.org/tools/install)
+- **Rust nightly** – [install](https://www.rust-lang.org/tools/install), then `rustup install nightly`
 - **GCC / C compiler** – required by CGo (SQLite driver)
+- **Node.js 18+** – [install](https://nodejs.org/) (required for circom witness generation)
+- **circom 2.2+** – `cargo install --git https://github.com/iden3/circom.git`
+- **snarkjs** – `npm install -g snarkjs`
+- **rapidsnark** (optional, for fast proving) – build from [iden3/rapidsnark](https://github.com/iden3/rapidsnark)
 
 ## Build & Run
 
