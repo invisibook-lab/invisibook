@@ -76,6 +76,7 @@ jobs:
 
       - name: Install rapidsnark
         run: |
+          sudo apt-get install -y nasm libsodium-dev
           git clone https://github.com/iden3/rapidsnark.git /tmp/rapidsnark
           cd /tmp/rapidsnark
           git submodule update --init --recursive
