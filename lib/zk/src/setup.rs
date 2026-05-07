@@ -95,8 +95,8 @@ pub fn dev_setup_snarkjs(circuit_name: &str) -> Result<DevSetup> {
     })
 }
 
-/// Generate a Powers of Tau file with 2^15 = 32k constraint capacity (covers
-/// every wallet circuit several times over) and cache it under
+/// Generate a Powers of Tau file with 2^13 = 8192 constraint capacity (the
+/// largest wallet circuit is ~4200 constraints) and cache it under
 /// `lib/target/circuit-build/_ptau/`. Reused across all dev setups.
 fn ensure_dev_ptau(circuit_dir: &Path) -> Result<PathBuf> {
     let ptau_dir = circuit_dir
@@ -104,24 +104,24 @@ fn ensure_dev_ptau(circuit_dir: &Path) -> Result<PathBuf> {
         .context("circuit dir has no parent")?
         .join("_ptau");
     create_dir_all(&ptau_dir)?;
-    let final_ptau = ptau_dir.join("pot15_final.ptau");
+    let final_ptau = ptau_dir.join("pot13_final.ptau");
     if final_ptau.exists() {
         return Ok(final_ptau);
     }
 
-    // 1) new — empty ceremony at curve bn128, log2(constraints)=15
-    let p0 = ptau_dir.join("pot15_0000.ptau");
+    // 1) new — empty ceremony at curve bn128, log2(constraints)=13
+    let p0 = ptau_dir.join("pot13_0000.ptau");
     snarkjs(&[
         "powersoftau",
         "new",
         "bn128",
-        "15",
+        "13",
         p0.to_str().unwrap(),
         "-v",
     ])?;
 
     // 2) contribute — single (insecure) entropy injection
-    let p1 = ptau_dir.join("pot15_0001.ptau");
+    let p1 = ptau_dir.join("pot13_0001.ptau");
     snarkjs(&[
         "powersoftau",
         "contribute",
