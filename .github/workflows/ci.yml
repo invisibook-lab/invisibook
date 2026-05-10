@@ -90,13 +90,26 @@ jobs:
           make host -j$(nproc)
           sudo cp /tmp/rapidsnark/package/bin/prover /usr/local/bin/rapidsnark
 
+      - name: Detect changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            zk:
+              - 'lib/zk/**'
+
       - name: Build lib
         working-directory: lib
         run: cargo build
 
-      - name: Test lib
+      - name: Test lib (exclude zk)
         working-directory: lib
-        run: cargo test
+        run: cargo test --workspace --exclude zk
+
+      - name: Test lib/zk
+        if: steps.filter.outputs.zk == 'true'
+        working-directory: lib
+        run: cargo test -p zk
 
   # ────────────────────── Rust: cli ──────────────────────
   cli:
