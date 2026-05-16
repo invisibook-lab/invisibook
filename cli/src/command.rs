@@ -1,12 +1,10 @@
 use crate::model::App;
-use invisibook_lib::cash_store::CashRecord;
-use invisibook_lib::command as lib_cmd;
-use invisibook_lib::orderbook;
-use invisibook_lib::types::*;
-use zk::setup::dev_setup_snarkjs;
-use zk::test_circuit::TestCircuitHandle;
-use zk::wallet::{SplitWitness, prove_split};
-
+use invisibook_lib::{cash_store::CashRecord, command as lib_cmd, orderbook, types::*};
+use zk::{
+    setup::dev_setup_snarkjs,
+    test_circuit::TestCircuitHandle,
+    wallet::{SplitWitness, prove_split},
+};
 
 // ────────────────────── Command Handling ──────────────────────
 // Thin adapter: calls lib::parse_command and applies the result to App state.
@@ -30,7 +28,9 @@ pub fn handle_command(app: &mut App, input: &str) {
         };
 
         let price = order.price.unwrap_or(0);
-        let amount: u64 = result.plain_amount.as_ref()
+        let amount: u64 = result
+            .plain_amount
+            .as_ref()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         let total: u64 = if order.trade_type == TradeType::Buy {
@@ -43,18 +43,28 @@ pub fn handle_command(app: &mut App, input: &str) {
         let selection = orderbook::select_cash(app.cash_store.records(), &input_token, total);
         let (input_cash_ids, cash_change) = match selection {
             orderbook::CashSelection::Exact(ids) => (ids, None),
-            orderbook::CashSelection::WithChange { cash_ids, change_amount } => {
+            orderbook::CashSelection::WithChange {
+                cash_ids,
+                change_amount,
+            } => {
                 let (change_cipher, _, change_random) =
                     orderbook::encrypt_amount_with_info(&change_amount.to_string());
-                let change_cash_id = orderbook::compute_cash_id(&app.my_address, &input_token, &change_cipher);
+                let change_cash_id =
+                    orderbook::compute_cash_id(&app.my_address, &input_token, &change_cipher);
                 let change = CashChange {
                     cash_id: change_cash_id.clone(),
                     amount: change_cipher,
                 };
-                (cash_ids, Some((change, change_cash_id, change_amount, change_random)))
+                (
+                    cash_ids,
+                    Some((change, change_cash_id, change_amount, change_random)),
+                )
             }
             orderbook::CashSelection::Insufficient => {
-                app.message = Some(format!("✗ Insufficient {} balance (need {})", input_token, total));
+                app.message = Some(format!(
+                    "✗ Insufficient {} balance (need {})",
+                    input_token, total
+                ));
                 app.is_error = true;
                 return;
             }
@@ -198,7 +208,10 @@ fn build_split_proof(
             .ok_or_else(|| format!("input cash {id} missing from local CashStore"))?;
         let raw = hex::decode(&rec.random).map_err(|e| format!("bad random hex: {e}"))?;
         if raw.len() != 32 {
-            return Err(format!("cash {id} random must be 32 bytes, got {}", raw.len()));
+            return Err(format!(
+                "cash {id} random must be 32 bytes, got {}",
+                raw.len()
+            ));
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&raw);

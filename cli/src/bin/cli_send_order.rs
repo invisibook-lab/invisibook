@@ -13,18 +13,23 @@
 
 use std::process::ExitCode;
 
-use invisibook_lib::cash_store::{CashRecord, CashStore};
-use invisibook_lib::chain::ChainClient;
-use invisibook_lib::config::ClientConfig;
-use invisibook_lib::orderbook::{
-    self, CashSelection, compute_cash_id, compute_order_id, encrypt_amount_with_info, select_cash,
+use invisibook_lib::{
+    cash_store::{CashRecord, CashStore},
+    chain::ChainClient,
+    config::ClientConfig,
+    orderbook::{
+        self, CashSelection, compute_cash_id, compute_order_id, encrypt_amount_with_info,
+        select_cash,
+    },
+    types::{
+        CASH_ACTIVE, CASH_LOCKED, CASH_SPENT, CashChange, Order, OrderStatus, TradePair, TradeType,
+    },
 };
-use invisibook_lib::types::{
-    CASH_ACTIVE, CASH_LOCKED, CASH_SPENT, CashChange, Order, OrderStatus, TradePair, TradeType,
+use zk::{
+    setup::dev_setup_snarkjs,
+    test_circuit::TestCircuitHandle,
+    wallet::{SplitWitness, prove_split},
 };
-use zk::setup::dev_setup_snarkjs;
-use zk::test_circuit::TestCircuitHandle;
-use zk::wallet::{SplitWitness, prove_split};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -75,7 +80,9 @@ fn main() -> ExitCode {
             }
             other => {
                 eprintln!("unknown arg: {other}");
-                eprintln!("usage: cli-send-order --type buy|sell --token1 T1 --token2 T2 --price <u64> --amount <u64> [--mnemonic <words>] [--config <path>]");
+                eprintln!(
+                    "usage: cli-send-order --type buy|sell --token1 T1 --token2 T2 --price <u64> --amount <u64> [--mnemonic <words>] [--config <path>]"
+                );
                 return ExitCode::from(2);
             }
         }
@@ -112,7 +119,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let client = ChainClient::new(&cfg.chain.http_url, &cfg.chain.ws_url, seed, cfg.chain.chain_id);
+    let client = ChainClient::new(
+        &cfg.chain.http_url,
+        &cfg.chain.ws_url,
+        seed,
+        cfg.chain.chain_id,
+    );
     let pubkey = client.pubkey_hex().to_string();
 
     // Determine which token's cashes the order locks: Buy spends token2 (the
@@ -134,7 +146,10 @@ fn main() -> ExitCode {
                 .collect::<Vec<_>>(),
             None,
         ),
-        CashSelection::WithChange { cash_ids, change_amount } => {
+        CashSelection::WithChange {
+            cash_ids,
+            change_amount,
+        } => {
             let recs: Vec<CashRecord> = store
                 .records()
                 .iter()
@@ -146,7 +161,12 @@ fn main() -> ExitCode {
             let change_cash_id = compute_cash_id(&pubkey, &input_token, &change_cipher);
             (
                 recs,
-                Some((change_cash_id, change_cipher, change_amount, change_random_hex)),
+                Some((
+                    change_cash_id,
+                    change_cipher,
+                    change_amount,
+                    change_random_hex,
+                )),
             )
         }
         CashSelection::Insufficient => {
@@ -191,8 +211,12 @@ fn main() -> ExitCode {
     };
 
     // Generate split proof iff we have a change output.
-    let (change_param, split_proof) = if let Some((ref change_cash_id, ref change_cipher, change_amount, ref change_random_hex)) =
-        change_data
+    let (change_param, split_proof) = if let Some((
+        ref change_cash_id,
+        ref change_cipher,
+        change_amount,
+        ref change_random_hex,
+    )) = change_data
     {
         eprintln!("preparing split circuit (compile + snarkjs setup, cached)...");
         let setup = match dev_setup_snarkjs("split") {
@@ -215,7 +239,11 @@ fn main() -> ExitCode {
             let raw = match hex::decode(&rec.random) {
                 Ok(b) if b.len() == 32 => b,
                 Ok(b) => {
-                    eprintln!("cash {} random must be 32 bytes, got {}", rec.cash_id, b.len());
+                    eprintln!(
+                        "cash {} random must be 32 bytes, got {}",
+                        rec.cash_id,
+                        b.len()
+                    );
                     return ExitCode::FAILURE;
                 }
                 Err(e) => {
@@ -288,7 +316,8 @@ fn main() -> ExitCode {
 
     // Update the local CashStore: mark inputs spent/locked + record locked & change cashes.
     let mut store = store;
-    let spent_or_locked_ids: std::collections::HashSet<String> = input_cash_ids.iter().cloned().collect();
+    let spent_or_locked_ids: std::collections::HashSet<String> =
+        input_cash_ids.iter().cloned().collect();
     let split_mode = change_data.is_some();
     for rec in store.records_mut().iter_mut() {
         if spent_or_locked_ids.contains(&rec.cash_id) {

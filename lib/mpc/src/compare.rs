@@ -14,8 +14,7 @@
 //! Only reveals: the masked value `c` (indistinguishable from random)
 //! and the final 1-bit comparison result. Never reveals v1 - v2.
 
-use ark_bn254::g1::Config as BnConfig;
-use ark_bn254::Fr;
+use ark_bn254::{Fr, g1::Config as BnConfig};
 use ark_ec::short_weierstrass::Projective;
 use ark_ff::PrimeField;
 use ark_mpc::algebra::{AuthenticatedScalarResult, Scalar};
@@ -57,8 +56,9 @@ pub async fn compare_geq(
     let d = v1 - v2 + &offset;
 
     // Generate 105 random shared bits
-    let r_bits: Vec<AuthenticatedScalarResult<Curve>> =
-        (0..TOTAL_BITS).map(|_| fabric.random_shared_bit()).collect();
+    let r_bits: Vec<AuthenticatedScalarResult<Curve>> = (0..TOTAL_BITS)
+        .map(|_| fabric.random_shared_bit())
+        .collect();
 
     // Compose [r] = Σ r_i * 2^i
     let mut r = fabric.zero_authenticated();

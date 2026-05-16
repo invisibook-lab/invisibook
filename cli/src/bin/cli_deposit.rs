@@ -10,12 +10,13 @@
 
 use std::process::ExitCode;
 
-use invisibook_lib::cash_store::{CashRecord, CashStore};
-use invisibook_lib::chain::ChainClient;
-use invisibook_lib::config::ClientConfig;
-use invisibook_lib::types::CASH_ACTIVE;
-use zk::setup::dev_setup_snarkjs;
-use zk::test_circuit::TestCircuitHandle;
+use invisibook_lib::{
+    cash_store::{CashRecord, CashStore},
+    chain::ChainClient,
+    config::ClientConfig,
+    types::CASH_ACTIVE,
+};
+use zk::{setup::dev_setup_snarkjs, test_circuit::TestCircuitHandle};
 
 fn main() -> ExitCode {
     // Minimal flag parsing — bypasses ClientConfig's clap parser so we can
@@ -46,7 +47,9 @@ fn main() -> ExitCode {
             }
             other => {
                 eprintln!("unknown arg: {other}");
-                eprintln!("usage: cli-deposit --token <T> --amount <u64> [--mnemonic <words>] [--config <path>]");
+                eprintln!(
+                    "usage: cli-deposit --token <T> --amount <u64> [--mnemonic <words>] [--config <path>]"
+                );
                 return ExitCode::from(2);
             }
         }
@@ -71,7 +74,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let client = ChainClient::new(&cfg.chain.http_url, &cfg.chain.ws_url, seed, cfg.chain.chain_id);
+    let client = ChainClient::new(
+        &cfg.chain.http_url,
+        &cfg.chain.ws_url,
+        seed,
+        cfg.chain.chain_id,
+    );
 
     eprintln!("preparing deposit circuit (compile + snarkjs setup, cached)...");
     let setup = match dev_setup_snarkjs("deposit") {

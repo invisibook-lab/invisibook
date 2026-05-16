@@ -10,13 +10,14 @@
 
 use std::process::ExitCode;
 
-use invisibook_lib::cash_store::{CashRecord, CashStore};
-use invisibook_lib::chain::ChainClient;
-use invisibook_lib::config::ClientConfig;
-use invisibook_lib::orderbook::{CashSelection, select_cash};
-use invisibook_lib::types::{CASH_ACTIVE, CASH_SPENT};
-use zk::setup::dev_setup_snarkjs;
-use zk::test_circuit::TestCircuitHandle;
+use invisibook_lib::{
+    cash_store::{CashRecord, CashStore},
+    chain::ChainClient,
+    config::ClientConfig,
+    orderbook::{CashSelection, select_cash},
+    types::{CASH_ACTIVE, CASH_SPENT},
+};
+use zk::{setup::dev_setup_snarkjs, test_circuit::TestCircuitHandle};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -45,7 +46,9 @@ fn main() -> ExitCode {
             }
             other => {
                 eprintln!("unknown arg: {other}");
-                eprintln!("usage: cli-withdraw --token <T> --amount <u64> [--mnemonic <words>] [--config <path>]");
+                eprintln!(
+                    "usage: cli-withdraw --token <T> --amount <u64> [--mnemonic <words>] [--config <path>]"
+                );
                 return ExitCode::from(2);
             }
         }
@@ -70,7 +73,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let client = ChainClient::new(&cfg.chain.http_url, &cfg.chain.ws_url, seed, cfg.chain.chain_id);
+    let client = ChainClient::new(
+        &cfg.chain.http_url,
+        &cfg.chain.ws_url,
+        seed,
+        cfg.chain.chain_id,
+    );
 
     // Select inputs from the local store. The N=2 circuit caps the number of
     // inputs per withdraw — fall back to "Insufficient" so the user knows to

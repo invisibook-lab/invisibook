@@ -32,15 +32,33 @@ func (OrderScheme) TableName() string {
 	return "orders"
 }
 
+// ────────────────────── Settle Submission SQL Model ──────────────────────
+
+// SettleSubmissionScheme stores a single party's pending settle submission
+// until the counterparty submits theirs. Once both sides arrive, the chain
+// runs verification and settlement, then deletes both rows.
+type SettleSubmissionScheme struct {
+	OrderID      string `gorm:"primaryKey;column:order_id"`
+	MatchOrderID string `gorm:"column:match_order_id;index"`
+	LegJSON      string `gorm:"column:leg_json"`
+	MpcShareJSON string `gorm:"column:mpc_share_json"`
+}
+
+// TableName returns the SQL table name used by GORM for SettleSubmissionScheme rows.
+func (SettleSubmissionScheme) TableName() string {
+	return "settle_submissions"
+}
+
 // ────────────────────── DB Initialization ──────────────────────
 
-// InitOrderDB opens a SQLite database and auto-migrates the orders table.
+// InitOrderDB opens a SQLite database and auto-migrates the orders and
+// settle_submissions tables.
 func InitOrderDB(dsn string) *gorm.DB {
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		panic(fmt.Sprintf("failed to open orders database: %v", err))
 	}
-	if err := db.AutoMigrate(&OrderScheme{}); err != nil {
+	if err := db.AutoMigrate(&OrderScheme{}, &SettleSubmissionScheme{}); err != nil {
 		panic(fmt.Sprintf("failed to migrate orders table: %v", err))
 	}
 	return db
@@ -225,4 +243,27 @@ func schemesToOrders(rows []OrderScheme) []*Order {
 		orders = append(orders, schemeToOrder(&rows[i]))
 	}
 	return orders
+}
+
+// ────────────────────── Settle Submission CRUD ──────────────────────
+
+// SaveSubmission inserts a pending settle submission row.
+func (ot *OrderBook) SaveSubmission(sub *SettleSubmissionScheme) error {
+	return ot.db.Create(sub).Error
+}
+
+// GetSubmission retrieves a pending settle submission by order ID.
+// Returns nil if not found.
+func (ot *OrderBook) GetSubmission(orderID OrderID) (*SettleSubmissionScheme, error) {
+	var row SettleSubmissionScheme
+	err := ot.db.First(&row, "order_id = ?", string(orderID)).Error
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+// DeleteSubmission removes a pending settle submission by order ID.
+func (ot *OrderBook) DeleteSubmission(orderID OrderID) error {
+	return ot.db.Where("order_id = ?", string(orderID)).Delete(&SettleSubmissionScheme{}).Error
 }

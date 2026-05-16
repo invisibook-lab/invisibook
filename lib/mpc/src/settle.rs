@@ -7,25 +7,21 @@
 //! 2. Verify commitment consistency (C1_a == C1_b, C2_a == C2_b)
 //! 3. Compute Poseidon hashes in MPC and verify against commitments
 //! 4. Compare v1 vs v2
-//! 5. MUX to select loser's randomness without opening
+//! 5. MUX to select smaller side's randomness without opening
 //! 6. Output additive shares + MAC shares for on-chain verification
 
 use std::net::SocketAddr;
 
-use ark_bn254::g1::Config as BnConfig;
-use ark_bn254::Fr;
+use ark_bn254::{Fr, g1::Config as BnConfig};
 use ark_ec::short_weierstrass::Projective;
 use ark_ff::PrimeField; // used in fr_to_decimal
 use ark_mpc::{
-    algebra::Scalar, beaver::PartyIDBeaverSource, network::QuicTwoPartyNet, MpcFabric, PARTY0,
-    PARTY1,
+    MpcFabric, PARTY0, PARTY1, algebra::Scalar, beaver::PartyIDBeaverSource,
+    network::QuicTwoPartyNet,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::compare;
-use crate::constants::fr_from_decimal;
-use crate::error::MpcError;
-use crate::poseidon;
+use crate::{compare, constants::fr_from_decimal, error::MpcError, poseidon};
 
 type Curve = Projective<BnConfig>;
 
@@ -64,10 +60,10 @@ pub struct SettleShare {
     pub cmp_share: String,
     /// Comparison bit: my MAC share (decimal Fr).
     pub cmp_mac: String,
-    /// Loser's randomness: my additive share (decimal Fr).
-    pub r_loser_share: String,
-    /// Loser's randomness: my MAC share (decimal Fr).
-    pub r_loser_mac: String,
+    /// Smaller side's randomness: my additive share (decimal Fr).
+    pub r_smaller_share: String,
+    /// Smaller side's randomness: my MAC share (decimal Fr).
+    pub r_smaller_mac: String,
     /// Session MAC key: my share of δ (decimal Fr).
     pub mac_key_share: String,
 }
@@ -209,21 +205,21 @@ pub async fn settle(
     // Never reveals v1 - v2 or the comparison bit itself.
     let cmp_bit = compare::compare_geq(&v1, &v2).await?;
 
-    // --- Step 4: MUX for loser's randomness (no opening) ---
-    // [r_loser] = [cmp] * [r2] + (1 - [cmp]) * [r1]
-    // If cmp=1 (v1>=v2), loser is party1 → r_loser = r2
-    // If cmp=0 (v1< v2), loser is party0 → r_loser = r1
+    // --- Step 4: MUX for smaller side's randomness (no opening) ---
+    // [r_smaller] = [cmp] * [r2] + (1 - [cmp]) * [r1]
+    // If cmp=1 (v1>=v2), smaller side is party1 → r_smaller = r2
+    // If cmp=0 (v1< v2), smaller side is party0 → r_smaller = r1
     let one = fabric.one_authenticated();
     let one_minus_cmp = &one - &cmp_bit;
-    let r_loser = &(&cmp_bit * &r2) + &(&one_minus_cmp * &r1);
+    let r_smaller = &(&cmp_bit * &r2) + &(&one_minus_cmp * &r1);
 
     // --- Step 5: Extract shares (NO opening to either party) ---
     let auth_one = fabric.one_authenticated();
     let delta_i = auth_one.mac_share().await;
     let cmp_s = cmp_bit.share().await;
     let cmp_m = cmp_bit.mac_share().await;
-    let r_s = r_loser.share().await;
-    let r_m = r_loser.mac_share().await;
+    let r_s = r_smaller.share().await;
+    let r_m = r_smaller.mac_share().await;
 
     // Shutdown the fabric
     fabric.shutdown();
@@ -231,8 +227,8 @@ pub async fn settle(
     Ok(SettleShare {
         cmp_share: fr_to_decimal(&cmp_s.inner()),
         cmp_mac: fr_to_decimal(&cmp_m.inner()),
-        r_loser_share: fr_to_decimal(&r_s.inner()),
-        r_loser_mac: fr_to_decimal(&r_m.inner()),
+        r_smaller_share: fr_to_decimal(&r_s.inner()),
+        r_smaller_mac: fr_to_decimal(&r_m.inner()),
         mac_key_share: fr_to_decimal(&delta_i.inner()),
     })
 }

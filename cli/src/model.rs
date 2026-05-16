@@ -1,10 +1,11 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use invisibook_lib::cash_store::CashStore;
-use invisibook_lib::chain::{ChainClient, OrderEvent};
-use invisibook_lib::orderbook;
-use invisibook_lib::types::*;
+use invisibook_lib::{
+    cash_store::CashStore,
+    chain::{ChainClient, OrderEvent},
+    orderbook,
+    types::*,
+};
 
 use crate::command;
 

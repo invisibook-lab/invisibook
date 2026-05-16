@@ -42,10 +42,24 @@ struct TradePairJson {
     token2: TokenID,
 }
 
+/// Per-party settle submission sent to chain. Each party submits their own
+/// order ID, the counterparty's order ID, their ZK leg, and their MPC share.
 #[derive(Debug, Serialize)]
 struct SettleOrderParams {
-    order_ids: Vec<OrderID>,
-    legs: Vec<SettleTokenLegParam>,
+    order_id: OrderID,
+    match_order_id: OrderID,
+    leg: SettleTokenLegParam,
+    mpc_share: MpcShareParamJson,
+}
+
+/// Serializable form of MpcShareParam for the chain JSON API.
+#[derive(Debug, Serialize)]
+struct MpcShareParamJson {
+    cmp_share: String,
+    cmp_mac: String,
+    r_smaller_share: String,
+    r_smaller_mac: String,
+    mac_key_share: String,
 }
 
 /// Mirror of chain Go `SettleTokenLeg`. `side` is `"larger"` or `"smaller"`;
@@ -329,16 +343,28 @@ impl ChainClient {
             .await
     }
 
-    /// Requests settlement of a matched order pair. `legs` must be the two
-    /// pre-proven token legs (one larger + one smaller, or two larger when both
-    /// orders fully fill); the wallet builds these by running rapidsnark for
-    /// each side. See `cli_settle` for the demo driver that produces them.
+    /// Submits this party's settlement data to the chain. The chain collects
+    /// both parties' submissions and executes settlement when both arrive.
+    /// `order_id` is this party's order, `match_order_id` is the counterparty's.
     pub async fn settle_order(
         &self,
-        order_ids: Vec<OrderID>,
-        legs: Vec<SettleTokenLegParam>,
+        order_id: OrderID,
+        match_order_id: OrderID,
+        leg: SettleTokenLegParam,
+        mpc_share: MpcShareParam,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let params = SettleOrderParams { order_ids, legs };
+        let params = SettleOrderParams {
+            order_id,
+            match_order_id,
+            leg,
+            mpc_share: MpcShareParamJson {
+                cmp_share: mpc_share.cmp_share,
+                cmp_mac: mpc_share.cmp_mac,
+                r_smaller_share: mpc_share.r_smaller_share,
+                r_smaller_mac: mpc_share.r_smaller_mac,
+                mac_key_share: mpc_share.mac_key_share,
+            },
+        };
         self.client
             .write_chain("orderbook", "SettleOrder", &params, self.chain_id, 100, 0)
             .await

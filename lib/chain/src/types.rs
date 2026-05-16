@@ -108,6 +108,19 @@ pub struct CashChange {
     pub amount: CipherText, // encrypted change amount
 }
 
+// ────────────────────── MPC Share ──────────────────────
+
+/// One party's authenticated SPDZ share from the MPC settle protocol.
+/// Decimal-string BN254 scalar field elements.
+#[derive(Debug, Clone)]
+pub struct MpcShareParam {
+    pub cmp_share: String,
+    pub cmp_mac: String,
+    pub r_smaller_share: String,
+    pub r_smaller_mac: String,
+    pub mac_key_share: String,
+}
+
 // ────────────────────── Order ──────────────────────
 
 #[derive(Debug, Clone)]

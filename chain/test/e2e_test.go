@@ -300,23 +300,71 @@ func TestFullOrderLifecycle(t *testing.T) {
 		t.Fatalf("expected buy order status Matched(1), got %d", buyOrders[0].Status)
 	}
 
-	// ═══════════════════ Step 4: Settle the matched pair ═══════════════════
-	t.Log("=== Step 4: Settle matched orders ===")
+	// ═══════════════════ Step 4: Settle the matched pair (two-phase) ═══════════════════
+	t.Log("=== Step 4a: Alice submits her settle (first party) ===")
 
+	// Build test MPC shares that satisfy:
+	//   (mac_A + mac_B) == (delta_A + delta_B) * (share_A + share_B) mod P
+	// We use small known values for testing.
+	aliceMpcShare, bobMpcShare := buildTestMpcShares(t)
+
+	// Alice's settle submission (sell side = sends ETH)
 	err = wrCall("orderbook", "SettleOrder", map[string]any{
-		"order_ids": []string{string(sellOrderID), string(buyOrderID)},
-		"outputs": []map[string]string{
-			{"pubkey": bobPubkey, "token": "ETH", "amount": "1000"},      // bob gets ETH
-			{"pubkey": alicePubkey, "token": "USDT", "amount": "500000"}, // alice gets USDT
+		"order_id":       string(sellOrderID),
+		"match_order_id": string(buyOrderID),
+		"leg": map[string]any{
+			"side":             "smaller",
+			"token":            "ETH",
+			"match_commitment": "0000000000000000000000000000000000000000000000000000000000001234",
+			"recv_commitment":  "0000000000000000000000000000000000000000000000000000000000005678",
+			"recv_pubkey":      alicePubkey,
+			"zk_proof":         "test-proof-skip",
 		},
-		"zk_proof": "test-proof-skip",
+		"mpc_share": aliceMpcShare,
 	})
 	if err != nil {
-		t.Fatalf("SettleOrder failed: %v", err)
+		t.Fatalf("SettleOrder (alice) failed: %v", err)
 	}
 	waitBlock()
 
-	// Verify orders are Done
+	// Verify orders are still Matched after first submission
+	sellAfterFirst := queryOrders(t, sellOrderID)
+	buyAfterFirst := queryOrders(t, buyOrderID)
+	t.Logf("  sell order status after first submit: %d", sellAfterFirst[0].Status)
+	t.Logf("  buy  order status after first submit: %d", buyAfterFirst[0].Status)
+	if sellAfterFirst[0].Status != 1 { // still Matched
+		t.Fatalf("expected sell order still Matched(1) after first submit, got %d", sellAfterFirst[0].Status)
+	}
+	if buyAfterFirst[0].Status != 1 { // still Matched
+		t.Fatalf("expected buy order still Matched(1) after first submit, got %d", buyAfterFirst[0].Status)
+	}
+
+	t.Log("=== Step 4b: Bob submits his settle (second party → triggers settlement) ===")
+
+	// Bob's settle submission (buy side = sends USDT)
+	err = wrCall("orderbook", "SettleOrder", map[string]any{
+		"order_id":       string(buyOrderID),
+		"match_order_id": string(sellOrderID),
+		"leg": map[string]any{
+			"side":                   "larger",
+			"token":                  "USDT",
+			"my_match_commitment":    "0000000000000000000000000000000000000000000000000000000000001234",
+			"other_match_commitment": "0000000000000000000000000000000000000000000000000000000000001234",
+			"price":                  3500,
+			"is_token2_sender":       true,
+			"change_commitment":      "2098f5fb9e239eab3ceac3f27b81e481dc3124d55ffed523a839ee8446b64864",
+			"recv_commitment":        "0000000000000000000000000000000000000000000000000000000000009abc",
+			"recv_pubkey":            bobPubkey,
+			"zk_proof":               "test-proof-skip",
+		},
+		"mpc_share": bobMpcShare,
+	})
+	if err != nil {
+		t.Fatalf("SettleOrder (bob) failed: %v", err)
+	}
+	waitBlock()
+
+	// Verify orders are Done after second submission
 	sellFinal := queryOrders(t, sellOrderID)
 	buyFinal := queryOrders(t, buyOrderID)
 	t.Logf("  sell order final status: %d", sellFinal[0].Status)
@@ -429,4 +477,36 @@ func queryOrders(t *testing.T, id core.OrderID) []OrderItem {
 		t.Fatalf("parse QueryOrders response failed: %v\nraw: %s", err, string(data))
 	}
 	return resp.Orders
+}
+
+// buildTestMpcShares constructs two MPC share maps that satisfy the SPDZ MAC
+// equation: (mac_A + mac_B) == (delta_A + delta_B) * (share_A + share_B).
+// Uses small known values so we can verify the chain's MAC checker works.
+func buildTestMpcShares(t *testing.T) (map[string]string, map[string]string) {
+	t.Helper()
+
+	// Pick arbitrary small values in decimal (all mod BN254 scalar field).
+	// delta_A = 7, delta_B = 11 → delta = 18
+	// cmp_share_A = 3, cmp_share_B = 5 → cmp = 8
+	// cmp_mac_A + cmp_mac_B must equal delta * cmp = 18 * 8 = 144
+	// Let cmp_mac_A = 44, cmp_mac_B = 100
+	//
+	// r_smaller_share_A = 2, r_smaller_share_B = 9 → r_smaller = 11
+	// r_smaller_mac_A + r_smaller_mac_B must equal delta * r_smaller = 18 * 11 = 198
+	// Let r_smaller_mac_A = 98, r_smaller_mac_B = 100
+	alice := map[string]string{
+		"cmp_share":     "3",
+		"cmp_mac":       "44",
+		"r_smaller_share": "2",
+		"r_smaller_mac":   "98",
+		"mac_key_share": "7",
+	}
+	bob := map[string]string{
+		"cmp_share":     "5",
+		"cmp_mac":       "100",
+		"r_smaller_share": "9",
+		"r_smaller_mac":   "100",
+		"mac_key_share": "11",
+	}
+	return alice, bob
 }

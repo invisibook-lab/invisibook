@@ -1,10 +1,7 @@
-use ratatui::prelude::*;
-use ratatui::widgets::Paragraph;
+use ratatui::{prelude::*, widgets::Paragraph};
 
-use crate::command;
-use crate::model::App;
-use invisibook_lib::orderbook;
-use invisibook_lib::types::*;
+use crate::{command, model::App};
+use invisibook_lib::{orderbook, types::*};
 
 // ────────────────────── Colors (matching Go lipgloss styles) ──────────────────────
 
@@ -31,7 +28,11 @@ pub fn render_ui(f: &mut Frame, app: &App) {
         ),
         Span::raw("  "),
         Span::styled(
-            if app.my_address.is_empty() { "not connected".to_string() } else { format!("addr: {}", &app.my_address) },
+            if app.my_address.is_empty() {
+                "not connected".to_string()
+            } else {
+                format!("addr: {}", &app.my_address)
+            },
             Style::default().fg(DIM_GRAY),
         ),
     ]));
@@ -40,9 +41,10 @@ pub fn render_ui(f: &mut Frame, app: &App) {
     if !app.balances.is_empty() {
         let mut sorted_tokens: Vec<(&String, &usize)> = app.balances.iter().collect();
         sorted_tokens.sort_by_key(|(t, _)| t.as_str());
-        let mut balance_spans: Vec<Span> = vec![
-            Span::styled("  Balances  ", Style::default().fg(GOLD).bold()),
-        ];
+        let mut balance_spans: Vec<Span> = vec![Span::styled(
+            "  Balances  ",
+            Style::default().fg(GOLD).bold(),
+        )];
         for (i, (token, active)) in sorted_tokens.iter().enumerate() {
             if i > 0 {
                 balance_spans.push(Span::styled(" │ ", Style::default().fg(DIM_GRAY)));
@@ -52,7 +54,10 @@ pub fn render_ui(f: &mut Frame, app: &App) {
             } else {
                 Style::default().fg(DIM_GRAY)
             };
-            balance_spans.push(Span::styled(format!("{}: ", token), Style::default().fg(WHITE)));
+            balance_spans.push(Span::styled(
+                format!("{}: ", token),
+                Style::default().fg(WHITE),
+            ));
             balance_spans.push(Span::styled(format!("{} active", active), count_style));
         }
         lines.push(Line::from(balance_spans));
@@ -113,7 +118,10 @@ pub fn render_ui(f: &mut Frame, app: &App) {
 
             let line = Line::from(vec![
                 prefix,
-                Span::styled(format!("{:<3}  {:<10}  ", i + 1, orderbook::short_id(&order.id)), row_style),
+                Span::styled(
+                    format!("{:<3}  {:<10}  ", i + 1, orderbook::short_id(&order.id)),
+                    row_style,
+                ),
                 type_span,
                 Span::styled(
                     format!("  {:<12}  {:<14}  {}", order.subject, price_str, amount),
@@ -162,10 +170,7 @@ pub fn render_ui(f: &mut Frame, app: &App) {
         // Show placeholder
         lines.push(Line::from(vec![
             input_prefix,
-            Span::styled(
-                app.input.placeholder.clone(),
-                Style::default().fg(DIM_GRAY),
-            ),
+            Span::styled(app.input.placeholder.clone(), Style::default().fg(DIM_GRAY)),
         ]));
     } else if let Some(suggestion) = matching {
         let remaining = &suggestion[app.input.value.len()..];
@@ -223,7 +228,10 @@ fn render_detail(app: &App, order: &Order) -> Vec<Line<'static>> {
     };
 
     // Order ID
-    result.push(bordered("Order ID:", orderbook::short_id(&order.id).to_string()));
+    result.push(bordered(
+        "Order ID:",
+        orderbook::short_id(&order.id).to_string(),
+    ));
 
     // Type (with color)
     let type_label = "Type:       ";
@@ -236,10 +244,7 @@ fn render_detail(app: &App, order: &Order) -> Vec<Line<'static>> {
     result.push(Line::from(vec![
         Span::styled(format!("{}│ ", margin), Style::default().fg(PURPLE)),
         Span::raw(type_label.to_string()),
-        Span::styled(
-            type_val.to_string(),
-            Style::default().fg(type_color).bold(),
-        ),
+        Span::styled(type_val.to_string(), Style::default().fg(type_color).bold()),
         Span::raw(" ".repeat(type_padding)),
         Span::styled(" │".to_string(), Style::default().fg(PURPLE)),
     ]));

@@ -6,7 +6,7 @@
 
 use ark_bn254::Fr;
 use light_poseidon::{Poseidon, PoseidonHasher};
-use mpc::constants::{self, fr_from_decimal, FULL_ROUNDS, PARTIAL_ROUNDS, T};
+use mpc::constants::{self, FULL_ROUNDS, PARTIAL_ROUNDS, T, fr_from_decimal};
 
 /// Reference cleartext Poseidon using our constants (same algorithm as MPC version).
 fn poseidon_cleartext(a: Fr, b: Fr) -> Fr {

@@ -33,4 +33,4 @@ pub mod poseidon;
 pub mod settle;
 
 pub use error::MpcError;
-pub use settle::{settle, Side, SettleConfig, SettleShare};
+pub use settle::{SettleConfig, SettleShare, Side, settle};

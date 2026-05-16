@@ -2,20 +2,21 @@ mod command;
 mod model;
 mod view;
 
-use std::io;
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::prelude::*;
 
-use invisibook_lib::cash_store::CashStore;
-use invisibook_lib::chain::{ChainClient, OrderEvent};
-use invisibook_lib::config::ClientConfig;
-use invisibook_lib::types::CASH_ACTIVE;
+use invisibook_lib::{
+    cash_store::CashStore,
+    chain::{ChainClient, OrderEvent},
+    config::ClientConfig,
+    types::CASH_ACTIVE,
+};
 use yu_sdk::KeyPair;
 
 use model::App;
@@ -89,7 +90,15 @@ fn main() -> io::Result<()> {
     let cash_store = CashStore::load(CashStore::default_path());
 
     // ── Run app ──
-    let mut app = App::new_with(initial_orders, client, rt, Some(order_rx), my_address, initial_balances, cash_store);
+    let mut app = App::new_with(
+        initial_orders,
+        client,
+        rt,
+        Some(order_rx),
+        my_address,
+        initial_balances,
+        cash_store,
+    );
     let result = run_app(&mut terminal, &mut app);
 
     // ── Restore terminal ──
@@ -119,10 +128,8 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                 if key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Esc => return Ok(()),
-                        KeyCode::Char('c')
-                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            return Ok(())
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            return Ok(());
                         }
                         KeyCode::Up => app.move_cursor_up(),
                         KeyCode::Down => app.move_cursor_down(),

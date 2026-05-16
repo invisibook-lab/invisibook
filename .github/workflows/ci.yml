@@ -13,10 +13,45 @@ on:
       - '**/*.md'
 
 jobs:
+  # ────────────────────── Detect changed paths ──────────────────────
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      chain: ${{ steps.filter.outputs.chain }}
+      lib: ${{ steps.filter.outputs.lib }}
+      zk: ${{ steps.filter.outputs.zk }}
+      mpc: ${{ steps.filter.outputs.mpc }}
+      cli: ${{ steps.filter.outputs.cli }}
+      app: ${{ steps.filter.outputs.app }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            chain:
+              - 'chain/**'
+            lib:
+              - 'lib/chain/**'
+            zk:
+              - 'lib/zk/**'
+            mpc:
+              - 'lib/mpc/**'
+            cli:
+              - 'cli/**'
+              - 'lib/chain/**'
+              - 'lib/mpc/**'
+            app:
+              - 'app/**'
+              - 'lib/chain/**'
+
   # ────────────────────── Go: chain ──────────────────────
   chain:
     name: Chain (Go)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.chain == 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -38,10 +73,12 @@ jobs:
         working-directory: chain
         run: go vet .
 
-  # ────────────────────── Rust: lib ──────────────────────
+  # ────────────────────── Rust: lib (chain + mpc) ──────────────────────
   lib:
     name: Lib (Rust)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.lib == 'true' || needs.changes.outputs.mpc == 'true' || needs.changes.outputs.zk == 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -58,18 +95,30 @@ jobs:
             lib/target
           key: ${{ runner.os }}-cargo-lib-${{ hashFiles('lib/Cargo.lock') }}
 
+      - name: Build lib
+        working-directory: lib
+        run: cargo build
+
+      - name: Test lib (exclude zk)
+        working-directory: lib
+        run: cargo test --workspace --exclude zk
+
+      # ZK tests only when lib/zk/** changed
       - name: Cache circuit build (ptau + zkey)
+        if: needs.changes.outputs.zk == 'true'
         uses: actions/cache@v4
         with:
           path: lib/target/circuit-build
           key: ${{ runner.os }}-circuit-build-${{ hashFiles('lib/zk/templates/**/*.circom') }}
 
       - name: Set up Node.js
+        if: needs.changes.outputs.zk == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Install circom
+        if: needs.changes.outputs.zk == 'true'
         run: |
           rustup toolchain install stable
           git clone https://github.com/iden3/circom.git /tmp/circom
@@ -78,9 +127,11 @@ jobs:
           sudo cp target/release/circom /usr/local/bin/
 
       - name: Install snarkjs
+        if: needs.changes.outputs.zk == 'true'
         run: npm install -g snarkjs
 
       - name: Install rapidsnark
+        if: needs.changes.outputs.zk == 'true'
         run: |
           sudo apt-get install -y nasm libsodium-dev
           git clone https://github.com/iden3/rapidsnark.git /tmp/rapidsnark
@@ -90,24 +141,8 @@ jobs:
           make host -j$(nproc)
           sudo cp /tmp/rapidsnark/package/bin/prover /usr/local/bin/rapidsnark
 
-      - name: Detect changed paths
-        uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            zk:
-              - 'lib/zk/**'
-
-      - name: Build lib
-        working-directory: lib
-        run: cargo build
-
-      - name: Test lib (exclude zk)
-        working-directory: lib
-        run: cargo test --workspace --exclude zk
-
       - name: Test lib/zk
-        if: steps.filter.outputs.zk == 'true'
+        if: needs.changes.outputs.zk == 'true'
         working-directory: lib
         run: cargo test -p zk
 
@@ -115,13 +150,14 @@ jobs:
   cli:
     name: CLI (Rust)
     runs-on: ubuntu-latest
-    needs: lib
+    needs: changes
+    if: needs.changes.outputs.cli == 'true'
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -140,7 +176,8 @@ jobs:
   app-desktop:
     name: App Desktop (Rust)
     runs-on: ubuntu-latest
-    needs: lib
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
 
     steps:
       - uses: actions/checkout@v4

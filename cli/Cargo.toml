@@ -12,6 +12,9 @@ hex = "0.4"
 serde_json = "1"
 rand = "0.9"
 yu-sdk = "0.1.1"
+mpc = { path = "../lib/mpc" }
+sha2 = "0.10"
+num-bigint = "0.4"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 zk = { path = "../lib/zk" }

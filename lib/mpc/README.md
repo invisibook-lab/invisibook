@@ -20,7 +20,7 @@ Both parties run the same `settle()` function. Neither party learns the comparis
 2. **Verify commitment consistency** — Confirm both parties agree on `C1`, `C2`
 3. **Poseidon verification** — Verify `Poseidon(v, r) == C` in MPC (no opening)
 4. **Compare** — Zero-leakage `v1 >= v2` via masked bit decomposition (~65 Beaver triples)
-5. **MUX loser's randomness** — Select loser's `r` without revealing who lost
+5. **MUX smaller side's randomness** — Select smaller side's `r` without revealing who is smaller
 6. **Output shares** — Return additive shares + MAC shares (no values opened to either party)
 
 ## Usage
@@ -46,8 +46,8 @@ let share: SettleShare = settle(
 // (mac_A + mac_B) == (delta_A + delta_B) * (share_A + share_B) mod P
 println!("cmp_share: {}", share.cmp_share);
 println!("cmp_mac: {}", share.cmp_mac);
-println!("r_loser_share: {}", share.r_loser_share);
-println!("r_loser_mac: {}", share.r_loser_mac);
+println!("r_smaller_share: {}", share.r_smaller_share);
+println!("r_smaller_mac: {}", share.r_smaller_mac);
 println!("mac_key_share: {}", share.mac_key_share);
 ```
 
