@@ -152,6 +152,7 @@ pub fn TradeForm(
             block_height: 0,
             status: OrderStatus::Pending,
             match_order: None,
+            is_smaller: false,
         };
 
         let client = chain_client.read().clone();
