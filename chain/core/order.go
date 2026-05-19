@@ -25,7 +25,8 @@ type Order struct {
 	HandlingFee  []string   `json:"handling_fee,omitempty"`
 	BlockHeight  uint32     `json:"block_height"`
 	MatchOrder   OrderID    `json:"match_order,omitempty"`
-	Status       OrderStat  `json:"status"  validate:"oneof=0 1 2 3 4"`
+	Status       OrderStat  `json:"status"  validate:"oneof=0 1 2 3 4 5"`
+	IsSmaller bool `json:"is_smaller"` // true if this order is the smaller side after MPC comparison
 }
 
 // Validate checks all struct tag constraints on the Order.
@@ -49,7 +50,7 @@ type (
 	OrderID    string // hex-encoded SHA-256 of the order's input cash IDs
 	TradeType  int    // Buy or Sell
 	CipherText string // opaque encrypted amount, never decrypted on-chain
-	OrderStat  int    // Pending, Matched, Done, Cancelled, Frozen
+	OrderStat  int    // Pending, Matched, Done, Cancelled, Frozen, Compared
 )
 
 const (
@@ -63,6 +64,7 @@ const (
 	Done
 	Cancelled
 	Frozen
+	Settling // MPC comparison done, awaiting ZK settlement
 )
 
 // TradePair names the two tokens involved in an order. By convention Token1
@@ -102,6 +104,8 @@ func (s OrderStat) String() string {
 		return "Cancelled"
 	case Frozen:
 		return "Frozen"
+	case Settling:
+		return "Settling"
 	default:
 		return "Unknown"
 	}

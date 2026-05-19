@@ -12,6 +12,7 @@
 
 use std::{collections::HashSet, net::SocketAddr, path::Path, process::ExitCode};
 
+use ed25519_dalek::SigningKey;
 use invisibook_lib::{
     cash_store::{CashRecord, CashStore},
     chain::{ChainClient, SettleTokenLegParam},
@@ -23,13 +24,12 @@ use invisibook_lib::{
 };
 use mpc::{SettleConfig, SettleShare, Side, settle};
 use rand::RngCore;
+use sha2::{Digest, Sha256};
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use zk::{
     setup::dev_setup_snarkjs,
     test_circuit::TestCircuitHandle,
-    wallet::{
-        SettleLargerWitness, SettleSmallerWitness, fr_to_hex, poseidon_commit, prove_settle_larger,
-        prove_settle_smaller,
-    },
+    wallet::{SettleLargerWitness, fr_to_hex, poseidon_commit, prove_settle_larger},
 };
 
 const POSEIDON_ZERO_COMMITMENT_HEX: &str =
@@ -274,89 +274,88 @@ fn main() -> ExitCode {
         mac_key_share: mpc_result.mac_key_share,
     };
 
-    // Compute fills to determine which side is larger/smaller.
-    let counter_locked_amount = guess_counter_locked_amount(&counter_order, &store);
-    let (fill_t1, fill_t2) = compute_fills(
-        &my_order,
-        &counter_order,
-        my_locked_amount,
-        counter_locked_amount,
-        price,
-    );
+    // ═══════════ Phase 1: Submit CompareOrders ═══════════
+    eprintln!("submitting CompareOrders to chain...");
+    if let Err(e) =
+        rt.block_on(client.compare_orders(my_order_id.clone(), match_order_id.clone(), mpc_share))
+    {
+        eprintln!("compare_orders failed: {e}");
+        return ExitCode::FAILURE;
+    }
+    eprintln!("CompareOrders submitted, polling until Settling...");
 
-    let my_fill = if my_lock_token == my_order.subject.token1 {
-        fill_t1
-    } else {
-        fill_t2
-    };
-    let my_is_smaller = my_locked_amount == my_fill;
-
-    // Generate random for my received cash.
-    let mut my_recv_random = [0u8; 32];
-    rand::rng().fill_bytes(&mut my_recv_random);
-
-    // My recv token is the counterparty's locked token.
-    let my_recv_token = counter_lock_token.clone();
-    let my_recv_amount = if my_recv_token == my_order.subject.token1 {
-        fill_t1
-    } else {
-        fill_t2
-    };
-    let my_recv_commit_hex = fr_to_hex(&poseidon_commit(my_recv_amount, &my_recv_random));
-
-    // For the ZK proof, we need the counterparty's recv commitment. In per-party
-    // mode, each side independently computes `recv_commitment` — the counterparty
-    // will produce their own. We use a placeholder: the proof binds the
-    // counterparty's recv commitment as a public input; the chain verifies both
-    // legs' recv commitments independently. We set it to the counterparty's
-    // order amount as a placeholder that chain will verify via the leg.
-    // Actually, the counterparty's recv commitment = the recv_commitment we
-    // provide in our leg (the output we mint for them). So we compute it too.
-    let mut counter_recv_random = [0u8; 32];
-    rand::rng().fill_bytes(&mut counter_recv_random);
-    let counter_recv_amount = if counter_lock_token == my_order.subject.token1 {
-        fill_t1
-    } else {
-        fill_t2
-    };
-    let counter_recv_commit_hex =
-        fr_to_hex(&poseidon_commit(counter_recv_amount, &counter_recv_random));
-
-    // Compile circuits.
-    eprintln!("preparing settle circuits...");
-    let (larger_setup, smaller_setup) = (
-        dev_setup_snarkjs("settle_larger").expect("settle_larger setup"),
-        dev_setup_snarkjs("settle_smaller").expect("settle_smaller setup"),
-    );
-    let larger_handle = TestCircuitHandle::from_compiled(&larger_setup.circuit_dir).unwrap();
-    let smaller_handle = TestCircuitHandle::from_compiled(&smaller_setup.circuit_dir).unwrap();
-
-    // Build off-chain coordination secrets. In per-party mode, both parties must
-    // agree on r_match_t1, r_match_t2. For now, we derive them from a shared
-    // seed (e.g. hash of both order IDs). This is a simplification — production
-    // would use the MPC-revealed r_smaller or a DH exchange.
-    let (r_match_t1, r_match_t2) = derive_match_randoms(&my_order.id, &counter_order.id);
-
-    // Build ZK leg.
-    let leg = if my_is_smaller {
-        let r_match = r_match_for_token(&my_lock_token, &my_order, r_match_t1, r_match_t2);
-        match build_smaller_leg(
-            &my_locked_recs,
-            r_match,
-            &counter_recv_commit_hex,
-            &counter_order.pubkey,
-            &my_lock_token,
-            &smaller_handle,
-            &smaller_setup.zkey,
-        ) {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("smaller leg: {e}");
-                return ExitCode::FAILURE;
+    // ═══════════ Phase 2: Poll until Settling ═══════════
+    let my_order = loop {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        match rt.block_on(client.query_orders(
+            Some(my_order_id.clone()),
+            None,
+            None,
+            None,
+            None,
+            Some(1),
+            Some(0),
+        )) {
+            Ok(orders) => {
+                if let Some(o) = orders.into_iter().find(|o| o.id == my_order_id) {
+                    if o.status == OrderStatus::Settling {
+                        eprintln!(
+                            "order {} is now Settling (is_smaller={})",
+                            o.id, o.is_smaller
+                        );
+                        break o;
+                    }
+                    eprintln!("  still {:?}, waiting...", o.status);
+                }
             }
+            Err(e) => eprintln!("  poll error: {e}"),
         }
+    };
+
+    let my_is_smaller = my_order.is_smaller;
+
+    // Build ZK leg and submit settlement.
+    let leg = if my_is_smaller {
+        // Smaller party confirms settlement without ZK proof.
+        eprintln!("smaller party — skipping ZK proof, confirming settlement...");
+        None
     } else {
+        // Larger party generates ZK proof.
+        let counter_locked_amount = guess_counter_locked_amount(&counter_order, &store);
+        let (fill_t1, fill_t2) = compute_fills(
+            &my_order,
+            &counter_order,
+            my_locked_amount,
+            counter_locked_amount,
+            price,
+        );
+
+        // Counterparty recv commitment (smaller party receives larger's token).
+        let mut counter_recv_random = [0u8; 32];
+        rand::rng().fill_bytes(&mut counter_recv_random);
+        let counter_recv_amount = if counter_lock_token == my_order.subject.token1 {
+            fill_t1
+        } else {
+            fill_t2
+        };
+        let counter_recv_commit_hex =
+            fr_to_hex(&poseidon_commit(counter_recv_amount, &counter_recv_random));
+
+        // Compile larger circuit only.
+        eprintln!("preparing settle_larger circuit...");
+        let larger_setup = dev_setup_snarkjs("settle_larger").expect("settle_larger setup");
+        let larger_handle = TestCircuitHandle::from_compiled(&larger_setup.circuit_dir).unwrap();
+
+        // Derive match randoms via ECDH.
+        let (r_match_t1, r_match_t2) = derive_match_randoms(&seed, &counter_order.pubkey);
+
+        let my_fill = if my_lock_token == my_order.subject.token1 {
+            fill_t1
+        } else {
+            fill_t2
+        };
         let change_amount = my_locked_amount.saturating_sub(my_fill);
+
         match build_larger_leg(
             &my_locked_recs,
             r_match_t1,
@@ -370,7 +369,7 @@ fn main() -> ExitCode {
             &larger_handle,
             &larger_setup.zkey,
         ) {
-            Ok(l) => l,
+            Ok(l) => Some(l),
             Err(e) => {
                 eprintln!("larger leg: {e}");
                 return ExitCode::FAILURE;
@@ -378,19 +377,16 @@ fn main() -> ExitCode {
         }
     };
 
-    // Submit to chain.
-    eprintln!("submitting settle to chain...");
-    if let Err(e) = rt.block_on(client.settle_order(
-        my_order_id.clone(),
-        match_order_id.clone(),
-        leg,
-        mpc_share,
-    )) {
-        eprintln!("settle_order failed: {e}");
+    // ═══════════ Phase 3: Submit SettleOrders ═══════════
+    eprintln!("submitting SettleOrders to chain...");
+    if let Err(e) =
+        rt.block_on(client.settle_orders(my_order_id.clone(), match_order_id.clone(), leg))
+    {
+        eprintln!("settle_orders failed: {e}");
         return ExitCode::FAILURE;
     }
 
-    // Update local CashStore.
+    // Update local CashStore: mark my locked cash as spent.
     let mut store = CashStore::load(CashStore::default_path());
     let spent_ids: HashSet<String> = my_order.input_cash_ids.iter().cloned().collect();
     for rec in store.records_mut().iter_mut() {
@@ -398,7 +394,29 @@ fn main() -> ExitCode {
             rec.status = CASH_SPENT;
         }
     }
-    // My received cash.
+
+    // Record my received cash (from counterparty's token).
+    // The larger party uses the recv info from their own leg;
+    // the smaller party derives it via ECDH match randoms.
+    let my_recv_token = counter_lock_token.clone();
+    let (r_match_t1, r_match_t2) = derive_match_randoms(&seed, &counter_order.pubkey);
+    let r_my_recv = r_match_for_token(&my_recv_token, &my_order, r_match_t1, r_match_t2);
+
+    let counter_locked_amount = guess_counter_locked_amount(&counter_order, &store);
+    let (fill_t1, fill_t2) = compute_fills(
+        &my_order,
+        &counter_order,
+        my_locked_amount,
+        counter_locked_amount,
+        price,
+    );
+    let my_recv_amount = if my_recv_token == my_order.subject.token1 {
+        fill_t1
+    } else {
+        fill_t2
+    };
+    let my_recv_commit_hex = fr_to_hex(&poseidon_commit(my_recv_amount, &r_my_recv));
+
     store.records_mut().push(CashRecord {
         cash_id: invisibook_lib::orderbook::compute_cash_id(
             &my_pubkey,
@@ -407,37 +425,51 @@ fn main() -> ExitCode {
         ),
         token: my_recv_token.clone(),
         amount: my_recv_amount,
-        random: hex::encode(my_recv_random),
+        random: hex::encode(r_my_recv),
         status: CASH_ACTIVE,
     });
     let _ = store.flush();
 
     println!(
-        "settle submitted: order {} -> waiting for counterparty {}; received {} {}",
+        "settle complete: order {} <-> {}; received {} {}",
         my_order_id, match_order_id, my_recv_amount, my_recv_token
     );
     ExitCode::SUCCESS
 }
 
-/// Derive deterministic match randoms from both order IDs (sorted).
-/// This is a simplification — production would use MPC-derived values.
-fn derive_match_randoms(id_a: &str, id_b: &str) -> ([u8; 32], [u8; 32]) {
-    use sha2::{Digest, Sha256};
-    let (first, second) = if id_a < id_b {
-        (id_a, id_b)
-    } else {
-        (id_b, id_a)
-    };
+/// Derive match randoms via static ECDH (ed25519 → x25519).
+/// Both parties compute the same shared secret without extra communication.
+/// `my_seed` is the local ed25519 32-byte seed, `counter_pubkey_hex` is the
+/// counterparty's ed25519 public key (64-char hex from the chain Order).
+fn derive_match_randoms(my_seed: &[u8; 32], counter_pubkey_hex: &str) -> ([u8; 32], [u8; 32]) {
+    // ed25519 seed → x25519 static secret (SHA-512 of seed, take lower 32, clamped).
+    let signing_key = SigningKey::from_bytes(my_seed);
+    let my_x25519_secret = StaticSecret::from(signing_key.to_scalar_bytes());
+
+    // Counterparty ed25519 pubkey → x25519 public key (Edwards → Montgomery).
+    let counter_pub_bytes: [u8; 32] = hex::decode(counter_pubkey_hex)
+        .expect("valid hex pubkey")
+        .try_into()
+        .expect("pubkey must be 32 bytes");
+    let counter_ed_point = curve25519_dalek::edwards::CompressedEdwardsY(counter_pub_bytes);
+    let counter_montgomery = counter_ed_point
+        .decompress()
+        .expect("valid ed25519 point")
+        .to_montgomery();
+    let counter_x25519_pub = X25519PublicKey::from(counter_montgomery.to_bytes());
+
+    // x25519 DH → shared secret.
+    let shared_secret = my_x25519_secret.diffie_hellman(&counter_x25519_pub);
+
+    // Derive two independent randoms from the shared secret.
     let mut h1 = Sha256::new();
     h1.update(b"r_match_t1:");
-    h1.update(first.as_bytes());
-    h1.update(second.as_bytes());
+    h1.update(shared_secret.as_bytes());
     let r1: [u8; 32] = h1.finalize().into();
 
     let mut h2 = Sha256::new();
     h2.update(b"r_match_t2:");
-    h2.update(first.as_bytes());
-    h2.update(second.as_bytes());
+    h2.update(shared_secret.as_bytes());
     let r2: [u8; 32] = h2.finalize().into();
 
     (r1, r2)
@@ -497,43 +529,6 @@ fn compute_fills(
     let fill_t1 = seller_lock_t1.min(buyer_wanted_t1);
     let fill_t2 = fill_t1 * price;
     (fill_t1, fill_t2)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_smaller_leg(
-    inputs: &[CashRecord],
-    r_match: [u8; 32],
-    counterparty_recv_commit_hex: &str,
-    counterparty_pubkey: &str,
-    token: &TokenID,
-    handle: &TestCircuitHandle,
-    zkey: &Path,
-) -> Result<SettleTokenLegParam, String> {
-    let inputs_for_witness = decode_inputs(inputs)?;
-    let sp = prove_settle_smaller(
-        SettleSmallerWitness {
-            r_match,
-            inputs: inputs_for_witness,
-            counterparty_recv_commitment_hex: counterparty_recv_commit_hex.to_string(),
-        },
-        handle,
-        zkey,
-    )
-    .map_err(|e| format!("prove_settle_smaller: {e}"))?;
-    Ok(SettleTokenLegParam {
-        side: "smaller".to_string(),
-        token: token.clone(),
-        my_match_commitment: None,
-        other_match_commitment: None,
-        price: None,
-        is_token2_sender: None,
-        change_commitment: None,
-        change_pubkey: String::new(),
-        match_commitment: Some(sp.match_commitment_hex),
-        recv_commitment: counterparty_recv_commit_hex.to_string(),
-        recv_pubkey: counterparty_pubkey.to_string(),
-        zk_proof: serde_json::to_string(&sp.proof_json).map_err(|e| e.to_string())?,
-    })
 }
 
 #[allow(clippy::too_many_arguments)]

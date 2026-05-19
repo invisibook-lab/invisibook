@@ -42,14 +42,22 @@ struct TradePairJson {
     token2: TokenID,
 }
 
-/// Per-party settle submission sent to chain. Each party submits their own
-/// order ID, the counterparty's order ID, their ZK leg, and their MPC share.
+/// Per-party MPC share submission for the comparison phase.
+#[derive(Debug, Serialize)]
+struct CompareOrderParams {
+    order_id: OrderID,
+    match_order_id: OrderID,
+    mpc_share: MpcShareParamJson,
+}
+
+/// Per-party settle submission sent to chain after comparison.
+/// `leg` is required for the larger party, omitted for the smaller party.
 #[derive(Debug, Serialize)]
 struct SettleOrderParams {
     order_id: OrderID,
     match_order_id: OrderID,
-    leg: SettleTokenLegParam,
-    mpc_share: MpcShareParamJson,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    leg: Option<SettleTokenLegParam>,
 }
 
 /// Serializable form of MpcShareParam for the chain JSON API.
@@ -132,6 +140,8 @@ pub struct QueryOrderItem {
     pub status: u8,
     #[serde(default)]
     pub match_order: Option<String>,
+    #[serde(default)]
+    pub is_smaller: bool,
 }
 
 /// Go's `*big.Int` serializes as a JSON string (e.g. `"100"`) via `MarshalText`,
@@ -343,20 +353,18 @@ impl ChainClient {
             .await
     }
 
-    /// Submits this party's settlement data to the chain. The chain collects
-    /// both parties' submissions and executes settlement when both arrive.
-    /// `order_id` is this party's order, `match_order_id` is the counterparty's.
-    pub async fn settle_order(
+    /// Submits this party's MPC shares for order comparison.
+    /// The chain collects both parties' shares and verifies the MAC,
+    /// then sets both orders to Compared status.
+    pub async fn compare_orders(
         &self,
         order_id: OrderID,
         match_order_id: OrderID,
-        leg: SettleTokenLegParam,
         mpc_share: MpcShareParam,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let params = SettleOrderParams {
+        let params = CompareOrderParams {
             order_id,
             match_order_id,
-            leg,
             mpc_share: MpcShareParamJson {
                 cmp_share: mpc_share.cmp_share,
                 cmp_mac: mpc_share.cmp_mac,
@@ -366,7 +374,26 @@ impl ChainClient {
             },
         };
         self.client
-            .write_chain("orderbook", "SettleOrder", &params, self.chain_id, 100, 0)
+            .write_chain("orderbook", "CompareOrders", &params, self.chain_id, 100, 0)
+            .await
+    }
+
+    /// Submits this party's settlement confirmation (after comparison).
+    /// The larger party (IsSmaller=false) must provide a ZK `leg`; the smaller
+    /// party (IsSmaller=true) confirms without proof (`leg` is `None`).
+    pub async fn settle_orders(
+        &self,
+        order_id: OrderID,
+        match_order_id: OrderID,
+        leg: Option<SettleTokenLegParam>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let params = SettleOrderParams {
+            order_id,
+            match_order_id,
+            leg,
+        };
+        self.client
+            .write_chain("orderbook", "SettleOrders", &params, self.chain_id, 100, 0)
             .await
     }
 
@@ -396,6 +423,7 @@ impl ChainClient {
                 OrderStatus::Done => 2,
                 OrderStatus::Cancelled => 3,
                 OrderStatus::Frozen => 4,
+                OrderStatus::Settling => 5,
             }),
             limit,
             offset,
@@ -707,6 +735,7 @@ fn query_item_to_order(item: QueryOrderItem) -> Order {
         1 => OrderStatus::Matched,
         2 => OrderStatus::Done,
         3 => OrderStatus::Cancelled,
+        5 => OrderStatus::Settling,
         _ => OrderStatus::Frozen,
     };
     Order {
@@ -724,5 +753,6 @@ fn query_item_to_order(item: QueryOrderItem) -> Order {
         block_height: item.block_height,
         status,
         match_order: item.match_order,
+        is_smaller: item.is_smaller,
     }
 }

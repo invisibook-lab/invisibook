@@ -15,14 +15,13 @@ type Config struct {
 // OrderBookConfig holds configuration for the OrderBook tripod.
 //
 // `SplitVKPath` is the snarkjs `vk.json` for the split circuit (SendOrder).
-// `SettleLargerVKPath` and `SettleSmallerVKPath` are the two settle circuits
-// (the larger side of a matched pair has change + a cross-leg ratio check; the
-// smaller side has no change). All three are required at startup.
+// `SettleLargerVKPath` is the settle circuit for the larger side (change +
+// cross-leg ratio check). Only the larger party submits a ZK proof; the
+// smaller party confirms settlement without proof.
 type OrderBookConfig struct {
-	DBPath              string `toml:"db_path"`
-	SplitVKPath         string `toml:"split_vk_path"`
-	SettleLargerVKPath  string `toml:"settle_larger_vk_path"`
-	SettleSmallerVKPath string `toml:"settle_smaller_vk_path"`
+	DBPath             string `toml:"db_path"`
+	SplitVKPath        string `toml:"split_vk_path"`
+	SettleLargerVKPath string `toml:"settle_larger_vk_path"`
 }
 
 // AccountConfig holds configuration for the Account tripod.

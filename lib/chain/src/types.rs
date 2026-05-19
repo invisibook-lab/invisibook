@@ -33,6 +33,7 @@ pub enum OrderStatus {
     Done,
     Cancelled,
     Frozen,
+    Settling,
 }
 
 impl fmt::Display for OrderStatus {
@@ -43,6 +44,7 @@ impl fmt::Display for OrderStatus {
             OrderStatus::Done => write!(f, "Done"),
             OrderStatus::Cancelled => write!(f, "Cancelled"),
             OrderStatus::Frozen => write!(f, "Frozen"),
+            OrderStatus::Settling => write!(f, "Settling"),
         }
     }
 }
@@ -136,4 +138,5 @@ pub struct Order {
     pub block_height: u32,
     pub status: OrderStatus,
     pub match_order: Option<OrderID>,
+    pub is_smaller: bool, // true if this order is the smaller side after MPC comparison
 }

@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net/http"
 
+	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 	"gorm.io/gorm"
 
 	"github.com/yu-org/yu/core/context"
@@ -33,18 +34,17 @@ type OrderEvent struct {
 // Account tripod (injected via the `tripod` struct tag) for Cash state changes.
 type OrderBook struct {
 	*tripod.Tripod
-	Account         *Account `tripod:"account"`
-	db              *gorm.DB
-	splitVK         *CircuitVK
-	settleLargerVK  *CircuitVK
-	settleSmallerVK *CircuitVK
+	Account        *Account `tripod:"account"`
+	db             *gorm.DB
+	splitVK        *CircuitVK
+	settleLargerVK *CircuitVK
 }
 
 // NewOrderBook constructs the OrderBook tripod and registers its writings and
-// readings. `cfg` must carry a valid SQLite DSN plus readable
-// `SplitVKPath` / `SettleLargerVKPath` / `SettleSmallerVKPath`. DB init and
-// VK loading panic on failure — the chain will not start without all three
-// circuits' verifying keys in memory.
+// readings. `cfg` must carry a valid SQLite DSN plus readable `SplitVKPath`
+// and `SettleLargerVKPath`. DB init and VK loading panic on failure.
+// Only the larger party submits a ZK proof; the smaller party confirms
+// settlement without proof, so no settle_smaller VK is needed.
 func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	tri := tripod.NewTripodWithName("orderbook")
 	splitVK, err := LoadVK("split", cfg.SplitVKPath)
@@ -55,18 +55,13 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	if err != nil {
 		panic(fmt.Sprintf("loading settle_larger VK: %v", err))
 	}
-	settleSmallerVK, err := LoadVK("settle_smaller", cfg.SettleSmallerVKPath)
-	if err != nil {
-		panic(fmt.Sprintf("loading settle_smaller VK: %v", err))
-	}
 	ot := &OrderBook{
-		Tripod:          tri,
-		db:              InitOrderDB(cfg.DBPath),
-		splitVK:         splitVK,
-		settleLargerVK:  settleLargerVK,
-		settleSmallerVK: settleSmallerVK,
+		Tripod:         tri,
+		db:             InitOrderDB(cfg.DBPath),
+		splitVK:        splitVK,
+		settleLargerVK: settleLargerVK,
 	}
-	ot.SetWritings(ot.SendOrder, ot.SettleOrder)
+	ot.SetWritings(ot.SendOrder, ot.CompareOrders, ot.SettleOrders)
 	ot.SetReadings(ot.QueryOrders)
 	return ot
 }
@@ -269,7 +264,7 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	return nil
 }
 
-// ────────────────────── Writing: SettleOrder ──────────────────────
+// ────────────────────── Writing: CompareOrders ──────────────────────
 
 // SettleSide is which side of the asymmetric settle protocol a leg is on.
 // "larger" → has change cash + cross-leg ratio check (settle_larger circuit).
@@ -277,8 +272,7 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 type SettleSide string
 
 const (
-	SideLarger  SettleSide = "larger"
-	SideSmaller SettleSide = "smaller"
+	SideLarger SettleSide = "larger"
 )
 
 // SettleTokenLeg is one half of a settlement: the side responsible for moving
@@ -310,34 +304,30 @@ type SettleTokenLeg struct {
 // off-chain MPC settle protocol. Both parties' shares are combined on-chain to
 // verify the MAC relationship: (mac_A + mac_B) == (delta_A + delta_B) * (share_A + share_B).
 type MpcShareData struct {
-	CmpShare    string `json:"cmp_share"     validate:"required"`
-	CmpMac      string `json:"cmp_mac"       validate:"required"`
-	RSmallerShare string `json:"r_smaller_share" validate:"required"`
-	RSmallerMac   string `json:"r_smaller_mac"   validate:"required"`
-	MacKeyShare string `json:"mac_key_share" validate:"required"`
+	CmpShare      string `json:"cmp_share"       validate:"required"`
+	CmpMac        string `json:"cmp_mac"         validate:"required"`
+	RSmallerShare string `json:"r_smaller_share"  validate:"required"`
+	RSmallerMac   string `json:"r_smaller_mac"    validate:"required"`
+	MacKeyShare   string `json:"mac_key_share"    validate:"required"`
 }
 
-// SettleOrderRequest is a per-party submission. Each party independently
-// submits their own order ID, the counterparty's order ID, their leg, and
-// their MPC share. The chain collects both submissions and executes settlement
-// when the pair is complete.
-type SettleOrderRequest struct {
-	OrderID      OrderID        `json:"order_id"       validate:"required"`
-	MatchOrderID OrderID        `json:"match_order_id" validate:"required"`
-	Leg          SettleTokenLeg `json:"leg"             validate:"required"`
-	MpcShare     MpcShareData   `json:"mpc_share"      validate:"required"`
+// CompareOrderRequest is a per-party MPC share submission for the comparison
+// phase. Each party submits their order ID, the counterparty's order ID, and
+// their MPC share. When both arrive, the chain verifies the MAC, reconstructs
+// cmp and r_smaller, and sets both orders to Settling.
+type CompareOrderRequest struct {
+	OrderID      OrderID      `json:"order_id"       validate:"required"`
+	MatchOrderID OrderID      `json:"match_order_id" validate:"required"`
+	MpcShare     MpcShareData `json:"mpc_share"      validate:"required"`
 }
 
-// SettleOrder accepts a per-party settlement submission. Each party
-// independently submits their order ID, the counterparty's order ID, their
-// ZK leg, and their MPC share. When only one side has submitted, the chain
-// stores the submission and returns success. When both sides have submitted,
-// the chain verifies the MPC MAC, both ZK proofs, cross-leg consistency,
-// spends the locked Cash, mints outputs, and marks both orders Done.
-func (ot *OrderBook) SettleOrder(ctx *context.WriteContext) error {
+// CompareOrders accepts a per-party MPC share submission. When both parties
+// have submitted, the chain verifies the MAC, reconstructs the comparison
+// result and r_smaller, then sets both orders to Settling status.
+func (ot *OrderBook) CompareOrders(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
 
-	req := new(SettleOrderRequest)
+	req := new(CompareOrderRequest)
 	if err := ctx.BindJson(req); err != nil {
 		return err
 	}
@@ -365,149 +355,248 @@ func (ot *OrderBook) SettleOrder(ctx *context.WriteContext) error {
 	}
 
 	// Prevent duplicate submission from the same party.
-	if _, err := ot.GetSubmission(req.OrderID); err == nil {
+	if _, err := ot.GetCompareSubmission(req.OrderID); err == nil {
+		return fmt.Errorf("order %s has already submitted a compare request", req.OrderID)
+	}
+
+	// Check whether the counterparty has already submitted.
+	counterSub, err := ot.GetCompareSubmission(req.MatchOrderID)
+	if err != nil {
+		// Counterparty not yet submitted — store this submission and return.
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("failed to check counterparty compare submission: %w", err)
+		}
+		shareJSON, _ := json.Marshal(req.MpcShare)
+		sub := &CompareSubmissionScheme{
+			OrderID:      string(req.OrderID),
+			MatchOrderID: string(req.MatchOrderID),
+			MpcShareJSON: string(shareJSON),
+		}
+		if err := ot.SaveCompareSubmission(sub); err != nil {
+			return fmt.Errorf("failed to store compare submission: %w", err)
+		}
+		ctx.EmitStringEvent("compare submission stored for order %s, waiting for counterparty %s", req.OrderID, req.MatchOrderID)
+		return nil
+	}
+
+	// Both parties have now submitted — verify MAC and reconstruct values.
+	var counterShare MpcShareData
+	if err := json.Unmarshal([]byte(counterSub.MpcShareJSON), &counterShare); err != nil {
+		return fmt.Errorf("failed to parse counterparty MPC share: %w", err)
+	}
+
+	// MPC MAC verification.
+	if err := VerifyMpcMac(&req.MpcShare, &counterShare); err != nil {
+		return fmt.Errorf("MPC MAC verification failed: %w", err)
+	}
+
+	// Reconstruct cmp and validate it is 0 or 1.
+	cmp, err := ReconstructCmp(&req.MpcShare, &counterShare)
+	if err != nil {
+		return fmt.Errorf("failed to reconstruct cmp: %w", err)
+	}
+	if err := ValidateCmp(&cmp); err != nil {
+		return err
+	}
+
+	// Determine which order is smaller based on cmp.
+	// MPC convention: party0 = Buy side, party1 = Sell side.
+	// cmp=1 means v_buy >= v_sell, so Sell side is smaller.
+	// cmp=0 means v_buy < v_sell, so Buy side is smaller.
+	var one fr.Element
+	one.SetOne()
+	cmpIsOne := cmp == one
+
+	// Map order types to determine smaller side.
+	myIsSmaller := false
+	matchIsSmaller := false
+	if cmpIsOne {
+		// Sell side is smaller
+		if myOrder.Type == Sell {
+			myIsSmaller = true
+		} else {
+			matchIsSmaller = true
+		}
+	} else {
+		// Buy side is smaller
+		if myOrder.Type == Buy {
+			myIsSmaller = true
+		} else {
+			matchIsSmaller = true
+		}
+	}
+
+	// Update both orders to Settling.
+	if err := ot.UpdateOrderStatus(myOrder.ID, Settling); err != nil {
+		return fmt.Errorf("failed to update order %s to Settling: %w", myOrder.ID, err)
+	}
+	if err := ot.UpdateOrderComparison(myOrder.ID, myIsSmaller); err != nil {
+		return fmt.Errorf("failed to update comparison for order %s: %w", myOrder.ID, err)
+	}
+	if err := ot.UpdateOrderStatus(matchOrder.ID, Settling); err != nil {
+		return fmt.Errorf("failed to update order %s to Settling: %w", matchOrder.ID, err)
+	}
+	if err := ot.UpdateOrderComparison(matchOrder.ID, matchIsSmaller); err != nil {
+		return fmt.Errorf("failed to update comparison for order %s: %w", matchOrder.ID, err)
+	}
+
+	// Clean up pending compare submissions.
+	_ = ot.DeleteCompareSubmission(req.OrderID)
+	_ = ot.DeleteCompareSubmission(req.MatchOrderID)
+
+	ctx.EmitStringEvent("orders compared: %s <-> %s (cmp=%s)", myOrder.ID, matchOrder.ID, cmp.String())
+	return nil
+}
+
+// ────────────────────── Writing: SettleOrders ──────────────────────
+
+// SettleOrderRequest is a per-party settlement submission. The larger party
+// (IsSmaller=false) must include a ZK `Leg`; the smaller party
+// (IsSmaller=true) confirms settlement without proof (Leg is nil).
+type SettleOrderRequest struct {
+	OrderID      OrderID        `json:"order_id"       validate:"required"`
+	MatchOrderID OrderID        `json:"match_order_id" validate:"required"`
+	Leg          *SettleTokenLeg `json:"leg,omitempty"`
+}
+
+// SettleOrders accepts a per-party settlement submission. The larger party
+// (IsSmaller=false) must include a ZK Leg; the smaller party (IsSmaller=true)
+// confirms without proof (Leg is nil). When both arrive, the chain verifies
+// only the larger party's proof, spends locked Cash, mints outputs, and marks
+// both orders Done.
+func (ot *OrderBook) SettleOrders(ctx *context.WriteContext) error {
+	ctx.SetLei(100)
+
+	req := new(SettleOrderRequest)
+	if err := ctx.BindJson(req); err != nil {
+		return err
+	}
+	if err := Validator.Struct(req); err != nil {
+		return err
+	}
+
+	// Retrieve and validate both orders are Settling and mutually reference each other.
+	myOrder, err := ot.GetOrder(req.OrderID)
+	if err != nil {
+		return fmt.Errorf("order %s not found: %w", req.OrderID, err)
+	}
+	matchOrder, err := ot.GetOrder(req.MatchOrderID)
+	if err != nil {
+		return fmt.Errorf("order %s not found: %w", req.MatchOrderID, err)
+	}
+	if myOrder.Status != Settling {
+		return fmt.Errorf("order %s is not Settling (current: %s)", myOrder.ID, myOrder.Status.String())
+	}
+	if matchOrder.Status != Settling {
+		return fmt.Errorf("order %s is not Settling (current: %s)", matchOrder.ID, matchOrder.Status.String())
+	}
+	if myOrder.MatchOrder != matchOrder.ID || matchOrder.MatchOrder != myOrder.ID {
+		return fmt.Errorf("orders %s and %s are not matched with each other", myOrder.ID, matchOrder.ID)
+	}
+
+	// Validate leg requirement: larger must provide a leg, smaller must not.
+	if !myOrder.IsSmaller && req.Leg == nil {
+		return fmt.Errorf("order %s is the larger party and must provide a settlement leg", myOrder.ID)
+	}
+	if myOrder.IsSmaller && req.Leg != nil {
+		return fmt.Errorf("order %s is the smaller party and should not provide a settlement leg", myOrder.ID)
+	}
+
+	// Validate side assignment if leg is provided.
+	if req.Leg != nil && req.Leg.Side != SideLarger {
+		return fmt.Errorf("order %s submitted side=%s but only larger is accepted",
+			myOrder.ID, req.Leg.Side)
+	}
+
+	// Prevent duplicate submission from the same party.
+	if _, err := ot.GetSettleSubmission(req.OrderID); err == nil {
 		return fmt.Errorf("order %s has already submitted a settle request", req.OrderID)
 	}
 
 	// Check whether the counterparty has already submitted.
-	counterSub, err := ot.GetSubmission(req.MatchOrderID)
+	counterSub, err := ot.GetSettleSubmission(req.MatchOrderID)
 	if err != nil {
 		// Counterparty not yet submitted — store this submission and return.
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return fmt.Errorf("failed to check counterparty submission: %w", err)
+			return fmt.Errorf("failed to check counterparty settle submission: %w", err)
 		}
-		legJSON, _ := json.Marshal(req.Leg)
-		shareJSON, _ := json.Marshal(req.MpcShare)
+		legJSON := ""
+		if req.Leg != nil {
+			b, _ := json.Marshal(req.Leg)
+			legJSON = string(b)
+		}
 		sub := &SettleSubmissionScheme{
 			OrderID:      string(req.OrderID),
 			MatchOrderID: string(req.MatchOrderID),
-			LegJSON:      string(legJSON),
-			MpcShareJSON: string(shareJSON),
+			LegJSON:      legJSON,
 		}
-		if err := ot.SaveSubmission(sub); err != nil {
+		if err := ot.SaveSettleSubmission(sub); err != nil {
 			return fmt.Errorf("failed to store settle submission: %w", err)
 		}
 		ctx.EmitStringEvent("settle submission stored for order %s, waiting for counterparty %s", req.OrderID, req.MatchOrderID)
 		return nil
 	}
 
-	// Both parties have now submitted — run full verification and settlement.
-	// Deserialize the counterparty's stored leg and MPC share.
-	var counterLeg SettleTokenLeg
-	if err := json.Unmarshal([]byte(counterSub.LegJSON), &counterLeg); err != nil {
-		return fmt.Errorf("failed to parse counterparty leg: %w", err)
-	}
-	var counterShare MpcShareData
-	if err := json.Unmarshal([]byte(counterSub.MpcShareJSON), &counterShare); err != nil {
-		return fmt.Errorf("failed to parse counterparty MPC share: %w", err)
+	// Both parties have now submitted — identify larger/smaller and get the leg.
+	var largerLeg *SettleTokenLeg
+	var largerOrder, smallerOrder *Order
+
+	if myOrder.IsSmaller {
+		// I am smaller; counterparty (larger) stored their leg.
+		smallerOrder = myOrder
+		largerOrder = matchOrder
+		if counterSub.LegJSON == "" {
+			return fmt.Errorf("counterparty %s is larger but has no stored leg", matchOrder.ID)
+		}
+		largerLeg = new(SettleTokenLeg)
+		if err := json.Unmarshal([]byte(counterSub.LegJSON), largerLeg); err != nil {
+			return fmt.Errorf("failed to parse counterparty leg: %w", err)
+		}
+	} else {
+		// I am larger; my leg is in the request.
+		largerOrder = myOrder
+		smallerOrder = matchOrder
+		largerLeg = req.Leg
 	}
 
-	// MPC MAC verification — both cmp and r_loser values.
-	if err := VerifyMpcMac(&req.MpcShare, &counterShare); err != nil {
-		return fmt.Errorf("MPC MAC verification failed: %w", err)
-	}
-
-	// Build the two-leg array for ZK and cross-leg verification.
-	// Map legs to their orders by token (same logic as old code).
-	legs := []SettleTokenLeg{req.Leg, counterLeg}
-	orders := []*Order{myOrder, matchOrder}
-
+	// Price agreement check.
 	expectedPrice := myOrder.Price.Uint64()
 	if myOrder.Price.Uint64() != matchOrder.Price.Uint64() {
 		return fmt.Errorf("matched orders %s and %s disagree on price", myOrder.ID, matchOrder.ID)
 	}
 
-	// Index each order by its locked token.
-	orderForLeg := map[TokenID]*Order{}
-	for _, ord := range orders {
-		if len(ord.InputCashIDs) == 0 {
-			return fmt.Errorf("order %s has no locked input cash", ord.ID)
-		}
-		firstCash, err := ot.Account.GetCash(ord.InputCashIDs[0])
-		if err != nil {
-			return fmt.Errorf("locked cash %s not found: %w", ord.InputCashIDs[0], err)
-		}
-		orderForLeg[firstCash.Token] = ord
+	// Validate the larger leg fields.
+	if largerLeg.MyMatchCommitment == "" || largerLeg.OtherMatchCommitment == "" || largerLeg.ChangeCommitment == "" {
+		return fmt.Errorf("larger leg missing required commitment field(s)")
+	}
+	if largerLeg.Price != expectedPrice {
+		return fmt.Errorf("larger leg price %d != order price %d", largerLeg.Price, expectedPrice)
+	}
+	isT2 := largerLeg.Token == largerOrder.Subject.Token2
+	if largerLeg.IsToken2Sender != isT2 {
+		return fmt.Errorf("larger leg IsToken2Sender %v inconsistent with token", largerLeg.IsToken2Sender)
 	}
 
-	// Verify each leg's ZK proof and collect cross-leg commitments.
-	var (
-		largerLeg, smallerLeg                *SettleTokenLeg
-		largerOrder, smallerOrder            *Order
-		largerCounterpartyMatchCommitmentHex string
-		smallerOwnMatchCommitmentHex         string
-	)
-	for i := range legs {
-		leg := &legs[i]
-		ord, ok := orderForLeg[leg.Token]
-		if !ok {
-			return fmt.Errorf("leg token %s does not match either order's locked token", leg.Token)
-		}
-
-		switch leg.Side {
-		case SideLarger:
-			if leg.MyMatchCommitment == "" || leg.OtherMatchCommitment == "" || leg.ChangeCommitment == "" {
-				return fmt.Errorf("larger leg %s missing required commitment field(s)", leg.Token)
-			}
-			if leg.Price != expectedPrice {
-				return fmt.Errorf("larger leg %s price %d != order price %d", leg.Token, leg.Price, expectedPrice)
-			}
-			isT2 := leg.Token == ord.Subject.Token2
-			if leg.IsToken2Sender != isT2 {
-				return fmt.Errorf("larger leg %s IsToken2Sender %v inconsistent with token", leg.Token, leg.IsToken2Sender)
-			}
-			signals, err := buildSettleLargerPublicSignals(leg, ord, ot.Account)
-			if err != nil {
-				return fmt.Errorf("larger leg %s public signals: %w", leg.Token, err)
-			}
-			if err := VerifyGroth16(ot.settleLargerVK, leg.ZkProof, signals); err != nil {
-				return fmt.Errorf("larger leg %s proof verification failed: %w", leg.Token, err)
-			}
-			if largerLeg != nil {
-				return fmt.Errorf("two larger legs but the design requires at most one")
-			}
-			largerLeg = leg
-			largerOrder = ord
-			largerCounterpartyMatchCommitmentHex = leg.OtherMatchCommitment
-
-		case SideSmaller:
-			if leg.MatchCommitment == "" {
-				return fmt.Errorf("smaller leg %s missing match_commitment", leg.Token)
-			}
-			signals, err := buildSettleSmallerPublicSignals(leg, ord, ot.Account)
-			if err != nil {
-				return fmt.Errorf("smaller leg %s public signals: %w", leg.Token, err)
-			}
-			if err := VerifyGroth16(ot.settleSmallerVK, leg.ZkProof, signals); err != nil {
-				return fmt.Errorf("smaller leg %s proof verification failed: %w", leg.Token, err)
-			}
-			if smallerLeg != nil {
-				return fmt.Errorf("two smaller legs but each side must own one token group")
-			}
-			smallerLeg = leg
-			smallerOrder = ord
-			smallerOwnMatchCommitmentHex = leg.MatchCommitment
-		}
+	// Verify the larger leg's ZK proof.
+	signals, err := buildSettleLargerPublicSignals(largerLeg, largerOrder, ot.Account)
+	if err != nil {
+		return fmt.Errorf("larger leg public signals: %w", err)
+	}
+	if err := VerifyGroth16(ot.settleLargerVK, largerLeg.ZkProof, signals); err != nil {
+		return fmt.Errorf("larger leg proof verification failed: %w", err)
 	}
 
-	// Cross-leg consistency check.
-	if largerLeg != nil && smallerLeg != nil {
-		if largerCounterpartyMatchCommitmentHex != smallerOwnMatchCommitmentHex {
-			return fmt.Errorf("cross-leg mismatch: larger.other_match_commitment != smaller.match_commitment")
-		}
-	} else {
-		// Both legs are "larger" (exact-fill dual-larger case).
-		if legs[0].Side != SideLarger || legs[1].Side != SideLarger {
-			return fmt.Errorf("legs must be one larger + one smaller, or both larger")
-		}
-		if legs[0].MyMatchCommitment != legs[1].OtherMatchCommitment ||
-			legs[1].MyMatchCommitment != legs[0].OtherMatchCommitment {
-			return fmt.Errorf("dual-larger cross-leg mismatch: my/other commitments must mirror across legs")
-		}
+	// Determine the smaller party's locked token.
+	if len(smallerOrder.InputCashIDs) == 0 {
+		return fmt.Errorf("order %s has no locked input cash", smallerOrder.ID)
 	}
-	_, _ = largerOrder, smallerOrder
+	smallerFirstCash, err := ot.Account.GetCash(smallerOrder.InputCashIDs[0])
+	if err != nil {
+		return fmt.Errorf("locked cash %s not found: %w", smallerOrder.InputCashIDs[0], err)
+	}
+	smallerToken := smallerFirstCash.Token
 
-	// All proofs verified — mutate state.
+	// All verification passed — mutate state.
 	settleBy := fmt.Sprintf("settle:%s:%s", myOrder.ID[:8], matchOrder.ID[:8])
 	if err := ot.Account.SpendCash(myOrder.InputCashIDs, settleBy); err != nil {
 		return fmt.Errorf("failed to spend cash for order %s: %w", myOrder.ID, err)
@@ -516,38 +605,52 @@ func (ot *OrderBook) SettleOrder(ctx *context.WriteContext) error {
 		return fmt.Errorf("failed to spend cash for order %s: %w", matchOrder.ID, err)
 	}
 
-	// Mint outputs per leg: counterparty receive + (larger only) change.
-	for i := range legs {
-		leg := &legs[i]
-		recvCash := &Cash{
-			ID:      computeCashID(leg.RecvPubkey, leg.Token, CipherText(leg.RecvCommitment)),
-			Pubkey:  leg.RecvPubkey,
-			Token:   leg.Token,
-			Amount:  CipherText(leg.RecvCommitment),
-			ZkProof: leg.ZkProof,
+	// Mint recv from larger leg: smaller party receives larger's token.
+	recvForSmaller := &Cash{
+		ID:      computeCashID(largerLeg.RecvPubkey, largerLeg.Token, CipherText(largerLeg.RecvCommitment)),
+		Pubkey:  largerLeg.RecvPubkey,
+		Token:   largerLeg.Token,
+		Amount:  CipherText(largerLeg.RecvCommitment),
+		ZkProof: largerLeg.ZkProof,
+		Status:  Active,
+	}
+	if err := ot.Account.CreateCash(recvForSmaller); err != nil {
+		return fmt.Errorf("failed to create recv cash for smaller party: %w", err)
+	}
+
+	// Mint change from larger leg (if non-zero).
+	if largerLeg.ChangeCommitment != PoseidonZeroCommitmentHex {
+		changePubkey := largerLeg.ChangePubkey
+		if changePubkey == "" {
+			changePubkey = largerOrder.Pubkey
+		}
+		changeCash := &Cash{
+			ID:      computeCashID(changePubkey, largerLeg.Token, CipherText(largerLeg.ChangeCommitment)),
+			Pubkey:  changePubkey,
+			Token:   largerLeg.Token,
+			Amount:  CipherText(largerLeg.ChangeCommitment),
+			ZkProof: largerLeg.ZkProof,
 			Status:  Active,
 		}
-		if err := ot.Account.CreateCash(recvCash); err != nil {
-			return fmt.Errorf("failed to create recv cash for leg %s: %w", leg.Token, err)
+		if err := ot.Account.CreateCash(changeCash); err != nil {
+			return fmt.Errorf("failed to create change cash: %w", err)
 		}
-		if leg.Side == SideLarger && leg.ChangeCommitment != PoseidonZeroCommitmentHex {
-			senderOrder := orderForLeg[leg.Token]
-			changePubkey := leg.ChangePubkey
-			if changePubkey == "" {
-				changePubkey = senderOrder.Pubkey
-			}
-			changeCash := &Cash{
-				ID:      computeCashID(changePubkey, leg.Token, CipherText(leg.ChangeCommitment)),
-				Pubkey:  changePubkey,
-				Token:   leg.Token,
-				Amount:  CipherText(leg.ChangeCommitment),
-				ZkProof: leg.ZkProof,
-				Status:  Active,
-			}
-			if err := ot.Account.CreateCash(changeCash); err != nil {
-				return fmt.Errorf("failed to create change cash for leg %s: %w", leg.Token, err)
-			}
-		}
+	}
+
+	// Mint recv for larger party from smaller's token. The commitment is the
+	// larger leg's `OtherMatchCommitment`, which is proven correct by the
+	// larger party's ZK proof. The larger party knows the match random
+	// (derived via ECDH) so they can later spend this cash.
+	recvForLarger := &Cash{
+		ID:      computeCashID(largerOrder.Pubkey, smallerToken, CipherText(largerLeg.OtherMatchCommitment)),
+		Pubkey:  largerOrder.Pubkey,
+		Token:   smallerToken,
+		Amount:  CipherText(largerLeg.OtherMatchCommitment),
+		ZkProof: largerLeg.ZkProof,
+		Status:  Active,
+	}
+	if err := ot.Account.CreateCash(recvForLarger); err != nil {
+		return fmt.Errorf("failed to create recv cash for larger party: %w", err)
 	}
 
 	// Mark both orders as Done.
@@ -558,9 +661,9 @@ func (ot *OrderBook) SettleOrder(ctx *context.WriteContext) error {
 		return fmt.Errorf("failed to settle order %s: %w", matchOrder.ID, err)
 	}
 
-	// Clean up pending submissions.
-	_ = ot.DeleteSubmission(req.OrderID)
-	_ = ot.DeleteSubmission(req.MatchOrderID)
+	// Clean up pending settle submissions.
+	_ = ot.DeleteSettleSubmission(req.OrderID)
+	_ = ot.DeleteSettleSubmission(req.MatchOrderID)
 
 	ctx.EmitStringEvent("orders settled: %s <-> %s", myOrder.ID, matchOrder.ID)
 	return nil
@@ -606,28 +709,6 @@ func buildSettleLargerPublicSignals(leg *SettleTokenLeg, ord *Order, acc *Accoun
 	}
 	signals = append(signals, inputHashesDec...)
 	signals = append(signals, changeDec, recvDec)
-	return signals, nil
-}
-
-// buildSettleSmallerPublicSignals lays out 4 signals matching
-// settle_smaller.circom's `public [match_commitment, input_hashes,
-// counterparty_recv_commitment]`.
-func buildSettleSmallerPublicSignals(leg *SettleTokenLeg, ord *Order, acc *Account) ([]string, error) {
-	matchDec, err := HexToDecimal(leg.MatchCommitment)
-	if err != nil {
-		return nil, err
-	}
-	recvDec, err := HexToDecimal(leg.RecvCommitment)
-	if err != nil {
-		return nil, err
-	}
-	inputHashesDec, err := lockedInputHashesPadded(ord, acc, 2, leg.Token)
-	if err != nil {
-		return nil, err
-	}
-	signals := []string{matchDec}
-	signals = append(signals, inputHashesDec...)
-	signals = append(signals, recvDec)
 	return signals, nil
 }
 

@@ -1,0 +1,36 @@
+# Core Tripod Configuration — test mode (no ZK verification)
+# VK paths are left empty so VerifyGroth16 is skipped.
+
+[orderbook]
+db_path = "data/orders.db"
+
+[account]
+db_path = "data/accounts.db"
+
+# Genesis cash — same as core.toml
+# alice pubkey: 3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb
+# bob   pubkey: 175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b
+
+[[account.genesis_cash]]
+id     = "f8c0ea0222c6acba512cc9ed613b64e3"
+pubkey = "3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb"
+token  = "ETH"
+amount = "06fd5d63a99250c4b5c8dbd7e9d84eed86fd13f5108d10323e5c278fba524582"
+
+[[account.genesis_cash]]
+id     = "68ff80c3b73a39798be67087fb9f97ed"
+pubkey = "3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb"
+token  = "USDT"
+amount = "045f937abf56c53ba43116be5ad32a1c52a08329fe08fb9b57cefda4d9c5127b"
+
+[[account.genesis_cash]]
+id     = "4e88dd94be4154a37da7dd5b9d06a4a1"
+pubkey = "175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b"
+token  = "ETH"
+amount = "165fa4d0dad9b08c83ebea6362e22dbf373b3d734a9dd1b73df787ec975f221b"
+
+[[account.genesis_cash]]
+id     = "ddada5eb9484fa322a931d53bb945431"
+pubkey = "175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b"
+token  = "USDT"
+amount = "14794eafad293b03995020d7214028001c98cd66a6c15b89dc16fc577eec0bd4"

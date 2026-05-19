@@ -224,6 +224,7 @@ pub fn sample_orders() -> Vec<Order> {
             block_height: 0,
             status,
             match_order: None,
+            is_smaller: false,
         }
     };
 

@@ -1533,6 +1533,8 @@ name = "invisibook-cli"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "curve25519-dalek",
+ "ed25519-dalek",
  "hex",
  "invisibook-lib",
  "mpc",
@@ -1542,6 +1544,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "x25519-dalek",
  "yu-sdk",
  "zk",
 ]
@@ -3672,6 +3675,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d3b856452298f68a5879e3901918bac5d753ca9fa4be8a983a37a3d25dabf0a"
 dependencies = [
  "byteorder",
+]
+
+[[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core 0.6.4",
+ "serde",
+ "zeroize",
 ]
 
 [[package]]

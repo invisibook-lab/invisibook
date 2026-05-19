@@ -120,7 +120,7 @@ func TestFullOrderLifecycle(t *testing.T) {
 	chainDir := ".."
 	os.RemoveAll(chainDir + "/data")
 
-	cmd := exec.Command("./invisibook")
+	cmd := exec.Command("./invisibook", "--core-config", "cfg/core_test.toml")
 	cmd.Dir = chainDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -300,71 +300,123 @@ func TestFullOrderLifecycle(t *testing.T) {
 		t.Fatalf("expected buy order status Matched(1), got %d", buyOrders[0].Status)
 	}
 
-	// ═══════════════════ Step 4: Settle the matched pair (two-phase) ═══════════════════
-	t.Log("=== Step 4a: Alice submits her settle (first party) ===")
+	// ═══════════════════ Step 4: CompareOrders (MPC phase) ═══════════════════
+	t.Log("=== Step 4a: Alice submits CompareOrders (first party) ===")
 
-	// Build test MPC shares that satisfy:
-	//   (mac_A + mac_B) == (delta_A + delta_B) * (share_A + share_B) mod P
-	// We use small known values for testing.
+	// Build test MPC shares where cmp=1 (buy >= sell, sell is smaller).
 	aliceMpcShare, bobMpcShare := buildTestMpcShares(t)
 
-	// Alice's settle submission (sell side = sends ETH)
-	err = wrCall("orderbook", "SettleOrder", map[string]any{
+	// Alice's compare submission (sell side)
+	err = wrCall("orderbook", "CompareOrders", map[string]any{
 		"order_id":       string(sellOrderID),
 		"match_order_id": string(buyOrderID),
-		"leg": map[string]any{
-			"side":             "smaller",
-			"token":            "ETH",
-			"match_commitment": "0000000000000000000000000000000000000000000000000000000000001234",
-			"recv_commitment":  "0000000000000000000000000000000000000000000000000000000000005678",
-			"recv_pubkey":      alicePubkey,
-			"zk_proof":         "test-proof-skip",
-		},
-		"mpc_share": aliceMpcShare,
+		"mpc_share":      aliceMpcShare,
 	})
 	if err != nil {
-		t.Fatalf("SettleOrder (alice) failed: %v", err)
+		t.Fatalf("CompareOrders (alice) failed: %v", err)
 	}
 	waitBlock()
 
 	// Verify orders are still Matched after first submission
 	sellAfterFirst := queryOrders(t, sellOrderID)
 	buyAfterFirst := queryOrders(t, buyOrderID)
-	t.Logf("  sell order status after first submit: %d", sellAfterFirst[0].Status)
-	t.Logf("  buy  order status after first submit: %d", buyAfterFirst[0].Status)
+	t.Logf("  sell order status after first compare: %d", sellAfterFirst[0].Status)
+	t.Logf("  buy  order status after first compare: %d", buyAfterFirst[0].Status)
 	if sellAfterFirst[0].Status != 1 { // still Matched
-		t.Fatalf("expected sell order still Matched(1) after first submit, got %d", sellAfterFirst[0].Status)
+		t.Fatalf("expected sell order still Matched(1) after first compare, got %d", sellAfterFirst[0].Status)
 	}
 	if buyAfterFirst[0].Status != 1 { // still Matched
-		t.Fatalf("expected buy order still Matched(1) after first submit, got %d", buyAfterFirst[0].Status)
+		t.Fatalf("expected buy order still Matched(1) after first compare, got %d", buyAfterFirst[0].Status)
 	}
 
-	t.Log("=== Step 4b: Bob submits his settle (second party → triggers settlement) ===")
+	t.Log("=== Step 4b: Bob submits CompareOrders (second party → triggers comparison) ===")
 
-	// Bob's settle submission (buy side = sends USDT)
-	err = wrCall("orderbook", "SettleOrder", map[string]any{
+	// Bob's compare submission (buy side)
+	err = wrCall("orderbook", "CompareOrders", map[string]any{
+		"order_id":       string(buyOrderID),
+		"match_order_id": string(sellOrderID),
+		"mpc_share":      bobMpcShare,
+	})
+	if err != nil {
+		t.Fatalf("CompareOrders (bob) failed: %v", err)
+	}
+	waitBlock()
+
+	// Verify both orders are now Settling (status=5)
+	sellAfterCompare := queryOrders(t, sellOrderID)
+	buyAfterCompare := queryOrders(t, buyOrderID)
+	t.Logf("  sell order status after compare: %d, is_smaller: %v",
+		sellAfterCompare[0].Status, sellAfterCompare[0].IsSmaller)
+	t.Logf("  buy  order status after compare: %d, is_smaller: %v",
+		buyAfterCompare[0].Status, buyAfterCompare[0].IsSmaller)
+
+	if sellAfterCompare[0].Status != 5 { // Settling
+		t.Fatalf("expected sell order status Settling(5), got %d", sellAfterCompare[0].Status)
+	}
+	if buyAfterCompare[0].Status != 5 { // Settling
+		t.Fatalf("expected buy order status Settling(5), got %d", buyAfterCompare[0].Status)
+	}
+	// cmp=1 means buy>=sell, so sell side is smaller
+	if !sellAfterCompare[0].IsSmaller {
+		t.Fatalf("expected sell order IsSmaller=true (cmp=1 means sell is smaller)")
+	}
+	if buyAfterCompare[0].IsSmaller {
+		t.Fatalf("expected buy order IsSmaller=false (cmp=1 means buy is larger)")
+	}
+
+	// ═══════════════════ Step 5: SettleOrders (ZK phase) ═══════════════════
+	t.Log("=== Step 5a: Alice submits SettleOrders (sell=smaller, no leg) ===")
+
+	// Alice's settle submission (sell side = smaller, no ZK proof required)
+	err = wrCall("orderbook", "SettleOrders", map[string]any{
+		"order_id":       string(sellOrderID),
+		"match_order_id": string(buyOrderID),
+	})
+	if err != nil {
+		t.Fatalf("SettleOrders (alice) failed: %v", err)
+	}
+	waitBlock()
+
+	// Verify orders are still Settling after first settle submission
+	sellAfterSettle1 := queryOrders(t, sellOrderID)
+	buyAfterSettle1 := queryOrders(t, buyOrderID)
+	t.Logf("  sell order status after first settle: %d", sellAfterSettle1[0].Status)
+	t.Logf("  buy  order status after first settle: %d", buyAfterSettle1[0].Status)
+	if sellAfterSettle1[0].Status != 5 { // still Settling
+		t.Fatalf("expected sell order still Settling(5) after first settle, got %d", sellAfterSettle1[0].Status)
+	}
+	if buyAfterSettle1[0].Status != 5 { // still Settling
+		t.Fatalf("expected buy order still Settling(5) after first settle, got %d", buyAfterSettle1[0].Status)
+	}
+
+	t.Log("=== Step 5b: Bob submits SettleOrders (buy=larger, triggers settlement) ===")
+
+	// Bob's settle submission (buy side = larger).
+	// recv_commitment/recv_pubkey = what the smaller party (Alice) receives in USDT.
+	// other_match_commitment = what the larger party (Bob) receives from smaller's
+	// token (ETH), minted by the chain using this commitment.
+	err = wrCall("orderbook", "SettleOrders", map[string]any{
 		"order_id":       string(buyOrderID),
 		"match_order_id": string(sellOrderID),
 		"leg": map[string]any{
 			"side":                   "larger",
 			"token":                  "USDT",
 			"my_match_commitment":    "0000000000000000000000000000000000000000000000000000000000001234",
-			"other_match_commitment": "0000000000000000000000000000000000000000000000000000000000001234",
+			"other_match_commitment": "0000000000000000000000000000000000000000000000000000000000005678",
 			"price":                  3500,
 			"is_token2_sender":       true,
 			"change_commitment":      "2098f5fb9e239eab3ceac3f27b81e481dc3124d55ffed523a839ee8446b64864",
 			"recv_commitment":        "0000000000000000000000000000000000000000000000000000000000009abc",
-			"recv_pubkey":            bobPubkey,
+			"recv_pubkey":            alicePubkey,
 			"zk_proof":               "test-proof-skip",
 		},
-		"mpc_share": bobMpcShare,
 	})
 	if err != nil {
-		t.Fatalf("SettleOrder (bob) failed: %v", err)
+		t.Fatalf("SettleOrders (bob) failed: %v", err)
 	}
 	waitBlock()
 
-	// Verify orders are Done after second submission
+	// Verify orders are Done after second settle submission
 	sellFinal := queryOrders(t, sellOrderID)
 	buyFinal := queryOrders(t, buyOrderID)
 	t.Logf("  sell order final status: %d", sellFinal[0].Status)
@@ -377,8 +429,8 @@ func TestFullOrderLifecycle(t *testing.T) {
 		t.Fatalf("expected buy order status Done(2), got %d", buyFinal[0].Status)
 	}
 
-	// ═══════════════════ Step 5: Verify final balances ═══════════════════
-	t.Log("=== Step 5: Verify final balances ===")
+	// ═══════════════════ Step 6: Verify final balances ═══════════════════
+	t.Log("=== Step 6: Verify final balances ===")
 
 	// Bob should now have ETH: genesis(1000) + settlement(1000) = 2 cash items
 	bobETHFinal := getAccount(t, bobPubkey, "ETH")
@@ -457,6 +509,7 @@ type OrderItem struct {
 	MatchOrder   string   `json:"match_order"`
 	Pubkey       string   `json:"pubkey"`
 	InputCashIDs []string `json:"input_cash_ids"`
+	IsSmaller    bool     `json:"is_smaller"`
 }
 
 type QueryOrdersResp struct {
@@ -481,32 +534,32 @@ func queryOrders(t *testing.T, id core.OrderID) []OrderItem {
 
 // buildTestMpcShares constructs two MPC share maps that satisfy the SPDZ MAC
 // equation: (mac_A + mac_B) == (delta_A + delta_B) * (share_A + share_B).
-// Uses small known values so we can verify the chain's MAC checker works.
+// Uses small known values where cmp=1 (buy >= sell, sell is smaller).
 func buildTestMpcShares(t *testing.T) (map[string]string, map[string]string) {
 	t.Helper()
 
-	// Pick arbitrary small values in decimal (all mod BN254 scalar field).
 	// delta_A = 7, delta_B = 11 → delta = 18
-	// cmp_share_A = 3, cmp_share_B = 5 → cmp = 8
-	// cmp_mac_A + cmp_mac_B must equal delta * cmp = 18 * 8 = 144
-	// Let cmp_mac_A = 44, cmp_mac_B = 100
 	//
-	// r_smaller_share_A = 2, r_smaller_share_B = 9 → r_smaller = 11
-	// r_smaller_mac_A + r_smaller_mac_B must equal delta * r_smaller = 18 * 11 = 198
-	// Let r_smaller_mac_A = 98, r_smaller_mac_B = 100
+	// cmp: share_A = 0, share_B = 1 → cmp = 1 (buy >= sell, sell is smaller)
+	// cmp_mac_A + cmp_mac_B = delta * cmp = 18 * 1 = 18
+	// Let cmp_mac_A = 8, cmp_mac_B = 10
+	//
+	// r_smaller: share_A = 42, share_B = 0 → r_smaller = 42
+	// r_smaller_mac_A + r_smaller_mac_B = delta * r_smaller = 18 * 42 = 756
+	// Let r_smaller_mac_A = 356, r_smaller_mac_B = 400
 	alice := map[string]string{
-		"cmp_share":     "3",
-		"cmp_mac":       "44",
-		"r_smaller_share": "2",
-		"r_smaller_mac":   "98",
-		"mac_key_share": "7",
+		"cmp_share":        "0",
+		"cmp_mac":          "8",
+		"r_smaller_share":  "42",
+		"r_smaller_mac":    "356",
+		"mac_key_share":    "7",
 	}
 	bob := map[string]string{
-		"cmp_share":     "5",
-		"cmp_mac":       "100",
-		"r_smaller_share": "9",
-		"r_smaller_mac":   "100",
-		"mac_key_share": "11",
+		"cmp_share":        "1",
+		"cmp_mac":          "10",
+		"r_smaller_share":  "0",
+		"r_smaller_mac":    "400",
+		"mac_key_share":    "11",
 	}
 	return alice, bob
 }

@@ -208,6 +208,7 @@ fn main() -> ExitCode {
         block_height: 0,
         status: OrderStatus::Pending,
         match_order: None,
+        is_smaller: false,
     };
 
     // Generate split proof iff we have a change output.

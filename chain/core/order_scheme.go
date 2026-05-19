@@ -25,6 +25,7 @@ type OrderScheme struct {
 	BlockHeight  uint32 `gorm:"column:block_height"`
 	Status       int    `gorm:"column:status;index"`
 	MatchOrder   string `gorm:"column:match_order"`
+	IsSmaller int `gorm:"column:is_smaller;default:0"` // 0=false, 1=true
 }
 
 // TableName returns the SQL table name used by GORM for OrderScheme rows.
@@ -32,16 +33,31 @@ func (OrderScheme) TableName() string {
 	return "orders"
 }
 
+// ────────────────────── Compare Submission SQL Model ──────────────────────
+
+// CompareSubmissionScheme stores a single party's pending MPC share submission
+// until the counterparty submits theirs. Once both arrive, the chain verifies
+// the MAC, reconstructs cmp and r_smaller, then deletes both rows.
+type CompareSubmissionScheme struct {
+	OrderID      string `gorm:"primaryKey;column:order_id"`
+	MatchOrderID string `gorm:"column:match_order_id;index"`
+	MpcShareJSON string `gorm:"column:mpc_share_json"`
+}
+
+// TableName returns the SQL table name used by GORM for CompareSubmissionScheme rows.
+func (CompareSubmissionScheme) TableName() string {
+	return "compare_submissions"
+}
+
 // ────────────────────── Settle Submission SQL Model ──────────────────────
 
-// SettleSubmissionScheme stores a single party's pending settle submission
-// until the counterparty submits theirs. Once both sides arrive, the chain
-// runs verification and settlement, then deletes both rows.
+// SettleSubmissionScheme stores a single party's pending ZK settle leg
+// until the counterparty submits theirs. Once both arrive, the chain
+// verifies proofs, transfers cash, and marks both orders Done.
 type SettleSubmissionScheme struct {
 	OrderID      string `gorm:"primaryKey;column:order_id"`
 	MatchOrderID string `gorm:"column:match_order_id;index"`
 	LegJSON      string `gorm:"column:leg_json"`
-	MpcShareJSON string `gorm:"column:mpc_share_json"`
 }
 
 // TableName returns the SQL table name used by GORM for SettleSubmissionScheme rows.
@@ -58,7 +74,7 @@ func InitOrderDB(dsn string) *gorm.DB {
 	if err != nil {
 		panic(fmt.Sprintf("failed to open orders database: %v", err))
 	}
-	if err := db.AutoMigrate(&OrderScheme{}, &SettleSubmissionScheme{}); err != nil {
+	if err := db.AutoMigrate(&OrderScheme{}, &CompareSubmissionScheme{}, &SettleSubmissionScheme{}); err != nil {
 		panic(fmt.Sprintf("failed to migrate orders table: %v", err))
 	}
 	return db
@@ -184,6 +200,10 @@ func orderToScheme(o *Order) *OrderScheme {
 			feeJSON = string(b)
 		}
 	}
+	isSmaller := 0
+	if o.IsSmaller {
+		isSmaller = 1
+	}
 	return &OrderScheme{
 		ID:           string(o.ID),
 		Type:         int(o.Type),
@@ -196,7 +216,8 @@ func orderToScheme(o *Order) *OrderScheme {
 		HandlingFee:  feeJSON,
 		BlockHeight:  o.BlockHeight,
 		Status:       int(o.Status),
-		MatchOrder:   string(o.MatchOrder),
+		MatchOrder: string(o.MatchOrder),
+		IsSmaller:  isSmaller,
 	}
 }
 
@@ -232,7 +253,8 @@ func schemeToOrder(s *OrderScheme) *Order {
 		HandlingFee:  fees,
 		BlockHeight:  s.BlockHeight,
 		MatchOrder:   OrderID(s.MatchOrder),
-		Status:       OrderStat(s.Status),
+		Status:    OrderStat(s.Status),
+		IsSmaller: s.IsSmaller == 1,
 	}
 }
 
@@ -245,16 +267,51 @@ func schemesToOrders(rows []OrderScheme) []*Order {
 	return orders
 }
 
-// ────────────────────── Settle Submission CRUD ──────────────────────
+// ────────────────────── Order Comparison Update ──────────────────────
 
-// SaveSubmission inserts a pending settle submission row.
-func (ot *OrderBook) SaveSubmission(sub *SettleSubmissionScheme) error {
+// UpdateOrderComparison sets the IsSmaller field of an order.
+func (ot *OrderBook) UpdateOrderComparison(id OrderID, isSmaller bool) error {
+	isSm := 0
+	if isSmaller {
+		isSm = 1
+	}
+	return ot.db.Model(&OrderScheme{}).Where("id = ?", string(id)).
+		Update("is_smaller", isSm).Error
+}
+
+// ────────────────────── Compare Submission CRUD ──────────────────────
+
+// SaveCompareSubmission inserts a pending compare submission row.
+func (ot *OrderBook) SaveCompareSubmission(sub *CompareSubmissionScheme) error {
 	return ot.db.Create(sub).Error
 }
 
-// GetSubmission retrieves a pending settle submission by order ID.
-// Returns nil if not found.
-func (ot *OrderBook) GetSubmission(orderID OrderID) (*SettleSubmissionScheme, error) {
+// GetCompareSubmission retrieves a pending compare submission by order ID.
+// Returns nil, gorm.ErrRecordNotFound if not found.
+func (ot *OrderBook) GetCompareSubmission(orderID OrderID) (*CompareSubmissionScheme, error) {
+	var row CompareSubmissionScheme
+	err := ot.db.First(&row, "order_id = ?", string(orderID)).Error
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+// DeleteCompareSubmission removes a pending compare submission by order ID.
+func (ot *OrderBook) DeleteCompareSubmission(orderID OrderID) error {
+	return ot.db.Where("order_id = ?", string(orderID)).Delete(&CompareSubmissionScheme{}).Error
+}
+
+// ────────────────────── Settle Submission CRUD ──────────────────────
+
+// SaveSettleSubmission inserts a pending settle submission row.
+func (ot *OrderBook) SaveSettleSubmission(sub *SettleSubmissionScheme) error {
+	return ot.db.Create(sub).Error
+}
+
+// GetSettleSubmission retrieves a pending settle submission by order ID.
+// Returns nil, gorm.ErrRecordNotFound if not found.
+func (ot *OrderBook) GetSettleSubmission(orderID OrderID) (*SettleSubmissionScheme, error) {
 	var row SettleSubmissionScheme
 	err := ot.db.First(&row, "order_id = ?", string(orderID)).Error
 	if err != nil {
@@ -263,7 +320,7 @@ func (ot *OrderBook) GetSubmission(orderID OrderID) (*SettleSubmissionScheme, er
 	return &row, nil
 }
 
-// DeleteSubmission removes a pending settle submission by order ID.
-func (ot *OrderBook) DeleteSubmission(orderID OrderID) error {
+// DeleteSettleSubmission removes a pending settle submission by order ID.
+func (ot *OrderBook) DeleteSettleSubmission(orderID OrderID) error {
 	return ot.db.Where("order_id = ?", string(orderID)).Delete(&SettleSubmissionScheme{}).Error
 }

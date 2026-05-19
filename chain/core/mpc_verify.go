@@ -89,6 +89,55 @@ func verifyOneValue(
 	return nil
 }
 
+// ReconstructCmp reconstructs cmp = share_A + share_B (mod P).
+// Returns the reconstructed Fr element. The caller must verify cmp is 0 or 1.
+func ReconstructCmp(shareA, shareB *MpcShareData) (fr.Element, error) {
+	sA, err := parseFr(shareA.CmpShare, "cmp.share_A")
+	if err != nil {
+		return fr.Element{}, err
+	}
+	sB, err := parseFr(shareB.CmpShare, "cmp.share_B")
+	if err != nil {
+		return fr.Element{}, err
+	}
+	var result fr.Element
+	result.Add(&sA, &sB)
+	return result, nil
+}
+
+// ValidateCmp checks that the reconstructed cmp value is 0 or 1.
+func ValidateCmp(cmp *fr.Element) error {
+	var zero, one fr.Element
+	zero.SetZero()
+	one.SetOne()
+	if *cmp != zero && *cmp != one {
+		return fmt.Errorf("reconstructed cmp is neither 0 nor 1: %s", cmp.String())
+	}
+	return nil
+}
+
+// ReconstructRSmaller reconstructs r_smaller = share_A + share_B (mod P).
+// Returns hex string of the Fr element (64-char, big-endian).
+func ReconstructRSmaller(shareA, shareB *MpcShareData) (string, error) {
+	sA, err := parseFr(shareA.RSmallerShare, "r_smaller.share_A")
+	if err != nil {
+		return "", err
+	}
+	sB, err := parseFr(shareB.RSmallerShare, "r_smaller.share_B")
+	if err != nil {
+		return "", err
+	}
+	var result fr.Element
+	result.Add(&sA, &sB)
+	return FrToHex(&result), nil
+}
+
+// FrToHex converts a BN254 Fr element to 64-char hex (32 bytes, big-endian).
+func FrToHex(e *fr.Element) string {
+	b := e.Bytes()
+	return fmt.Sprintf("%064x", b[:])
+}
+
 // parseFr parses a decimal string into a BN254 scalar field element.
 func parseFr(s, label string) (fr.Element, error) {
 	var e fr.Element
