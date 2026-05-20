@@ -2499,7 +2499,9 @@ dependencies = [
  "dioxus",
  "hex",
  "invisibook-lib",
+ "serde_json",
  "tokio",
+ "zk",
 ]
 
 [[package]]

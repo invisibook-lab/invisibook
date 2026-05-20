@@ -3,10 +3,16 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 
-use invisibook_lib::cash_store::CashStore;
+use invisibook_lib::cash_store::{CashRecord, CashStore};
 use invisibook_lib::chain::ChainClient;
 use invisibook_lib::orderbook;
 use invisibook_lib::types::*;
+#[cfg(not(target_os = "android"))]
+use zk::{
+    setup::dev_setup_snarkjs,
+    test_circuit::TestCircuitHandle,
+    wallet::{SplitWitness, prove_split},
+};
 
 use crate::constants::TOKENS;
 
@@ -110,12 +116,26 @@ pub fn TradeForm(
 
         let pubkey = my_address.read().clone();
 
-        // Smart cash selection
-        let (input_cash_ids, cash_change) = {
+        // Smart cash selection — also collect CashRecords for split proof.
+        let (input_cash_ids, input_records, cash_change) = {
             let store = cash_store.read();
             match orderbook::select_cash(store.records(), &input_token, total) {
-                orderbook::CashSelection::Exact(ids) => (ids, None),
+                orderbook::CashSelection::Exact(ids) => {
+                    let recs: Vec<CashRecord> = store
+                        .records()
+                        .iter()
+                        .filter(|r| ids.contains(&r.cash_id))
+                        .cloned()
+                        .collect();
+                    (ids, recs, None)
+                }
                 orderbook::CashSelection::WithChange { cash_ids, change_amount } => {
+                    let recs: Vec<CashRecord> = store
+                        .records()
+                        .iter()
+                        .filter(|r| cash_ids.contains(&r.cash_id))
+                        .cloned()
+                        .collect();
                     let (change_cipher, _change_amt, change_random) =
                         orderbook::encrypt_amount_with_info(&change_amount.to_string());
                     let change_cash_id = orderbook::compute_cash_id(&pubkey, &input_token, &change_cipher);
@@ -123,14 +143,20 @@ pub fn TradeForm(
                         cash_id: change_cash_id.clone(),
                         amount: change_cipher,
                     };
-                    (cash_ids, Some((change, change_cash_id, change_amount, _change_amt, change_random)))
+                    (cash_ids, recs, Some((change, change_cash_id, change_amount, _change_amt, change_random)))
                 }
                 orderbook::CashSelection::Insufficient => {
+                    eprintln!("[trade] insufficient {} balance (need {})", input_token, total);
                     message.set(Some((format!("✗ Insufficient {} balance (need {})", input_token, total), true)));
                     return;
                 }
             }
         };
+
+        if input_records.len() > 2 {
+            message.set(Some(("✗ Split circuit caps at 2 inputs — please consolidate first".into(), true)));
+            return;
+        }
 
         let order_id = orderbook::compute_order_id(&input_cash_ids);
 
@@ -138,15 +164,18 @@ pub fn TradeForm(
             token1: t1.clone(),
             token2: t2.clone(),
         };
-        let amount = orderbook::encrypt_amount(&amount_str);
+        // Build the locked-amount commitment and remember its random for the
+        // split proof witness.
+        let (locked_cipher, _, locked_random_hex) =
+            orderbook::encrypt_amount_with_info(&amount_str);
 
         let order = Order {
             id: order_id,
             trade_type,
             subject,
             price: Some(price),
-            amount,
-            pubkey,
+            amount: locked_cipher.clone(),
+            pubkey: pubkey.clone(),
             input_cash_ids: input_cash_ids.clone(),
             handling_fee: vec![fee.clone()],
             block_height: 0,
@@ -162,24 +191,48 @@ pub fn TradeForm(
             return;
         };
 
-        // Extract change info for the async block
-        let change_ref = cash_change.as_ref().map(|(c, _, _, _, _)| c.clone());
+        // Generate split proof if we have a change output.
+        #[cfg(not(target_os = "android"))]
+        let (change_ref, split_proof) = if let Some((ref change, _, change_amount, _, ref change_random_hex)) = cash_change {
+            let proof = match generate_split_proof(
+                &input_records,
+                _amount,
+                &locked_random_hex,
+                change_amount,
+                change_random_hex,
+            ) {
+                Ok(p) => {
+                    eprintln!("[trade] split proof generated successfully");
+                    p
+                }
+                Err(e) => {
+                    eprintln!("[trade] split proof failed: {e}");
+                    message.set(Some((format!("✗ Split proof failed: {e}"), true)));
+                    return;
+                }
+            };
+            (Some(change.clone()), Some(proof))
+        } else {
+            (None, None)
+        };
+        #[cfg(target_os = "android")]
+        let (change_ref, split_proof): (Option<CashChange>, Option<String>) = {
+            let cr = cash_change.as_ref().map(|(c, _, _, _, _)| c.clone());
+            (cr, None)
+        };
 
         submitting.set(true);
         let amount_str_clone = amount_str.clone();
         spawn(async move {
-            // App-side split proof generation isn't wired yet — pass None so
-            // ChainClient::send_order errors out cleanly if the order needs a
-            // split. Non-split orders (exact-cover) still work.
-            // TODO: integrate zk::wallet::prove_split here once mobile target supports it.
-            match client.send_order(&order, change_ref.as_ref(), None).await {
+            match client.send_order(&order, change_ref.as_ref(), split_proof).await {
                 Ok(()) => {
+                    eprintln!("[trade] order submitted successfully: {}", order.id);
                     own_order_ids
                         .write()
                         .insert(order.id.clone(), amount_str_clone);
                     expanded.set(None);
 
-                    // Update CashStore: mark originals as Spent, add change record
+                    // Update CashStore: mark originals as Spent, add change record.
                     if let Some((_, change_cash_id, change_amount, _, change_random)) = cash_change {
                         let mut store = cash_store.write();
                         for rec in store.records_mut().iter_mut() {
@@ -187,7 +240,7 @@ pub fn TradeForm(
                                 rec.status = CASH_SPENT;
                             }
                         }
-                        store.records_mut().push(invisibook_lib::cash_store::CashRecord {
+                        store.records_mut().push(CashRecord {
                             cash_id: change_cash_id,
                             token: input_token.clone(),
                             amount: change_amount,
@@ -203,6 +256,7 @@ pub fn TradeForm(
                     )));
                 }
                 Err(e) => {
+                    eprintln!("[trade] send order failed: {e}");
                     message.set(Some((format!("✗ Send order failed: {e}"), true)));
                 }
             }
@@ -359,4 +413,62 @@ pub fn TradeForm(
             }
         }
     }
+}
+
+/// Generate a split ZK proof from input cash records, locked amount, and change amount.
+/// Returns the proof JSON string on success.
+#[cfg(not(target_os = "android"))]
+fn generate_split_proof(
+    input_records: &[CashRecord],
+    locked_amount: u64,
+    locked_random_hex: &str,
+    change_amount: u64,
+    change_random_hex: &str,
+) -> Result<String, String> {
+    let setup = dev_setup_snarkjs("split")
+        .map_err(|e| format!("split circuit setup: {e}"))?;
+    let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir)
+        .map_err(|e| format!("loading compiled circuit: {e}"))?;
+
+    let mut inputs_for_witness = Vec::with_capacity(input_records.len());
+    for rec in input_records {
+        let raw = hex::decode(&rec.random)
+            .map_err(|e| format!("cash {} random hex invalid: {e}", rec.cash_id))?;
+        if raw.len() != 32 {
+            return Err(format!("cash {} random must be 32 bytes, got {}", rec.cash_id, raw.len()));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&raw);
+        inputs_for_witness.push((rec.amount, arr));
+    }
+
+    let locked_random = decode_random_bytes(locked_random_hex)?;
+    let change_random = decode_random_bytes(change_random_hex)?;
+
+    let sp = prove_split(
+        SplitWitness {
+            inputs: inputs_for_witness,
+            locked_amount,
+            locked_random,
+            change_amount,
+            change_random,
+        },
+        &handle,
+        &setup.zkey,
+    )
+    .map_err(|e| format!("prove_split: {e}"))?;
+
+    serde_json::to_string(&sp.proof_json).map_err(|e| format!("serialize proof: {e}"))
+}
+
+/// Decode a hex string into a 32-byte array.
+#[cfg(not(target_os = "android"))]
+fn decode_random_bytes(s: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(s).map_err(|e| format!("hex decode: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!("must be 32 bytes, got {}", bytes.len()));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
 }

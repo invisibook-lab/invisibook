@@ -311,6 +311,9 @@ impl ChainClient {
     /// If `change` is provided, the chain will split the input cash and mint change;
     /// in that case `split_proof_json` is required (snarkjs `proof.json` from
     /// rapidsnark) — chain rejects split-mode requests without a proof.
+    /// Submits a new order to the chain. When `change` is provided (split
+    /// mode), `split_proof_json` must contain the ZK proof proving
+    /// sum(inputs) == sum(outputs).
     pub async fn send_order(
         &self,
         order: &Order,
@@ -320,10 +323,6 @@ impl ChainClient {
         if change.is_some() && split_proof_json.is_none() {
             return Err("split mode requires a zk_proof".into());
         }
-        if change.is_none() && split_proof_json.is_some() {
-            return Err("zk_proof supplied without a change output (non-split mode)".into());
-        }
-
         let type_int = match order.trade_type {
             TradeType::Buy => 0u8,
             TradeType::Sell => 1u8,
