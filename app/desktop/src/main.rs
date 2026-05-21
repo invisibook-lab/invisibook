@@ -8,10 +8,16 @@ use hex;
 use invisibook_lib::cash_store::CashStore;
 use invisibook_lib::chain::{ChainClient, OrderEvent};
 use invisibook_lib::config::ClientConfig;
+use invisibook_lib::hd;
 use invisibook_lib::orderbook;
 use invisibook_lib::types::*;
 use invisibook_ui::components::{Header, KeyImport, OrderBook, Toast, TradeForm};
 use invisibook_ui::style::CSS;
+
+/// Returns the path to the mnemonic file: `~/.invisibook/mnemonic`.
+fn mnemonic_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".invisibook").join("mnemonic"))
+}
 
 fn main() {
     dioxus::LaunchBuilder::desktop()
@@ -30,19 +36,23 @@ fn main() {
 
 #[component]
 fn App() -> Element {
-    // ── Load config & create chain client ──
-    let (initial_client, initial_address, init_error) = {
-        let cfg = ClientConfig::load_with_args();
-        match cfg.seed() {
-            Ok(seed) => {
-                let kp = invisibook_lib::config::ClientConfig::keypair_from_seed(&seed).unwrap();
-                let pubkey = hex::encode(kp.pubkey_bytes());
-                let c = ChainClient::new(&cfg.chain.http_url, &cfg.chain.ws_url, seed, cfg.chain.chain_id);
-                (Some(Arc::new(c)), pubkey, None)
+    // ── Load config & try reading mnemonic from ~/.invisibook/mnemonic ──
+    let cfg = ClientConfig::load_with_args();
+    let (initial_client, initial_address, init_imported) = {
+        let mnemonic = mnemonic_path().and_then(|p| std::fs::read_to_string(p).ok());
+        if let Some(mnemonic) = mnemonic {
+            let mnemonic = mnemonic.trim().to_string();
+            match hd::mnemonic_to_ed25519_key(&mnemonic, 60, 0) {
+                Ok(seed) => {
+                    let kp = ClientConfig::keypair_from_seed(&seed).unwrap();
+                    let pubkey = hex::encode(kp.pubkey_bytes());
+                    let c = ChainClient::new(&cfg.chain.http_url, &cfg.chain.ws_url, seed, cfg.chain.chain_id);
+                    (Some(Arc::new(c)), pubkey, true)
+                }
+                Err(_) => (None, String::new(), false),
             }
-            Err(e) => {
-                (None, String::new(), Some(format!("✗ Failed to parse keypair: {e}")))
-            }
+        } else {
+            (None, String::new(), false)
         }
     };
 
@@ -53,10 +63,10 @@ fn App() -> Element {
     let own_order_ids = use_signal(HashMap::<OrderID, String>::new);
     let selected = use_signal(|| None::<usize>);
     let expanded = use_signal(|| None::<usize>);
-    let mut message = use_signal(|| init_error.map(|e| (e, true)));
+    let mut message: Signal<Option<(String, bool)>> = use_signal(|| None);
     let cash_store = use_signal(|| CashStore::load(CashStore::default_path()));
     let mut show_key_import = use_signal(|| false);
-    let key_imported = use_signal(|| false);
+    let key_imported = use_signal(|| init_imported);
 
     // ── Poll order list from chain every 3 seconds (≈ 1 block) ──
     use_coroutine(move |_: UnboundedReceiver<()>| async move {

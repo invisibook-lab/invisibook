@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 dioxus = "0.7"
+dirs = "6"
 hex = "0.4"
 invisibook-lib = { path = "../../lib/chain" }
 tokio = { version = "1", features = ["time"] }

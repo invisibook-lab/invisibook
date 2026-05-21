@@ -39,6 +39,13 @@ func InitAccountDB(dsn string) *gorm.DB {
 
 // ────────────────────── CRUD Operations ──────────────────────
 
+// CashExists checks whether a Cash record with the given ID exists.
+func (a *Account) CashExists(id string) bool {
+	var count int64
+	a.db.Model(&CashScheme{}).Where("cash_id = ?", id).Count(&count)
+	return count > 0
+}
+
 // CreateCash inserts a new Cash into the database, honouring the caller's
 // Status + By fields. SendOrder's split branch relies on this to mint a
 // Locked cash for the order's collateral; hardcoding Active here would

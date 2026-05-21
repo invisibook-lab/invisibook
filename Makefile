@@ -1,4 +1,4 @@
-.PHONY: build-desktop build-cli build-chain run-chain clean
+.PHONY: build-desktop build-cli build-chain run-chain clean reset reset-chain reset-cash
 
 build: build-desktop build-cli build-chain
 
@@ -21,8 +21,11 @@ run-chain:
 clean:
 	rm -f invisibook
 
+reset: reset-chain reset-cash
+
 reset-chain:
-	cd chain && rm -rf data  
+	cd chain && rm -rf data
 
 reset-cash:
-	rm -f ~/.invisibook/*
+	mkdir -p ~/.invisibook
+	cp chain/cfg/tests/alice_cash.json ~/.invisibook/cash.json

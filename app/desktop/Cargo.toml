@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+dirs = "6"
 dioxus = { version = "0.7", features = ["desktop"] }
 invisibook-ui = { path = "../ui" }
 invisibook-lib = { path = "../../lib/chain" }

@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -58,6 +59,13 @@ pub fn KeyImport(
         chain_client.set(Some(new_client));
         my_address.set(pubkey.clone());
         key_imported.set(true);
+
+        // Persist mnemonic to ~/.invisibook/mnemonic for auto-login on next launch.
+        if let Some(home) = dirs::home_dir() {
+            let dir = home.join(".invisibook");
+            let _ = fs::create_dir_all(&dir);
+            let _ = fs::write(dir.join("mnemonic"), &mnemonic_text);
+        }
 
         // Optionally import cash file
         let cash_file = cash_file_input.read().trim().to_string();
