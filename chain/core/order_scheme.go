@@ -5,8 +5,13 @@ import (
 	"fmt"
 	"math/big"
 
+	"log"
+	"os"
+	"time"
+
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // ────────────────────── SQL Model ──────────────────────
@@ -86,9 +91,16 @@ func (SettleAddrScheme) TableName() string {
 // ────────────────────── DB Initialization ──────────────────────
 
 // InitOrderDB opens a SQLite database and auto-migrates the orders and
-// settle_submissions tables.
-func InitOrderDB(dsn string) *gorm.DB {
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+// settle_submissions tables. `logLevel` controls GORM SQL logging verbosity.
+func InitOrderDB(dsn string, logLevel logger.LogLevel) *gorm.DB {
+	gormLogger := logger.New(
+		log.New(os.Stdout, "\n", log.LstdFlags),
+		logger.Config{
+			SlowThreshold: 200 * time.Millisecond,
+			LogLevel:      logLevel,
+		},
+	)
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: gormLogger})
 	if err != nil {
 		panic(fmt.Sprintf("failed to open orders database: %v", err))
 	}

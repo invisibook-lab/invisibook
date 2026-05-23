@@ -2,9 +2,13 @@ package core
 
 import (
 	"fmt"
+	"log"
+	"os"
+	"time"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // ────────────────────── SQL Model ──────────────────────
@@ -26,8 +30,16 @@ func (CashScheme) TableName() string { return "cash" }
 // ────────────────────── DB Initialization ──────────────────────
 
 // InitAccountDB opens a SQLite database and auto-migrates the cash table.
-func InitAccountDB(dsn string) *gorm.DB {
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+// `logLevel` controls GORM SQL logging verbosity.
+func InitAccountDB(dsn string, logLevel logger.LogLevel) *gorm.DB {
+	gormLogger := logger.New(
+		log.New(os.Stdout, "\n", log.LstdFlags),
+		logger.Config{
+			SlowThreshold: 200 * time.Millisecond,
+			LogLevel:      logLevel,
+		},
+	)
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: gormLogger})
 	if err != nil {
 		panic(fmt.Sprintf("failed to open accounts database: %v", err))
 	}

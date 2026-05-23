@@ -40,7 +40,7 @@ func NewAccount(cfg *AccountConfig) *Account {
 	}
 	a := &Account{
 		Tripod:     tri,
-		db:         InitAccountDB(cfg.DBPath),
+		db:         InitAccountDB(cfg.DBPath, ParseGormLogLevel(cfg.DBLogLevel)),
 		cfg:        cfg,
 		depositVK:  depositVK,
 		withdrawVK: withdrawVK,

@@ -57,7 +57,7 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	}
 	ot := &OrderBook{
 		Tripod:         tri,
-		db:             InitOrderDB(cfg.DBPath),
+		db:             InitOrderDB(cfg.DBPath, ParseGormLogLevel(cfg.DBLogLevel)),
 		splitVK:        splitVK,
 		settleLargerVK: settleLargerVK,
 	}

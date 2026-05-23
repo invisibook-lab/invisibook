@@ -1,7 +1,8 @@
 # Core Tripod Configuration
 
 [orderbook]
-db_path = "data/orders.db"
+db_path      = "data/orders.db"
+db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
 # Verification keys for the OrderBook tripod's circuits. Split is for
 # SendOrder's split branch; settle_larger is the settle circuit for the
 # larger side (change + cross-leg ratio check). The smaller party confirms
@@ -10,7 +11,8 @@ split_vk_path         = "../lib/target/circuit-build/split/vk.json"
 settle_larger_vk_path = "../lib/target/circuit-build/settle_larger/vk.json"
 
 [account]
-db_path = "data/accounts.db"
+db_path      = "data/accounts.db"
+db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
 # Deposit / Withdraw verification keys — produced by `snarkjs zkey export verificationkey`
 # (or by re-running the corresponding `dev_setup_snarkjs` test). Paths are
 # relative to wherever you launch the chain from.
