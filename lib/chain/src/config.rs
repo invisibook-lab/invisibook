@@ -18,6 +18,16 @@ pub struct ClientConfig {
     pub chain: ChainConfig,
     #[serde(default)]
     pub keypair: KeypairConfig,
+    /// Local data directory for mnemonic, cash.json, etc.
+    /// Defaults to `~/.invisibook`.
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
+}
+
+fn default_data_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".invisibook")
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +87,10 @@ pub struct CliArgs {
     /// BIP-39 mnemonic phrase (12 or 24 words)
     #[arg(long)]
     pub mnemonic: Option<String>,
+
+    /// Local data directory (mnemonic, cash.json, etc.)
+    #[arg(long)]
+    pub data_dir: Option<PathBuf>,
 }
 
 // ────────────────────── Loading ──────────────────────
@@ -115,8 +129,21 @@ impl ClientConfig {
         if let Some(m) = args.mnemonic {
             cfg.keypair.mnemonic = m;
         }
+        if let Some(d) = args.data_dir {
+            cfg.data_dir = d;
+        }
 
         cfg
+    }
+
+    /// Path to the mnemonic file inside the data directory.
+    pub fn mnemonic_path(&self) -> PathBuf {
+        self.data_dir.join("mnemonic")
+    }
+
+    /// Path to the cash store file inside the data directory.
+    pub fn cash_path(&self) -> PathBuf {
+        self.data_dir.join("cash.json")
     }
 
     /// Derives a 32-byte ed25519 seed from the mnemonic at index 0, path m/44'/60'/0'/0'/0'.

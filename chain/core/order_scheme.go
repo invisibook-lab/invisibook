@@ -65,6 +65,24 @@ func (SettleSubmissionScheme) TableName() string {
 	return "settle_submissions"
 }
 
+// ────────────────────── Settle Address Exchange SQL Model ──────────────────────
+
+// SettleAddrScheme stores the QUIC address a party registers for the MPC
+// settle handshake. Both parties register independently; each can then query
+// the counterparty's address.
+// NOTE: This on-chain address exchange is temporary. In production, peer
+// addresses will be exchanged via Tor or similar anonymous overlay network.
+type SettleAddrScheme struct {
+	OrderID      string `gorm:"primaryKey;column:order_id"`
+	MatchOrderID string `gorm:"column:match_order_id;index"`
+	Addr         string `gorm:"column:addr;not null"`
+}
+
+// TableName returns the SQL table name used by GORM for SettleAddrScheme rows.
+func (SettleAddrScheme) TableName() string {
+	return "settle_addrs"
+}
+
 // ────────────────────── DB Initialization ──────────────────────
 
 // InitOrderDB opens a SQLite database and auto-migrates the orders and
@@ -74,7 +92,7 @@ func InitOrderDB(dsn string) *gorm.DB {
 	if err != nil {
 		panic(fmt.Sprintf("failed to open orders database: %v", err))
 	}
-	if err := db.AutoMigrate(&OrderScheme{}, &CompareSubmissionScheme{}, &SettleSubmissionScheme{}); err != nil {
+	if err := db.AutoMigrate(&OrderScheme{}, &CompareSubmissionScheme{}, &SettleSubmissionScheme{}, &SettleAddrScheme{}); err != nil {
 		panic(fmt.Sprintf("failed to migrate orders table: %v", err))
 	}
 	return db
@@ -323,4 +341,27 @@ func (ot *OrderBook) GetSettleSubmission(orderID OrderID) (*SettleSubmissionSche
 // DeleteSettleSubmission removes a pending settle submission by order ID.
 func (ot *OrderBook) DeleteSettleSubmission(orderID OrderID) error {
 	return ot.db.Where("order_id = ?", string(orderID)).Delete(&SettleSubmissionScheme{}).Error
+}
+
+// ────────────────────── Settle Address CRUD ──────────────────────
+
+// UpsertSettleAddr inserts or updates a settle address entry.
+func (ot *OrderBook) UpsertSettleAddr(entry *SettleAddrScheme) error {
+	return ot.db.Save(entry).Error
+}
+
+// GetSettleAddr retrieves a settle address entry by order ID.
+// Returns nil, gorm.ErrRecordNotFound if not found.
+func (ot *OrderBook) GetSettleAddr(orderID OrderID) (*SettleAddrScheme, error) {
+	var row SettleAddrScheme
+	err := ot.db.First(&row, "order_id = ?", string(orderID)).Error
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+// DeleteSettleAddr removes a settle address entry by order ID.
+func (ot *OrderBook) DeleteSettleAddr(orderID OrderID) error {
+	return ot.db.Where("order_id = ?", string(orderID)).Delete(&SettleAddrScheme{}).Error
 }

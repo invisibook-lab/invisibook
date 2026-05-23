@@ -61,8 +61,8 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 		splitVK:        splitVK,
 		settleLargerVK: settleLargerVK,
 	}
-	ot.SetWritings(ot.SendOrder, ot.CompareOrders, ot.SettleOrders)
-	ot.SetReadings(ot.QueryOrders)
+	ot.SetWritings(ot.SendOrder, ot.CompareOrders, ot.SettleOrders, ot.RegisterSettleAddr)
+	ot.SetReadings(ot.QueryOrders, ot.QuerySettleAddr)
 	return ot
 }
 
@@ -665,6 +665,10 @@ func (ot *OrderBook) SettleOrders(ctx *context.WriteContext) error {
 	_ = ot.DeleteSettleSubmission(req.OrderID)
 	_ = ot.DeleteSettleSubmission(req.MatchOrderID)
 
+	// Clean up settle address entries.
+	_ = ot.DeleteSettleAddr(req.OrderID)
+	_ = ot.DeleteSettleAddr(req.MatchOrderID)
+
 	ctx.EmitStringEvent("orders settled: %s <-> %s", myOrder.ID, matchOrder.ID)
 	return nil
 }
@@ -738,6 +742,84 @@ func lockedInputHashesPadded(ord *Order, acc *Account, n int, expectedToken Toke
 		out = append(out, dec)
 	}
 	return out, nil
+}
+
+// ────────────────────── Writing: RegisterSettleAddr ──────────────────────
+
+// RegisterSettleAddrRequest is the JSON payload for registering an MPC settle
+// address. Each party sends its QUIC listen address so the counterparty can
+// discover it on-chain.
+// NOTE: This on-chain address exchange is temporary. In production, peer
+// addresses will be exchanged via Tor or similar anonymous overlay network.
+type RegisterSettleAddrRequest struct {
+	OrderID      OrderID `json:"order_id"       validate:"required"`
+	MatchOrderID OrderID `json:"match_order_id" validate:"required"`
+	Addr         string  `json:"addr"           validate:"required"`
+}
+
+// RegisterSettleAddr stores the caller's QUIC address for MPC peer discovery.
+func (ot *OrderBook) RegisterSettleAddr(ctx *context.WriteContext) error {
+	ctx.SetLei(10)
+
+	req := new(RegisterSettleAddrRequest)
+	if err := ctx.BindJson(req); err != nil {
+		return err
+	}
+	if err := Validator.Struct(req); err != nil {
+		return err
+	}
+
+	// Validate order exists, is Matched, and match_order agrees.
+	order, err := ot.GetOrder(req.OrderID)
+	if err != nil {
+		return fmt.Errorf("order %s not found: %w", req.OrderID, err)
+	}
+	if order.Status != Matched {
+		return fmt.Errorf("order %s is not Matched (current: %s)", order.ID, order.Status.String())
+	}
+	if order.MatchOrder != req.MatchOrderID {
+		return fmt.Errorf("order %s match_order is %s, not %s", order.ID, order.MatchOrder, req.MatchOrderID)
+	}
+
+	entry := &SettleAddrScheme{
+		OrderID:      string(req.OrderID),
+		MatchOrderID: string(req.MatchOrderID),
+		Addr:         req.Addr,
+	}
+	if err := ot.UpsertSettleAddr(entry); err != nil {
+		return fmt.Errorf("failed to upsert settle addr: %w", err)
+	}
+
+	ctx.EmitStringEvent("settle addr registered for order %s: %s", req.OrderID, req.Addr)
+	return nil
+}
+
+// ────────────────────── Reading: QuerySettleAddr ──────────────────────
+
+// QuerySettleAddrRequest is the JSON payload for querying the counterparty's
+// registered MPC settle address.
+type QuerySettleAddrRequest struct {
+	OrderID      OrderID `json:"order_id"       validate:"required"`
+	MatchOrderID OrderID `json:"match_order_id" validate:"required"`
+}
+
+// QuerySettleAddr looks up the counterparty's registered QUIC address by
+// querying the match_order_id's entry.
+func (ot *OrderBook) QuerySettleAddr(ctx *context.ReadContext) {
+	req := new(QuerySettleAddrRequest)
+	if err := ctx.BindJson(req); err != nil {
+		ctx.Json(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Look up counterparty's addr by their order ID (the match_order_id).
+	entry, err := ot.GetSettleAddr(req.MatchOrderID)
+	if err != nil {
+		// Not yet registered — return empty addr.
+		ctx.JsonOk(map[string]string{"addr": ""})
+		return
+	}
+	ctx.JsonOk(map[string]string{"addr": entry.Addr})
 }
 
 // ────────────────────── Reading: QueryOrders ──────────────────────

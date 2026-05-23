@@ -30,12 +30,10 @@ impl CashStore {
         Self { path, records }
     }
 
-    /// Default path: `~/.invisibook/cash.json`
+    /// Default path: `~/.invisibook/cash.json`.
+    /// Prefer `ClientConfig::cash_path()` when a config is available.
     pub fn default_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".invisibook")
-            .join("cash.json")
+        crate::config::ClientConfig::default().cash_path()
     }
 
     pub fn records(&self) -> &[CashRecord] {

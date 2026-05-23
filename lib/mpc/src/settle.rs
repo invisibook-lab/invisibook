@@ -213,60 +213,94 @@ pub async fn settle(
     let one_minus_cmp = &one - &cmp_bit;
     let r_smaller = &(&cmp_bit * &r2) + &(&one_minus_cmp * &r1);
 
-    // --- Step 5: Extract shares (NO opening to either party) ---
+    // --- Step 5: Open values (MAC-verified) and construct fresh SPDZ shares ---
+    //
+    // ark-mpc's beaver multiplication accumulates a `public_modifier` that makes
+    // raw `share()` values inconsistent with the simple MAC invariant the chain
+    // expects: mac_A + mac_B == delta * (share_A + share_B).
+    //
+    // Instead, we open both values with `open_authenticated()` (which internally
+    // verifies MACs including the modifier), then build fresh additive shares:
+    //   Party 0: share = opened_value,  mac = delta_0 * opened_value
+    //   Party 1: share = 0,             mac = delta_1 * opened_value
+    // This trivially satisfies the chain's MAC check since both values are
+    // reconstructed on-chain anyway.
+
+    // Get each party's MAC key share (delta_i)
     let auth_one = fabric.one_authenticated();
-    let delta_i = auth_one.mac_share().await;
-    let cmp_s = cmp_bit.share().await;
-    let cmp_m = cmp_bit.mac_share().await;
-    let r_s = r_smaller.share().await;
-    let r_m = r_smaller.mac_share().await;
+    let delta_i_scalar = auth_one.mac_share().await;
+    let delta_i_fr = delta_i_scalar.inner();
+
+    // Open cmp_bit (MAC-verified within the MPC protocol)
+    let cmp_opened = cmp_bit
+        .open_authenticated()
+        .await
+        .map_err(|e| MpcError::Auth(format!("cmp_bit open failed: {e}")))?;
+    let cmp_val = cmp_opened.inner();
+
+    // Open r_smaller (MAC-verified within the MPC protocol)
+    let r_opened = r_smaller
+        .open_authenticated()
+        .await
+        .map_err(|e| MpcError::Auth(format!("r_smaller open failed: {e}")))?;
+    let r_val = r_opened.inner();
+
+    // Construct fresh additive shares with correct MAC invariant
+    let (cmp_share_fr, r_share_fr) = if side.party_id() == 0 {
+        (cmp_val, r_val)
+    } else {
+        (Fr::from(0u64), Fr::from(0u64))
+    };
+    let cmp_mac_fr = delta_i_fr * cmp_val;
+    let r_mac_fr = delta_i_fr * r_val;
 
     // Shutdown the fabric
     fabric.shutdown();
 
     Ok(SettleShare {
-        cmp_share: fr_to_decimal(&cmp_s.inner()),
-        cmp_mac: fr_to_decimal(&cmp_m.inner()),
-        r_smaller_share: fr_to_decimal(&r_s.inner()),
-        r_smaller_mac: fr_to_decimal(&r_m.inner()),
-        mac_key_share: fr_to_decimal(&delta_i.inner()),
+        cmp_share: fr_to_decimal(&cmp_share_fr),
+        cmp_mac: fr_to_decimal(&cmp_mac_fr),
+        r_smaller_share: fr_to_decimal(&r_share_fr),
+        r_smaller_mac: fr_to_decimal(&r_mac_fr),
+        mac_key_share: fr_to_decimal(&delta_i_fr),
     })
 }
 
 /// Convert a BN254 field element to its decimal string representation.
+///
+/// Uses arkworks `into_bigint()` (Montgomery → standard form) then converts
+/// the little-endian u64 limbs to a decimal string via base-2^64 arithmetic.
 fn fr_to_decimal(fr: &Fr) -> String {
     let bigint = fr.into_bigint();
-    let limbs = bigint.as_ref(); // &[u64; 4]
+    let limbs = bigint.as_ref(); // &[u64; 4], little-endian
 
     if limbs.iter().all(|&l| l == 0) {
         return "0".to_string();
     }
 
-    // Convert big-endian byte representation to decimal
-    let mut bytes: Vec<u8> = Vec::new();
-    for &limb in limbs.iter().rev() {
-        for i in (0..8).rev() {
-            bytes.push(((limb >> (i * 8)) & 0xff) as u8);
-        }
-    }
+    // Accumulate in base-10 digits (little-endian: digits[0] = ones place).
+    // Process limbs from most-significant to least-significant so we can
+    // use Horner's rule: value = ((limb[3] * B + limb[2]) * B + limb[1]) * B + limb[0]
+    // where B = 2^64.
+    let mut digits: Vec<u8> = vec![0];
 
-    let mut decimal_digits: Vec<u8> = vec![0];
-    for byte in &bytes {
-        // Multiply decimal_digits by 256
-        let mut carry = 0u16;
-        for d in decimal_digits.iter_mut() {
-            let v = (*d as u16) * 256 + carry;
+    for &limb in limbs.iter().rev() {
+        // Multiply digits by 2^64
+        let mut carry = 0u128;
+        for d in digits.iter_mut() {
+            let v = (*d as u128) * (1u128 << 64) + carry;
             *d = (v % 10) as u8;
             carry = v / 10;
         }
         while carry > 0 {
-            decimal_digits.push((carry % 10) as u8);
+            digits.push((carry % 10) as u8);
             carry /= 10;
         }
-        // Add byte
-        let mut carry = *byte as u16;
-        for d in decimal_digits.iter_mut() {
-            let v = (*d as u16) + carry;
+
+        // Add limb
+        let mut carry = limb as u128;
+        for d in digits.iter_mut() {
+            let v = (*d as u128) + carry;
             *d = (v % 10) as u8;
             carry = v / 10;
             if carry == 0 {
@@ -274,18 +308,53 @@ fn fr_to_decimal(fr: &Fr) -> String {
             }
         }
         while carry > 0 {
-            decimal_digits.push((carry % 10) as u8);
+            digits.push((carry % 10) as u8);
             carry /= 10;
         }
     }
 
-    // decimal_digits is little-endian. Reverse and convert to string.
-    while decimal_digits.len() > 1 && *decimal_digits.last().unwrap() == 0 {
-        decimal_digits.pop();
+    // Strip leading zeros and convert to string (most-significant first).
+    while digits.len() > 1 && *digits.last().unwrap() == 0 {
+        digits.pop();
     }
-    decimal_digits
-        .iter()
-        .rev()
-        .map(|d| (b'0' + d) as char)
-        .collect()
+    digits.iter().rev().map(|d| (b'0' + d) as char).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::fr_from_decimal;
+
+    /// Verify fr_to_decimal round-trips with fr_from_decimal.
+    #[test]
+    fn test_fr_decimal_roundtrip() {
+        let cases: &[&str] = &[
+            "0",
+            "1",
+            "42",
+            "255",
+            "256",
+            "65535",
+            "18446744073709551615", // u64::MAX
+            // BN254 modulus minus 1 (largest valid Fr)
+            "21888242871839275222246405745257275088548364400416034343698204186575808495616",
+            // random mid-range value
+            "7891011121314151617181920212223242526",
+        ];
+        for &s in cases {
+            let fr = fr_from_decimal(s);
+            let out = fr_to_decimal(&fr);
+            assert_eq!(out, s, "round-trip failed for {s}");
+        }
+    }
+
+    /// Verify small integer conversions.
+    #[test]
+    fn test_fr_to_decimal_small() {
+        for v in 0u64..1000 {
+            let fr = Fr::from(v);
+            let s = fr_to_decimal(&fr);
+            assert_eq!(s, v.to_string(), "mismatch for {v}");
+        }
+    }
 }

@@ -120,7 +120,7 @@ func TestFullOrderLifecycle(t *testing.T) {
 	chainDir := ".."
 	os.RemoveAll(chainDir + "/data")
 
-	cmd := exec.Command("./invisibook", "--core-config", "cfg/core_test.toml")
+	cmd := exec.Command("./invisibook", "--core-config", "cfg/tests/core_test.toml")
 	cmd.Dir = chainDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -300,6 +300,50 @@ func TestFullOrderLifecycle(t *testing.T) {
 		t.Fatalf("expected buy order status Matched(1), got %d", buyOrders[0].Status)
 	}
 
+	// ═══════════════════ Step 3.5: Settle address exchange ═══════════════════
+	t.Log("=== Step 3.5a: Alice registers settle addr ===")
+	err = wrCall("orderbook", "RegisterSettleAddr", map[string]any{
+		"order_id":       string(sellOrderID),
+		"match_order_id": string(buyOrderID),
+		"addr":           "127.0.0.1:9001",
+	})
+	if err != nil {
+		t.Fatalf("RegisterSettleAddr (alice) failed: %v", err)
+	}
+	waitBlock()
+
+	// Query from bob's side — should see alice's addr
+	aliceAddr := querySettleAddr(t, string(buyOrderID), string(sellOrderID))
+	t.Logf("  alice settle addr (seen by bob): %q", aliceAddr)
+	if aliceAddr != "127.0.0.1:9001" {
+		t.Fatalf("expected alice addr '127.0.0.1:9001', got %q", aliceAddr)
+	}
+
+	// Query bob's addr from alice's side — should be empty (not yet registered)
+	bobAddr := querySettleAddr(t, string(sellOrderID), string(buyOrderID))
+	t.Logf("  bob settle addr (seen by alice): %q", bobAddr)
+	if bobAddr != "" {
+		t.Fatalf("expected bob addr empty, got %q", bobAddr)
+	}
+
+	t.Log("=== Step 3.5b: Bob registers settle addr ===")
+	err = wrCall("orderbook", "RegisterSettleAddr", map[string]any{
+		"order_id":       string(buyOrderID),
+		"match_order_id": string(sellOrderID),
+		"addr":           "127.0.0.1:9002",
+	})
+	if err != nil {
+		t.Fatalf("RegisterSettleAddr (bob) failed: %v", err)
+	}
+	waitBlock()
+
+	// Now alice can see bob's addr
+	bobAddr = querySettleAddr(t, string(sellOrderID), string(buyOrderID))
+	t.Logf("  bob settle addr (seen by alice): %q", bobAddr)
+	if bobAddr != "127.0.0.1:9002" {
+		t.Fatalf("expected bob addr '127.0.0.1:9002', got %q", bobAddr)
+	}
+
 	// ═══════════════════ Step 4: CompareOrders (MPC phase) ═══════════════════
 	t.Log("=== Step 4a: Alice submits CompareOrders (first party) ===")
 
@@ -466,6 +510,18 @@ func TestFullOrderLifecycle(t *testing.T) {
 		t.Fatalf("expected bob USDT to be 0 (spent), got %d", len(bobUSDTFinal))
 	}
 
+	// ═══════════════════ Step 7: Verify settle addrs cleaned up ═══════════════════
+	t.Log("=== Step 7: Verify settle addrs cleaned up after settlement ===")
+	aliceAddrAfter := querySettleAddr(t, string(buyOrderID), string(sellOrderID))
+	bobAddrAfter := querySettleAddr(t, string(sellOrderID), string(buyOrderID))
+	if aliceAddrAfter != "" {
+		t.Fatalf("expected alice settle addr cleaned up, got %q", aliceAddrAfter)
+	}
+	if bobAddrAfter != "" {
+		t.Fatalf("expected bob settle addr cleaned up, got %q", bobAddrAfter)
+	}
+	t.Log("  settle addrs cleaned up correctly")
+
 	t.Log("=== All tests passed! Full order lifecycle verified. ===")
 }
 
@@ -530,6 +586,26 @@ func queryOrders(t *testing.T, id core.OrderID) []OrderItem {
 		t.Fatalf("parse QueryOrders response failed: %v\nraw: %s", err, string(data))
 	}
 	return resp.Orders
+}
+
+// querySettleAddr queries the counterparty's registered settle address.
+// Returns empty string if not yet registered.
+func querySettleAddr(t *testing.T, orderID, matchOrderID string) string {
+	t.Helper()
+	data, err := rdCall("orderbook", "QuerySettleAddr", map[string]string{
+		"order_id":       orderID,
+		"match_order_id": matchOrderID,
+	})
+	if err != nil {
+		t.Fatalf("QuerySettleAddr failed: %v", err)
+	}
+	var resp struct {
+		Addr string `json:"addr"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("parse QuerySettleAddr response failed: %v\nraw: %s", err, string(data))
+	}
+	return resp.Addr
 }
 
 // buildTestMpcShares constructs two MPC share maps that satisfy the SPDZ MAC

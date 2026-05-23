@@ -102,14 +102,17 @@ pub async fn compare_geq(
 
     // d_64 = c_64 XOR r_64 XOR borrow_64
     // Since c_64 is public, we compute:
+    // NOTE: We must use `one_authenticated()` (not a bare `Scalar(1)`) so that
+    // the result's `public_modifier` stays 0. Using a bare scalar would set
+    // `modifier = -1`, breaking the SPDZ MAC invariant expected by the chain:
+    //   mac_A + mac_B == delta * (share_A + share_B)
     let cmp_bit = if c_bits[CMP_BITS - 1] {
-        // c_64 = 1: d_64 = 1 XOR r_64 XOR borrow = NOT(r_64 XOR borrow)
-        //         = 1 - (r_64 + borrow - 2 * r_64 * borrow)
+        // c_64 = 1: d_64 = NOT(r_64 XOR borrow) = 1 - xor
         let xor = xor_shared(&r_bits[CMP_BITS - 1], &borrow);
-        let one = Scalar::<Curve>::from(1u64);
+        let one = fabric.one_authenticated();
         &one - &xor
     } else {
-        // c_64 = 0: d_64 = 0 XOR r_64 XOR borrow = r_64 XOR borrow
+        // c_64 = 0: d_64 = r_64 XOR borrow
         xor_shared(&r_bits[CMP_BITS - 1], &borrow)
     };
 

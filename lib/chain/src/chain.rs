@@ -99,6 +99,28 @@ pub struct SettleTokenLegParam {
     pub zk_proof: String,
 }
 
+/// Register settle address request params.
+#[derive(Debug, Serialize)]
+struct RegisterSettleAddrParams {
+    order_id: OrderID,
+    match_order_id: OrderID,
+    addr: String,
+}
+
+/// Query settle address request params.
+#[derive(Debug, Serialize)]
+struct QuerySettleAddrParams {
+    order_id: OrderID,
+    match_order_id: OrderID,
+}
+
+/// Query settle address response.
+#[derive(Debug, Deserialize)]
+struct QuerySettleAddrResponse {
+    #[serde(default)]
+    addr: String,
+}
+
 #[derive(Debug, Serialize)]
 struct QueryOrdersParams {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -394,6 +416,55 @@ impl ChainClient {
         self.client
             .write_chain("orderbook", "SettleOrders", &params, self.chain_id, 100, 0)
             .await
+    }
+
+    /// Registers this party's QUIC address on-chain for MPC peer discovery.
+    /// NOTE: This on-chain address exchange is temporary. In production, peer
+    /// addresses will be exchanged via Tor or similar anonymous overlay network.
+    pub async fn register_settle_addr(
+        &self,
+        order_id: OrderID,
+        match_order_id: OrderID,
+        addr: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let params = RegisterSettleAddrParams {
+            order_id,
+            match_order_id,
+            addr: addr.to_string(),
+        };
+        self.client
+            .write_chain(
+                "orderbook",
+                "RegisterSettleAddr",
+                &params,
+                self.chain_id,
+                10,
+                0,
+            )
+            .await
+    }
+
+    /// Queries the counterparty's registered QUIC address for MPC settle.
+    /// Returns `None` if the counterparty hasn't registered yet.
+    pub async fn query_settle_addr(
+        &self,
+        order_id: OrderID,
+        match_order_id: OrderID,
+    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let params = QuerySettleAddrParams {
+            order_id,
+            match_order_id,
+        };
+        let value: Value = self
+            .client
+            .read_chain("orderbook", "QuerySettleAddr", &params)
+            .await?;
+        let resp: QuerySettleAddrResponse = serde_json::from_value(value)?;
+        if resp.addr.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(resp.addr))
+        }
     }
 
     /// Queries orders from the chain with optional filters and pagination.
