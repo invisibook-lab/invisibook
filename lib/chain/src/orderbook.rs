@@ -284,15 +284,15 @@ mod tests {
     #[test]
     fn print_genesis_ciphertexts() {
         let entries = [
-            ("f8c0ea0222c6acba512cc9ed613b64e3", "ETH", "1000", "alice"),
+            ("f8c0ea0222c6acba512cc9ed613b64e3", "ETH", "2000", "alice"),
             (
                 "68ff80c3b73a39798be67087fb9f97ed",
                 "USDT",
-                "500000",
+                "800000",
                 "alice",
             ),
-            ("4e88dd94be4154a37da7dd5b9d06a4a1", "ETH", "1000", "bob"),
-            ("ddada5eb9484fa322a931d53bb945431", "USDT", "500000", "bob"),
+            ("4e88dd94be4154a37da7dd5b9d06a4a1", "ETH", "1500", "bob"),
+            ("ddada5eb9484fa322a931d53bb945431", "USDT", "600000", "bob"),
         ];
         for (cash_id, token, amount, who) in entries {
             let (cipher, random) = genesis_encrypt(cash_id, amount);

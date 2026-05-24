@@ -7,7 +7,7 @@
 # Mnemonic: test test test test test test test test test test test junk
 # Derived path: m/44'/60'/0'/0'/0'
 # Address (pubkey): 3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb
-# Genesis balances: 1000 ETH, 500000 USDT
+# Genesis balances: 2000 ETH, 800000 USDT
 
 [chain]
 http_url = "http://localhost:7999"
