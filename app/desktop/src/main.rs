@@ -180,7 +180,7 @@ fn App() -> Element {
                         // Auto-repost remainder order if larger party has change.
                         if let (
                             Some(ref change_cash_id),
-                            Some(ref change_token),
+                            Some(ref _change_token),
                             Some(change_amount),
                             Some(ref change_random_hex),
                             Some(ref _change_commit),
@@ -192,6 +192,16 @@ fn App() -> Element {
                             &outcome.change_commitment_hex,
                         ) {
                             if change_amount > 0 {
+                                // Compute user-facing amount (in token1, e.g. ETH).
+                                // change_amount is in the lock token:
+                                //   Buy locks token2 (USDT) → display = change / price (ETH)
+                                //   Sell locks token1 (ETH)  → display = change (ETH)
+                                let price = my_order.price.unwrap_or(1).max(1);
+                                let display_amount = match my_order.trade_type {
+                                    TradeType::Buy => change_amount / price,
+                                    TradeType::Sell => change_amount,
+                                };
+
                                 // Generate fresh blinding factor and commitment for the repost order.
                                 // The input cash is the on-chain change cash (change_cash_id),
                                 // NOT a freshly computed ID.
@@ -233,13 +243,13 @@ fn App() -> Element {
                                     Ok(()) => {
                                         own_order_ids.write().insert(
                                             repost_order_id.clone(),
-                                            change_amount.to_string(),
+                                            display_amount.to_string(),
                                         );
                                         let short_r = orderbook::short_id(&repost_order_id);
                                         message.set(Some((
                                             format!(
                                                 "✓ Re-posted remainder {short_r}: {} {}",
-                                                change_amount, change_token
+                                                display_amount, my_order.subject.token1
                                             ),
                                             false,
                                         )));
