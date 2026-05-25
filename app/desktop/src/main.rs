@@ -70,7 +70,7 @@ fn App() -> Element {
     let seed_signal: Signal<Option<[u8; 32]>> = use_signal(|| initial_seed);
 
     let mut orders = use_signal(Vec::<Order>::new);
-    let own_order_ids = use_signal(HashMap::<OrderID, String>::new);
+    let mut own_order_ids = use_signal(HashMap::<OrderID, String>::new);
     let selected = use_signal(|| None::<usize>);
     let expanded = use_signal(|| None::<usize>);
     let mut message: Signal<Option<(String, bool)>> = use_signal(|| None);
@@ -83,101 +83,215 @@ fn App() -> Element {
     // ── Settle coroutine: receives order IDs to settle ──
     let settle_coro = use_coroutine(move |mut rx: UnboundedReceiver<OrderID>| {
         async move {
-        while let Some(order_id) = rx.next().await {
-            let c = match client.read().clone() {
-                Some(c) => c,
-                None => {
-                    message.set(Some(("✗ No chain client".into(), true)));
-                    continue;
-                }
-            };
-            let seed = match *seed_signal.read() {
-                Some(s) => s,
-                None => {
-                    message.set(Some(("✗ No seed available".into(), true)));
-                    continue;
-                }
-            };
-
-            // Find my order and counter order from the order list.
-            let (my_order, counter_order) = {
-                let list = orders.read();
-                let my = list.iter().find(|o| o.id == order_id).cloned();
-                let counter = my.as_ref().and_then(|m| {
-                    m.match_order
-                        .as_ref()
-                        .and_then(|mid| list.iter().find(|o| &o.id == mid).cloned())
-                });
-                match (my, counter) {
-                    (Some(m), Some(co)) => (m, co),
-                    _ => {
-                        message.set(Some(("✗ Order or counterparty not found".into(), true)));
-                        settling_ids.write().remove(&order_id);
+            while let Some(order_id) = rx.next().await {
+                let c = match client.read().clone() {
+                    Some(c) => c,
+                    None => {
+                        message.set(Some(("✗ No chain client".into(), true)));
                         continue;
                     }
-                }
-            };
+                };
+                let seed = match *seed_signal.read() {
+                    Some(s) => s,
+                    None => {
+                        message.set(Some(("✗ No seed available".into(), true)));
+                        continue;
+                    }
+                };
 
-            // Mark as settling in the UI.
-            settling_ids.write().insert(order_id.clone());
+                // Find my order and counter order from the order list.
+                let (my_order, counter_order) = {
+                    let list = orders.read();
+                    let my = list.iter().find(|o| o.id == order_id).cloned();
+                    let counter = my.as_ref().and_then(|m| {
+                        m.match_order
+                            .as_ref()
+                            .and_then(|mid| list.iter().find(|o| &o.id == mid).cloned())
+                    });
+                    match (my, counter) {
+                        (Some(m), Some(co)) => (m, co),
+                        _ => {
+                            message.set(Some(("✗ Order or counterparty not found".into(), true)));
+                            settling_ids.write().remove(&order_id);
+                            continue;
+                        }
+                    }
+                };
 
-            // Read cash records from the in-memory signal (always up-to-date).
-            let records_snapshot: Vec<_> = cash_store.read().records().to_vec();
+                // Mark as settling in the UI.
+                settling_ids.write().insert(order_id.clone());
 
+                // Read cash records from the in-memory signal (always up-to-date).
+                let records_snapshot: Vec<_> = cash_store.read().records().to_vec();
 
-            let mut msg_signal = message;
-            let settle_order_id = order_id.clone();
-            let result = settle::run_settle(
-                &c,
-                &my_order,
-                &counter_order,
-                &records_snapshot,
-                &seed,
-                |status| {
-                    let short = orderbook::short_id(&settle_order_id);
-                    msg_signal.set(Some((format!("[{short}] {status}"), false)));
-                },
-            )
-            .await;
+                let mut msg_signal = message;
+                let settle_order_id = order_id.clone();
+                let result = settle::run_settle(
+                    &c,
+                    &my_order,
+                    &counter_order,
+                    &records_snapshot,
+                    &seed,
+                    |status| {
+                        let short = orderbook::short_id(&settle_order_id);
+                        msg_signal.set(Some((format!("[{short}] {status}"), false)));
+                    },
+                )
+                .await;
 
-            match result {
-                Ok(outcome) => {
-                    // Update local CashStore: mark locked cash as spent, add received cash.
-                    {
-                        let mut store = cash_store.write();
-                        let spent = settle::spent_cash_ids(&my_order);
-                        for rec in store.records_mut().iter_mut() {
-                            if spent.contains(&rec.cash_id) {
-                                rec.status = CASH_SPENT;
+                match result {
+                    Ok(outcome) => {
+                        // Update local CashStore: mark locked cash as spent, add received cash.
+                        {
+                            let mut store = cash_store.write();
+                            let spent = settle::spent_cash_ids(&my_order);
+                            for rec in store.records_mut().iter_mut() {
+                                if spent.contains(&rec.cash_id) {
+                                    rec.status = CASH_SPENT;
+                                }
+                            }
+                            store.records_mut().push(CashRecord {
+                                cash_id: outcome.recv_cash_id,
+                                token: outcome.recv_token.clone(),
+                                amount: outcome.recv_amount,
+                                random: outcome.recv_random_hex,
+                                status: CASH_ACTIVE,
+                            });
+                            // Persist change cash for the larger party.
+                            if let (Some(ref cid), Some(ref ctk), Some(camt), Some(ref crnd)) = (
+                                &outcome.change_cash_id,
+                                &outcome.change_token,
+                                outcome.change_amount,
+                                &outcome.change_random_hex,
+                            ) {
+                                if camt > 0 {
+                                    store.records_mut().push(CashRecord {
+                                        cash_id: cid.clone(),
+                                        token: ctk.clone(),
+                                        amount: camt,
+                                        random: crnd.clone(),
+                                        status: CASH_ACTIVE,
+                                    });
+                                }
+                            }
+                            let _ = store.flush();
+                        }
+
+                        let short = orderbook::short_id(&order_id);
+                        message.set(Some((
+                            format!(
+                                "✓ Settled {short}: received {} {}",
+                                outcome.recv_amount, outcome.recv_token
+                            ),
+                            false,
+                        )));
+
+                        // Auto-repost remainder order if larger party has change.
+                        if let (
+                            Some(ref change_cash_id),
+                            Some(ref change_token),
+                            Some(change_amount),
+                            Some(ref change_random_hex),
+                            Some(ref _change_commit),
+                        ) = (
+                            &outcome.change_cash_id,
+                            &outcome.change_token,
+                            outcome.change_amount,
+                            &outcome.change_random_hex,
+                            &outcome.change_commitment_hex,
+                        ) {
+                            if change_amount > 0 {
+                                // Generate fresh blinding factor and commitment for the repost order.
+                                let (repost_cipher, _, repost_random_hex) =
+                                    orderbook::encrypt_amount_with_info(&change_amount.to_string());
+                                let pubkey = c.pubkey_hex().to_string();
+                                let repost_cash_id = orderbook::compute_cash_id(
+                                    &pubkey,
+                                    change_token,
+                                    &repost_cipher,
+                                );
+
+                                // Update CashStore: the change cash becomes locked with fresh commitment.
+                                {
+                                    let mut store = cash_store.write();
+                                    // Mark old change cash as spent (will be replaced by locked version).
+                                    for rec in store.records_mut().iter_mut() {
+                                        if &rec.cash_id == change_cash_id {
+                                            rec.status = CASH_SPENT;
+                                        }
+                                    }
+                                    store.records_mut().push(CashRecord {
+                                        cash_id: repost_cash_id.clone(),
+                                        token: change_token.clone(),
+                                        amount: change_amount,
+                                        random: repost_random_hex.clone(),
+                                        status: CASH_LOCKED,
+                                    });
+                                    let _ = store.flush();
+                                }
+
+                                let repost_order_id =
+                                    orderbook::compute_order_id(&[repost_cash_id.clone()]);
+                                let repost_order = Order {
+                                    id: repost_order_id.clone(),
+                                    trade_type: my_order.trade_type.clone(),
+                                    subject: my_order.subject.clone(),
+                                    price: my_order.price,
+                                    amount: repost_cipher,
+                                    pubkey: pubkey.clone(),
+                                    input_cash_ids: vec![repost_cash_id],
+                                    handling_fee: my_order.handling_fee.clone(),
+                                    block_height: 0,
+                                    status: OrderStatus::Pending,
+                                    match_order: None,
+                                    is_smaller: false,
+                                };
+
+                                match c.send_order(&repost_order, None, None).await {
+                                    Ok(()) => {
+                                        own_order_ids.write().insert(
+                                            repost_order_id.clone(),
+                                            change_random_hex.clone(),
+                                        );
+                                        let short_r = orderbook::short_id(&repost_order_id);
+                                        message.set(Some((
+                                            format!(
+                                                "✓ Re-posted remainder {short_r}: {} {}",
+                                                change_amount, change_token
+                                            ),
+                                            false,
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        // Rollback: restore original change cash.
+                                        let mut store = cash_store.write();
+                                        for rec in store.records_mut().iter_mut() {
+                                            if &rec.cash_id == change_cash_id {
+                                                rec.status = CASH_ACTIVE;
+                                            }
+                                        }
+                                        store.records_mut().retain(|r| {
+                                            r.cash_id != repost_order.input_cash_ids[0]
+                                        });
+                                        let _ = store.flush();
+                                        let short_r = orderbook::short_id(&order_id);
+                                        message
+                                            .set(Some((format!("✗ Repost {short_r}: {e}"), true)));
+                                    }
+                                }
                             }
                         }
-                        store.records_mut().push(CashRecord {
-                            cash_id: outcome.recv_cash_id,
-                            token: outcome.recv_token.clone(),
-                            amount: outcome.recv_amount,
-                            random: outcome.recv_random_hex,
-                            status: CASH_ACTIVE,
-                        });
-                        let _ = store.flush();
                     }
-                    let short = orderbook::short_id(&order_id);
-                    message.set(Some((
-                        format!(
-                            "✓ Settled {short}: received {} {}",
-                            outcome.recv_amount, outcome.recv_token
-                        ),
-                        false,
-                    )));
+                    Err(e) => {
+                        let short = orderbook::short_id(&order_id);
+                        message.set(Some((format!("✗ Settle {short}: {e}"), true)));
+                    }
                 }
-                Err(e) => {
-                    let short = orderbook::short_id(&order_id);
-                    message.set(Some((format!("✗ Settle {short}: {e}"), true)));
-                }
-            }
 
-            settling_ids.write().remove(&order_id);
+                settling_ids.write().remove(&order_id);
+            }
         }
-    }});
+    });
 
     // ── Poll order list from chain every 3 seconds (≈ 1 block) ──
     use_coroutine(move |_: UnboundedReceiver<()>| async move {

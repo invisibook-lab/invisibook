@@ -268,8 +268,7 @@ pub fn TradeForm(
         // We must mirror that locally so settle can find the locked record.
         //
         // No-split mode: chain locks the original cash in-place, keeping IDs.
-        let locked_cash_id =
-            orderbook::compute_cash_id(&pubkey, &input_token, &locked_cipher);
+        let locked_cash_id = orderbook::compute_cash_id(&pubkey, &input_token, &locked_cipher);
         {
             let mut store = cash_store.write();
             if cash_change.is_some() {

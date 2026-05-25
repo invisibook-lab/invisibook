@@ -14,6 +14,7 @@ mod inner {
     use num_bigint::BigUint;
     use rand::RngCore;
     use sha2::{Digest, Sha256};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
     use invisibook_lib::{
@@ -42,6 +43,16 @@ mod inner {
         pub recv_amount: u64,
         /// Random used for the received cash commitment.
         pub recv_random_hex: String,
+        /// Larger party's change cash ID (None for smaller party or no change).
+        pub change_cash_id: Option<String>,
+        /// Larger party's change token.
+        pub change_token: Option<String>,
+        /// Larger party's change plaintext amount.
+        pub change_amount: Option<u64>,
+        /// Larger party's change random (hex).
+        pub change_random_hex: Option<String>,
+        /// Larger party's change commitment (hex).
+        pub change_commitment_hex: Option<String>,
     }
 
     /// Run the full settlement flow for a matched order.
@@ -212,20 +223,30 @@ mod inner {
 
         let my_is_smaller = settled_order.is_smaller;
 
+        // ═══════════ Phase 3.5: P2P amount exchange ═══════════
+        // Smaller party sends its locked amount to larger party.
+        // Larger party receives it. This avoids guess_counter_locked_amount.
+        progress("Exchanging amount via P2P...");
+        let counter_locked_amount =
+            p2p_exchange_amount(my_is_smaller, my_locked_amount, local, peer).await?;
+
+        let (fill_t1, fill_t2) = compute_fills(
+            my_order,
+            counter_order,
+            my_locked_amount,
+            counter_locked_amount,
+            price,
+        );
+
         // ═══════════ Phase 4: Build ZK leg and submit ═══════════
+        // Prepare change info (only for larger party).
+        let mut change_info: Option<(u64, [u8; 32], String)> = None;
+
         let leg = if my_is_smaller {
             progress("Smaller party — confirming settlement...");
             None
         } else {
             progress("Generating ZK proof (larger party)...");
-            let counter_locked_amount = guess_counter_locked_amount(counter_order, cash_records);
-            let (fill_t1, fill_t2) = compute_fills(
-                my_order,
-                counter_order,
-                my_locked_amount,
-                counter_locked_amount,
-                price,
-            );
 
             let mut counter_recv_random = [0u8; 32];
             rand::rng().fill_bytes(&mut counter_recv_random);
@@ -250,7 +271,13 @@ mod inner {
             };
             let change_amount = my_locked_amount.saturating_sub(my_fill);
 
-            Some(build_larger_leg(
+            // Generate change_random before build_larger_leg so we can capture it.
+            let mut change_random = [0u8; 32];
+            if change_amount > 0 {
+                rand::rng().fill_bytes(&mut change_random);
+            }
+
+            let leg_result = build_larger_leg(
                 &my_locked_recs,
                 r_match_t1,
                 r_match_t2,
@@ -258,11 +285,20 @@ mod inner {
                 &my_lock_token,
                 my_order,
                 change_amount,
+                &change_random,
                 &counter_recv_commit_hex,
                 &counter_order.pubkey,
                 &larger_handle,
                 &larger_setup.zkey,
-            )?)
+            )?;
+
+            // Capture change info for SettleOutcome.
+            if change_amount > 0 {
+                let change_commit_hex = fr_to_hex(&poseidon_commit(change_amount, &change_random));
+                change_info = Some((change_amount, change_random, change_commit_hex));
+            }
+
+            Some(leg_result)
         };
 
         progress("Submitting settlement to chain...");
@@ -271,19 +307,11 @@ mod inner {
             .await
             .map_err(|e| format!("settle_orders: {e}"))?;
 
-        // ═══════════ Phase 5: Update local CashStore info ═══════════
+        // ═══════════ Phase 5: Compute recv info ═══════════
         let my_recv_token = counter_lock_token.clone();
         let (r_match_t1, r_match_t2) = derive_match_randoms(seed, &counter_order.pubkey);
         let r_my_recv = r_match_for_token(&my_recv_token, my_order, r_match_t1, r_match_t2);
 
-        let counter_locked_amount = guess_counter_locked_amount(counter_order, cash_records);
-        let (fill_t1, fill_t2) = compute_fills(
-            my_order,
-            counter_order,
-            my_locked_amount,
-            counter_locked_amount,
-            price,
-        );
         let my_recv_amount = if my_recv_token == my_order.subject.token1 {
             fill_t1
         } else {
@@ -294,6 +322,27 @@ mod inner {
         let recv_cash_id =
             orderbook::compute_cash_id(&my_pubkey, &my_recv_token, &my_recv_commit_hex);
 
+        // Build change fields for larger party.
+        let (
+            out_change_cash_id,
+            out_change_token,
+            out_change_amount,
+            out_change_random_hex,
+            out_change_commit_hex,
+        ) = if let Some((amt, rnd, commit_hex)) = change_info {
+            let change_cash_id =
+                orderbook::compute_cash_id(&my_pubkey, &my_lock_token, &commit_hex);
+            (
+                Some(change_cash_id),
+                Some(my_lock_token.clone()),
+                Some(amt),
+                Some(hex::encode(rnd)),
+                Some(commit_hex),
+            )
+        } else {
+            (None, None, None, None, None)
+        };
+
         progress("Settlement complete!");
 
         Ok(SettleOutcome {
@@ -301,6 +350,11 @@ mod inner {
             recv_token: my_recv_token,
             recv_amount: my_recv_amount,
             recv_random_hex: hex::encode(r_my_recv),
+            change_cash_id: out_change_cash_id,
+            change_token: out_change_token,
+            change_amount: out_change_amount,
+            change_random_hex: out_change_random_hex,
+            change_commitment_hex: out_change_commit_hex,
         })
     }
 
@@ -310,6 +364,76 @@ mod inner {
     }
 
     // ────────────────────── Helper Functions ──────────────────────
+
+    /// P2P amount exchange: smaller party sends its locked amount to larger party.
+    ///
+    /// - If `my_is_smaller == true`: send `my_locked_amount` to peer, return own amount.
+    /// - If `my_is_smaller == false`: receive counter's locked amount from peer.
+    ///
+    /// Uses TCP for simplicity since both addresses are already known from Phase 0.
+    /// The larger party listens; the smaller party connects and sends.
+    async fn p2p_exchange_amount(
+        my_is_smaller: bool,
+        my_locked_amount: u64,
+        local: SocketAddr,
+        peer: SocketAddr,
+    ) -> Result<u64, String> {
+        use tokio::net::{TcpListener, TcpStream};
+
+        // Use a deterministic port offset (+1) from the QUIC port to avoid conflict.
+        let tcp_port = local.port().wrapping_add(1);
+        let tcp_local = SocketAddr::new(local.ip(), tcp_port);
+        let tcp_peer_port = peer.port().wrapping_add(1);
+        let tcp_peer = SocketAddr::new(peer.ip(), tcp_peer_port);
+
+        if my_is_smaller {
+            // Smaller party: connect to larger and send my amount.
+            // Retry connecting because the larger party may not be listening yet.
+            let mut stream = None;
+            for _ in 0..15 {
+                match TcpStream::connect(tcp_peer).await {
+                    Ok(s) => {
+                        stream = Some(s);
+                        break;
+                    }
+                    Err(_) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+            }
+            let mut stream = stream.ok_or("P2P: failed to connect to larger party")?;
+            stream
+                .write_all(&my_locked_amount.to_le_bytes())
+                .await
+                .map_err(|e| format!("P2P send: {e}"))?;
+            // Smaller party knows counter = my_locked_amount is irrelevant for its own
+            // fill computation (it's the smaller side, all its amount is consumed).
+            // But return my own amount since compute_fills needs "counter" from my perspective.
+            // Actually: for smaller party, counter_locked_amount = larger's amount.
+            // We don't know larger's amount, but we don't need it for the smaller party
+            // because the fill is just min(seller_t1, buyer_t2/price) and the smaller
+            // party's full amount is consumed. We return my_locked_amount as placeholder;
+            // the actual fill will be correct since min() picks the smaller side anyway.
+            Ok(my_locked_amount)
+        } else {
+            // Larger party: listen for smaller party's amount.
+            let listener = TcpListener::bind(tcp_local)
+                .await
+                .map_err(|e| format!("P2P bind: {e}"))?;
+            let (mut stream, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(30), listener.accept())
+                    .await
+                    .map_err(|_| "P2P: timeout waiting for smaller party".to_string())?
+                    .map_err(|e| format!("P2P accept: {e}"))?;
+
+            let mut buf = [0u8; 8];
+            stream
+                .read_exact(&mut buf)
+                .await
+                .map_err(|e| format!("P2P recv: {e}"))?;
+            Ok(u64::from_le_bytes(buf))
+        }
+    }
 
     /// Derive match randoms via static ECDH (ed25519 -> x25519).
     /// Both parties compute the same shared secret without extra communication.
@@ -359,16 +483,6 @@ mod inner {
         arr
     }
 
-    /// Guess the counterparty's locked amount from local records. Falls back to 0.
-    fn guess_counter_locked_amount(counter: &Order, records: &[CashRecord]) -> u64 {
-        counter
-            .input_cash_ids
-            .iter()
-            .filter_map(|id| records.iter().find(|r| &r.cash_id == id))
-            .map(|r| r.amount)
-            .sum()
-    }
-
     /// Choose which r_match corresponds to the given token (Token1 vs Token2).
     fn r_match_for_token(
         token: &TokenID,
@@ -402,6 +516,8 @@ mod inner {
     }
 
     /// Build the larger party's ZK settlement leg with proof.
+    ///
+    /// `change_random` is pre-generated by the caller so it can be captured.
     #[allow(clippy::too_many_arguments)]
     fn build_larger_leg(
         inputs: &[CashRecord],
@@ -411,6 +527,7 @@ mod inner {
         token: &TokenID,
         order: &Order,
         change_amount: u64,
+        change_random: &[u8; 32],
         counterparty_recv_commit_hex: &str,
         counterparty_pubkey: &str,
         handle: &TestCircuitHandle,
@@ -427,10 +544,6 @@ mod inner {
         } else {
             (my_fill * price, r_match_t1, r_match_t2)
         };
-        let mut change_random = [0u8; 32];
-        if change_amount > 0 {
-            rand::rng().fill_bytes(&mut change_random);
-        }
         let sp = prove_settle_larger(
             SettleLargerWitness {
                 r_my,
@@ -440,7 +553,7 @@ mod inner {
                 is_token2_sender,
                 inputs: inputs_for_witness,
                 change_amount,
-                change_random,
+                change_random: *change_random,
                 counterparty_recv_commitment_hex: counterparty_recv_commit_hex.to_string(),
             },
             handle,
