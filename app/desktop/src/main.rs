@@ -91,14 +91,6 @@ fn App() -> Element {
                         continue;
                     }
                 };
-                let seed = match *seed_signal.read() {
-                    Some(s) => s,
-                    None => {
-                        message.set(Some(("✗ No seed available".into(), true)));
-                        continue;
-                    }
-                };
-
                 // Find my order and counter order from the order list.
                 let (my_order, counter_order) = {
                     let list = orders.read();
@@ -131,7 +123,6 @@ fn App() -> Element {
                     &my_order,
                     &counter_order,
                     &records_snapshot,
-                    &seed,
                     |status| {
                         let short = orderbook::short_id(&settle_order_id);
                         msg_signal.set(Some((format!("[{short}] {status}"), false)));
@@ -202,36 +193,27 @@ fn App() -> Element {
                         ) {
                             if change_amount > 0 {
                                 // Generate fresh blinding factor and commitment for the repost order.
+                                // The input cash is the on-chain change cash (change_cash_id),
+                                // NOT a freshly computed ID.
                                 let (repost_cipher, _, repost_random_hex) =
                                     orderbook::encrypt_amount_with_info(&change_amount.to_string());
-                                let pubkey = c.pubkey_hex().to_string();
-                                let repost_cash_id = orderbook::compute_cash_id(
-                                    &pubkey,
-                                    change_token,
-                                    &repost_cipher,
-                                );
 
-                                // Update CashStore: the change cash becomes locked with fresh commitment.
+                                // Update CashStore: update random for the existing change cash
+                                // so MPC can use the new commitment's random later.
                                 {
                                     let mut store = cash_store.write();
-                                    // Mark old change cash as spent (will be replaced by locked version).
                                     for rec in store.records_mut().iter_mut() {
                                         if &rec.cash_id == change_cash_id {
-                                            rec.status = CASH_SPENT;
+                                            rec.random = repost_random_hex.clone();
+                                            rec.status = CASH_LOCKED;
                                         }
                                     }
-                                    store.records_mut().push(CashRecord {
-                                        cash_id: repost_cash_id.clone(),
-                                        token: change_token.clone(),
-                                        amount: change_amount,
-                                        random: repost_random_hex.clone(),
-                                        status: CASH_LOCKED,
-                                    });
                                     let _ = store.flush();
                                 }
 
                                 let repost_order_id =
-                                    orderbook::compute_order_id(&[repost_cash_id.clone()]);
+                                    orderbook::compute_order_id(&[change_cash_id.clone()]);
+                                let pubkey = c.pubkey_hex().to_string();
                                 let repost_order = Order {
                                     id: repost_order_id.clone(),
                                     trade_type: my_order.trade_type.clone(),
@@ -239,7 +221,7 @@ fn App() -> Element {
                                     price: my_order.price,
                                     amount: repost_cipher,
                                     pubkey: pubkey.clone(),
-                                    input_cash_ids: vec![repost_cash_id],
+                                    input_cash_ids: vec![change_cash_id.clone()],
                                     handling_fee: my_order.handling_fee.clone(),
                                     block_height: 0,
                                     status: OrderStatus::Pending,
@@ -251,7 +233,7 @@ fn App() -> Element {
                                     Ok(()) => {
                                         own_order_ids.write().insert(
                                             repost_order_id.clone(),
-                                            change_random_hex.clone(),
+                                            change_amount.to_string(),
                                         );
                                         let short_r = orderbook::short_id(&repost_order_id);
                                         message.set(Some((
@@ -263,16 +245,14 @@ fn App() -> Element {
                                         )));
                                     }
                                     Err(e) => {
-                                        // Rollback: restore original change cash.
+                                        // Rollback: restore change cash to active.
                                         let mut store = cash_store.write();
                                         for rec in store.records_mut().iter_mut() {
                                             if &rec.cash_id == change_cash_id {
+                                                rec.random = change_random_hex.clone();
                                                 rec.status = CASH_ACTIVE;
                                             }
                                         }
-                                        store.records_mut().retain(|r| {
-                                            r.cash_id != repost_order.input_cash_ids[0]
-                                        });
                                         let _ = store.flush();
                                         let short_r = orderbook::short_id(&order_id);
                                         message

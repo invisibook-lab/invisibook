@@ -2717,18 +2717,14 @@ dependencies = [
 name = "invisibook-ui"
 version = "0.1.0"
 dependencies = [
- "curve25519-dalek",
  "dioxus",
- "ed25519-dalek",
  "hex",
  "invisibook-lib",
  "mpc",
  "num-bigint",
  "rand 0.9.2",
  "serde_json",
- "sha2",
  "tokio",
- "x25519-dalek",
  "zk",
 ]
 
