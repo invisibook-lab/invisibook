@@ -571,10 +571,20 @@ func (ot *OrderBook) SettleOrders(ctx *context.WriteContext) error {
 		largerLeg = req.Leg
 	}
 
-	// Price agreement check.
-	expectedPrice := myOrder.Price.Uint64()
-	if myOrder.Price.Uint64() != matchOrder.Price.Uint64() {
-		return fmt.Errorf("matched orders %s and %s disagree on price", myOrder.ID, matchOrder.ID)
+	// Execution price: maker's price (earlier block height).
+	// Same block height: use the lower price (favorable to buyer).
+	var expectedPrice uint64
+	if myOrder.BlockHeight < matchOrder.BlockHeight {
+		expectedPrice = myOrder.Price.Uint64()
+	} else if matchOrder.BlockHeight < myOrder.BlockHeight {
+		expectedPrice = matchOrder.Price.Uint64()
+	} else {
+		p, q := myOrder.Price.Uint64(), matchOrder.Price.Uint64()
+		if p < q {
+			expectedPrice = p
+		} else {
+			expectedPrice = q
+		}
 	}
 
 	// Validate the larger leg fields.
@@ -582,7 +592,7 @@ func (ot *OrderBook) SettleOrders(ctx *context.WriteContext) error {
 		return fmt.Errorf("larger leg missing required commitment field(s)")
 	}
 	if largerLeg.Price != expectedPrice {
-		return fmt.Errorf("larger leg price %d != order price %d", largerLeg.Price, expectedPrice)
+		return fmt.Errorf("larger leg price %d != execution price %d", largerLeg.Price, expectedPrice)
 	}
 	isT2 := largerLeg.Token == largerOrder.Subject.Token2
 	if largerLeg.IsToken2Sender != isT2 {

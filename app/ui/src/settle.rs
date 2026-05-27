@@ -67,9 +67,19 @@ mod inner {
         let my_order_id = my_order.id.clone();
         let match_order_id = counter_order.id.clone();
 
+        // Execution price: maker's price (earlier block_height).
+        // Same block height: use the lower price (favorable to buyer).
         let price = match (my_order.price, counter_order.price) {
-            (Some(p), Some(q)) if p == q => p,
-            _ => return Err("orders disagree on price".into()),
+            (Some(p), Some(q)) => {
+                if my_order.block_height < counter_order.block_height {
+                    p
+                } else if counter_order.block_height < my_order.block_height {
+                    q
+                } else {
+                    p.min(q)
+                }
+            }
+            _ => return Err("orders missing price".into()),
         };
 
         // Determine locked tokens.
