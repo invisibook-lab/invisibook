@@ -147,6 +147,8 @@ fn App() -> Element {
                                 amount: outcome.recv_amount,
                                 random: outcome.recv_random_hex,
                                 status: CASH_ACTIVE,
+                                order_amount: None,
+                                order_random: None,
                             });
                             // Persist change cash for the larger party.
                             if let (Some(ref cid), Some(ref ctk), Some(camt), Some(ref crnd)) = (
@@ -162,6 +164,8 @@ fn App() -> Element {
                                         amount: camt,
                                         random: crnd.clone(),
                                         status: CASH_ACTIVE,
+                                        order_amount: None,
+                                        order_random: None,
                                     });
                                 }
                             }
@@ -202,20 +206,36 @@ fn App() -> Element {
                                     TradeType::Sell => change_amount,
                                 };
 
-                                // Generate fresh blinding factor and commitment for the repost order.
-                                // The input cash is the on-chain change cash (change_cash_id),
-                                // NOT a freshly computed ID.
+                                // Generate fresh commitment for the repost order.
+                                // order.amount always commits to token1 quantity.
                                 let (repost_cipher, _, repost_random_hex) =
-                                    orderbook::encrypt_amount_with_info(&change_amount.to_string());
+                                    orderbook::encrypt_amount_with_info(
+                                        &display_amount.to_string(),
+                                    );
 
-                                // Update CashStore: update random for the existing change cash
-                                // so MPC can use the new commitment's random later.
+                                // Update CashStore: mark change cash as locked for repost.
+                                // For sell orders, the order commitment matches the cash
+                                // commitment, so we update the random directly.
+                                // For buy orders, cash random stays (for cash tracking),
+                                // and we store a separate order_random/order_amount.
                                 {
                                     let mut store = cash_store.write();
                                     for rec in store.records_mut().iter_mut() {
                                         if &rec.cash_id == change_cash_id {
-                                            rec.random = repost_random_hex.clone();
                                             rec.status = CASH_LOCKED;
+                                            match my_order.trade_type {
+                                                TradeType::Buy => {
+                                                    // Cash random unchanged; store order commitment info.
+                                                    rec.order_amount = Some(display_amount);
+                                                    rec.order_random =
+                                                        Some(repost_random_hex.clone());
+                                                }
+                                                TradeType::Sell => {
+                                                    // Sell: order amount == cash amount,
+                                                    // replace random for MPC.
+                                                    rec.random = repost_random_hex.clone();
+                                                }
+                                            }
                                         }
                                     }
                                     let _ = store.flush();
@@ -239,7 +259,7 @@ fn App() -> Element {
                                     is_smaller: false,
                                 };
 
-                                match c.send_order(&repost_order, None, None).await {
+                                match c.send_order(&repost_order, None, None, None).await {
                                     Ok(()) => {
                                         own_order_ids.write().insert(
                                             repost_order_id.clone(),
@@ -259,8 +279,13 @@ fn App() -> Element {
                                         let mut store = cash_store.write();
                                         for rec in store.records_mut().iter_mut() {
                                             if &rec.cash_id == change_cash_id {
-                                                rec.random = change_random_hex.clone();
                                                 rec.status = CASH_ACTIVE;
+                                                rec.order_amount = None;
+                                                rec.order_random = None;
+                                                // Sell orders had their random replaced; restore it.
+                                                if my_order.trade_type == TradeType::Sell {
+                                                    rec.random = change_random_hex.clone();
+                                                }
                                             }
                                         }
                                         let _ = store.flush();

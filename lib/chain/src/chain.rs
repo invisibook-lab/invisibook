@@ -34,6 +34,11 @@ struct SendOrderParams {
     /// when `change.is_some()`; chain rejects empty proof in split mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     zk_proof: Option<String>,
+    /// For buy orders in split mode: the actual cash commitment (poseidon(usdt_total, r_cash)).
+    /// Split proof and locked cash use this instead of `amount` (which is the token1 qty commitment).
+    /// Omitted for sell orders or no-split mode (chain falls back to `amount`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    locked_commitment: Option<CipherText>,
 }
 
 #[derive(Debug, Serialize)]
@@ -329,18 +334,20 @@ impl ChainClient {
         hex::encode(kp.sign(message))
     }
 
-    /// Sends a new order to the chain (writing request to OrderBook.SendOrder).
-    /// If `change` is provided, the chain will split the input cash and mint change;
-    /// in that case `split_proof_json` is required (snarkjs `proof.json` from
-    /// rapidsnark) — chain rejects split-mode requests without a proof.
     /// Submits a new order to the chain. When `change` is provided (split
     /// mode), `split_proof_json` must contain the ZK proof proving
     /// sum(inputs) == sum(outputs).
+    ///
+    /// `locked_commitment` is required for buy orders in split mode: the actual
+    /// cash commitment (poseidon(usdt_total, r_cash)). The chain uses it for
+    /// split proof verification and locked cash creation, while `order.amount`
+    /// stores the token1 quantity commitment for MPC comparison.
     pub async fn send_order(
         &self,
         order: &Order,
         change: Option<&CashChange>,
         split_proof_json: Option<String>,
+        locked_commitment: Option<CipherText>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if change.is_some() && split_proof_json.is_none() {
             return Err("split mode requires a zk_proof".into());
@@ -368,6 +375,7 @@ impl ChainClient {
                 amount: c.amount.clone(),
             }),
             zk_proof: split_proof_json,
+            locked_commitment,
         };
         self.client
             .write_chain("orderbook", "SendOrder", &params, self.chain_id, 100, 0)

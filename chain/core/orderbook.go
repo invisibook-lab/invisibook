@@ -95,6 +95,10 @@ type SendOrderRequest struct {
 	HandlingFee  []string          `json:"handling_fee"   validate:"required,min=1"` // must be plaintext.
 	Change       *CashChangeOutput `json:"change,omitempty"`
 	ZkProof      string            `json:"zk_proof,omitempty"` // required when Change != nil
+	// For buy orders in split mode: the actual cash commitment (poseidon(usdt_total, r_cash)).
+	// Split proof and locked cash use this instead of Amount (which stores the token1 qty commitment).
+	// When empty, falls back to Amount (sell orders or no-split mode).
+	LockedCommitment CipherText `json:"locked_commitment,omitempty"`
 }
 
 // SendOrder creates a new order, locks the input Cash, stores it via SQL, and attempts to match it.
@@ -158,9 +162,17 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	if req.Change != nil {
 		// Split mode requires a zk proof of conservation:
 		//   sum(input_commitments) == sum(output_commitments)
-		// where outputs are [Amount (locked), Change.Amount].
+		// where outputs are [LockedCommitment (or Amount), Change.Amount].
 		if req.ZkProof == "" {
 			return fmt.Errorf("split mode requires zk_proof")
+		}
+
+		// For buy orders, LockedCommitment holds the actual cash commitment
+		// (poseidon(usdt_total, r_cash)), while Amount holds the token1 qty
+		// commitment for MPC. For sell orders (or when omitted), fall back to Amount.
+		cashCommitment := req.Amount
+		if req.LockedCommitment != "" {
+			cashCommitment = req.LockedCommitment
 		}
 
 		// Rebuild the public-input vector in the order split.circom declares them:
@@ -188,9 +200,9 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 			}
 			publicSignals = append(publicSignals, dec)
 		}
-		lockedDec, err := HexToDecimal(string(req.Amount))
+		lockedDec, err := HexToDecimal(string(cashCommitment))
 		if err != nil {
-			return fmt.Errorf("invalid locked Amount: %w", err)
+			return fmt.Errorf("invalid locked commitment: %w", err)
 		}
 		changeDec, err := HexToDecimal(string(req.Change.Amount))
 		if err != nil {
@@ -206,10 +218,10 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 		if err := ot.Account.SpendCash(req.InputCashIDs, string(req.ID)); err != nil {
 			return fmt.Errorf("failed to spend cash for split: %w", err)
 		}
-		lockedCashID := computeCashID(req.Pubkey, expectedToken, req.Amount)
+		lockedCashID := computeCashID(req.Pubkey, expectedToken, cashCommitment)
 		if err := ot.Account.CreateCash(&Cash{
 			ID: lockedCashID, Pubkey: req.Pubkey, Token: expectedToken,
-			Amount: req.Amount, ZkProof: req.ZkProof, Status: Locked, By: string(req.ID),
+			Amount: cashCommitment, ZkProof: req.ZkProof, Status: Locked, By: string(req.ID),
 		}); err != nil {
 			return fmt.Errorf("failed to create locked split cash: %w", err)
 		}

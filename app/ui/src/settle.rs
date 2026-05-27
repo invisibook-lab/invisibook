@@ -145,11 +145,28 @@ mod inner {
             TradeType::Sell => Side::Sell,
         };
 
-        let my_random_hex = &my_locked_recs[0].random;
-        let my_random_dec = hex_to_fr_decimal(my_random_hex);
+        // MPC compares token1 quantities. For sell orders, the locked amount IS
+        // the token1 qty. For buy orders, order_amount/order_random store the
+        // token1 qty and its separate blinding factor.
+        let (my_mpc_value, my_mpc_random_hex) = match my_order.trade_type {
+            TradeType::Buy => {
+                let oa = my_locked_recs[0]
+                    .order_amount
+                    .ok_or("buy order missing order_amount in CashRecord")?;
+                let or = my_locked_recs[0]
+                    .order_random
+                    .as_ref()
+                    .ok_or("buy order missing order_random in CashRecord")?
+                    .clone();
+                (oa, or)
+            }
+            TradeType::Sell => (my_locked_amount, my_locked_recs[0].random.clone()),
+        };
+
+        let my_random_dec = hex_to_fr_decimal(&my_mpc_random_hex);
         let my_commit = fr_to_hex(&poseidon_commit(
-            my_locked_amount,
-            &hex_to_bytes32(my_random_hex),
+            my_mpc_value,
+            &hex_to_bytes32(&my_mpc_random_hex),
         ));
         let my_commit_dec = hex_to_fr_decimal(&my_commit);
         let counter_commit_dec = hex_to_fr_decimal(&counter_order.amount);
@@ -166,7 +183,7 @@ mod inner {
         let mpc_result: SettleShare = settle(
             &mpc_config,
             mpc_side,
-            my_locked_amount,
+            my_mpc_value,
             &my_random_dec,
             &c1,
             &c2,
@@ -257,7 +274,8 @@ mod inner {
             rand::rng().fill_bytes(&mut my_recv_random);
             my_recv_random_for_larger = Some(my_recv_random);
 
-            let counter_recv_amount = if counter_lock_token == my_order.subject.token1 {
+            // Counter receives MY token. Amount = my fill in my lock token.
+            let counter_recv_amount = if my_lock_token == my_order.subject.token1 {
                 fill_t1
             } else {
                 fill_t2

@@ -201,18 +201,27 @@ pub fn TradeForm(
             token1: t1.clone(),
             token2: t2.clone(),
         };
-        // Build the locked-amount commitment and remember its random for the
-        // split proof witness. For Buy orders, the locked cash is `total`
-        // (token2 being spent), not `_amount` (token1 being bought).
-        let (locked_cipher, _, locked_random_hex) =
-            orderbook::encrypt_amount_with_info(&total.to_string());
+        // Build the order amount commitment. order.amount always commits to the
+        // token1 quantity so MPC can compare both sides in the same denomination.
+        // For buy orders, we also need a separate locked_commitment for the actual
+        // cash amount (USDT total) used by the split proof and cash tracking.
+        let (order_cipher, _, order_random_hex) =
+            orderbook::encrypt_amount_with_info(&_amount.to_string());
+
+        // Cash commitment: for sell, same as order; for buy, commits to USDT total.
+        let (locked_cipher, locked_random_hex) = if trade_type == TradeType::Buy {
+            let (cipher, _, random) = orderbook::encrypt_amount_with_info(&total.to_string());
+            (cipher, random)
+        } else {
+            (order_cipher.clone(), order_random_hex.clone())
+        };
 
         let order = Order {
             id: order_id,
             trade_type,
             subject,
             price: Some(price),
-            amount: locked_cipher.clone(),
+            amount: order_cipher.clone(),
             pubkey: pubkey.clone(),
             input_cash_ids: input_cash_ids.clone(),
             handling_fee: vec![fee.clone()],
@@ -278,12 +287,21 @@ pub fn TradeForm(
                         rec.status = CASH_SPENT;
                     }
                 }
+                // For buy orders, store order_amount (token1 qty) and order_random
+                // so settle can pass them to MPC for commitment verification.
+                let (rec_order_amount, rec_order_random) = if trade_type == TradeType::Buy {
+                    (Some(_amount), Some(order_random_hex.clone()))
+                } else {
+                    (None, None)
+                };
                 store.records_mut().push(CashRecord {
                     cash_id: locked_cash_id.clone(),
                     token: input_token.clone(),
                     amount: total,
                     random: locked_random_hex.clone(),
                     status: CASH_LOCKED,
+                    order_amount: rec_order_amount,
+                    order_random: rec_order_random,
                 });
                 if let Some((_, ref change_cash_id, change_amount, _, ref change_random)) =
                     cash_change
@@ -294,6 +312,8 @@ pub fn TradeForm(
                         amount: change_amount,
                         random: change_random.clone(),
                         status: CASH_ACTIVE,
+                        order_amount: None,
+                        order_random: None,
                     });
                 }
             } else {
@@ -301,16 +321,33 @@ pub fn TradeForm(
                 for rec in store.records_mut().iter_mut() {
                     if input_cash_ids.contains(&rec.cash_id) {
                         rec.status = CASH_LOCKED;
+                        // For buy orders, store order amount/random for MPC.
+                        if trade_type == TradeType::Buy {
+                            rec.order_amount = Some(_amount);
+                            rec.order_random = Some(order_random_hex.clone());
+                        }
                     }
                 }
             }
         }
 
+        // For buy orders in split mode, pass the cash commitment separately.
+        let locked_commitment_param = if trade_type == TradeType::Buy && cash_change.is_some() {
+            Some(locked_cipher.clone())
+        } else {
+            None
+        };
+
         submitting.set(true);
         let amount_str_clone = amount_str.clone();
         spawn(async move {
             match client
-                .send_order(&order, change_ref.as_ref(), split_proof)
+                .send_order(
+                    &order,
+                    change_ref.as_ref(),
+                    split_proof,
+                    locked_commitment_param,
+                )
                 .await
             {
                 Ok(()) => {

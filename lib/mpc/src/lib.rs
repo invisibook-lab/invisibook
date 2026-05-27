@@ -16,10 +16,10 @@
 //! ```ignore
 //! let result = mpc::settle(
 //!     &SettleConfig {
-//!         party_id: 0,
 //!         local_addr: "0.0.0.0:9000".parse()?,
 //!         peer_addr: "192.168.1.101:9000".parse()?,
 //!     },
+//!     Side::Buy,
 //!     my_value,
 //!     my_random,
 //!     c1, c2,
