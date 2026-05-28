@@ -2,8 +2,10 @@ package core
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/BurntSushi/toml"
+	"gorm.io/gorm/logger"
 )
 
 // Config holds all configurable parameters for the core tripods.
@@ -15,14 +17,15 @@ type Config struct {
 // OrderBookConfig holds configuration for the OrderBook tripod.
 //
 // `SplitVKPath` is the snarkjs `vk.json` for the split circuit (SendOrder).
-// `SettleLargerVKPath` and `SettleSmallerVKPath` are the two settle circuits
-// (the larger side of a matched pair has change + a cross-leg ratio check; the
-// smaller side has no change). All three are required at startup.
+// `SettleLargerVKPath` is the settle circuit for the larger side (change +
+// cross-leg ratio check). Only the larger party submits a ZK proof; the
+// smaller party confirms settlement without proof.
+// `DBLogLevel` controls GORM SQL logging: "silent", "error", "warn", "info".
 type OrderBookConfig struct {
-	DBPath              string `toml:"db_path"`
-	SplitVKPath         string `toml:"split_vk_path"`
-	SettleLargerVKPath  string `toml:"settle_larger_vk_path"`
-	SettleSmallerVKPath string `toml:"settle_smaller_vk_path"`
+	DBPath             string `toml:"db_path"`
+	SplitVKPath        string `toml:"split_vk_path"`
+	SettleLargerVKPath string `toml:"settle_larger_vk_path"`
+	DBLogLevel         string `toml:"db_log_level"`
 }
 
 // AccountConfig holds configuration for the Account tripod.
@@ -31,10 +34,12 @@ type OrderBookConfig struct {
 // produced by `snarkjs zkey export verificationkey <circuit>.zkey vk.json`.
 // Both are required at startup — chain refuses to boot if any path is unset
 // or the file is missing/malformed.
+// `DBLogLevel` controls GORM SQL logging: "silent", "error", "warn", "info".
 type AccountConfig struct {
 	DBPath         string        `toml:"db_path"`
 	DepositVKPath  string        `toml:"deposit_vk_path"`
 	WithdrawVKPath string        `toml:"withdraw_vk_path"`
+	DBLogLevel     string        `toml:"db_log_level"`
 	GenesisCash    []GenesisCash `toml:"genesis_cash"`
 }
 
@@ -48,14 +53,32 @@ type GenesisCash struct {
 }
 
 // DefaultConfig returns a Config with sensible defaults.
+// DBLogLevel defaults to "warn" to suppress expected "record not found" noise.
 func DefaultConfig() *Config {
 	return &Config{
 		OrderBook: OrderBookConfig{
-			DBPath: "orders.db",
+			DBPath:     "orders.db",
+			DBLogLevel: "warn",
 		},
 		Account: AccountConfig{
-			DBPath: "accounts.db",
+			DBPath:     "accounts.db",
+			DBLogLevel: "warn",
 		},
+	}
+}
+
+// ParseGormLogLevel converts a string log level to gorm logger.LogLevel.
+// Accepted values: "silent", "error", "warn", "info". Defaults to Warn.
+func ParseGormLogLevel(level string) logger.LogLevel {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "silent":
+		return logger.Silent
+	case "error":
+		return logger.Error
+	case "info":
+		return logger.Info
+	default:
+		return logger.Warn
 	}
 }
 

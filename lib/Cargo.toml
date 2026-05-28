@@ -1,3 +1,3 @@
 [workspace]
-members = ["chain", "zk"]
+members = ["chain", "zk", "mpc"]
 resolver = "2"

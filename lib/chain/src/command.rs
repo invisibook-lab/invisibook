@@ -106,6 +106,7 @@ pub fn parse_command(input: &str) -> CommandResult {
         block_height: 0,
         status: OrderStatus::Pending,
         match_order: None,
+        is_smaller: false,
     };
 
     let type_name = match trade_type {

@@ -34,6 +34,11 @@ struct SendOrderParams {
     /// when `change.is_some()`; chain rejects empty proof in split mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     zk_proof: Option<String>,
+    /// For buy orders in split mode: the actual cash commitment (poseidon(usdt_total, r_cash)).
+    /// Split proof and locked cash use this instead of `amount` (which is the token1 qty commitment).
+    /// Omitted for sell orders or no-split mode (chain falls back to `amount`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    locked_commitment: Option<CipherText>,
 }
 
 #[derive(Debug, Serialize)]
@@ -42,10 +47,32 @@ struct TradePairJson {
     token2: TokenID,
 }
 
+/// Per-party MPC share submission for the comparison phase.
+#[derive(Debug, Serialize)]
+struct CompareOrderParams {
+    order_id: OrderID,
+    match_order_id: OrderID,
+    mpc_share: MpcShareParamJson,
+}
+
+/// Per-party settle submission sent to chain after comparison.
+/// `leg` is required for the larger party, omitted for the smaller party.
 #[derive(Debug, Serialize)]
 struct SettleOrderParams {
-    order_ids: Vec<OrderID>,
-    legs: Vec<SettleTokenLegParam>,
+    order_id: OrderID,
+    match_order_id: OrderID,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    leg: Option<SettleTokenLegParam>,
+}
+
+/// Serializable form of MpcShareParam for the chain JSON API.
+#[derive(Debug, Serialize)]
+struct MpcShareParamJson {
+    cmp_share: String,
+    cmp_mac: String,
+    r_smaller_share: String,
+    r_smaller_mac: String,
+    mac_key_share: String,
 }
 
 /// Mirror of chain Go `SettleTokenLeg`. `side` is `"larger"` or `"smaller"`;
@@ -75,6 +102,28 @@ pub struct SettleTokenLegParam {
     pub recv_commitment: String,
     pub recv_pubkey: String,
     pub zk_proof: String,
+}
+
+/// Register settle address request params.
+#[derive(Debug, Serialize)]
+struct RegisterSettleAddrParams {
+    order_id: OrderID,
+    match_order_id: OrderID,
+    addr: String,
+}
+
+/// Query settle address request params.
+#[derive(Debug, Serialize)]
+struct QuerySettleAddrParams {
+    order_id: OrderID,
+    match_order_id: OrderID,
+}
+
+/// Query settle address response.
+#[derive(Debug, Deserialize)]
+struct QuerySettleAddrResponse {
+    #[serde(default)]
+    addr: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,6 +167,8 @@ pub struct QueryOrderItem {
     pub status: u8,
     #[serde(default)]
     pub match_order: Option<String>,
+    #[serde(default)]
+    pub is_smaller: bool,
 }
 
 /// Go's `*big.Int` serializes as a JSON string (e.g. `"100"`) via `MarshalText`,
@@ -283,23 +334,24 @@ impl ChainClient {
         hex::encode(kp.sign(message))
     }
 
-    /// Sends a new order to the chain (writing request to OrderBook.SendOrder).
-    /// If `change` is provided, the chain will split the input cash and mint change;
-    /// in that case `split_proof_json` is required (snarkjs `proof.json` from
-    /// rapidsnark) — chain rejects split-mode requests without a proof.
+    /// Submits a new order to the chain. When `change` is provided (split
+    /// mode), `split_proof_json` must contain the ZK proof proving
+    /// sum(inputs) == sum(outputs).
+    ///
+    /// `locked_commitment` is required for buy orders in split mode: the actual
+    /// cash commitment (poseidon(usdt_total, r_cash)). The chain uses it for
+    /// split proof verification and locked cash creation, while `order.amount`
+    /// stores the token1 quantity commitment for MPC comparison.
     pub async fn send_order(
         &self,
         order: &Order,
         change: Option<&CashChange>,
         split_proof_json: Option<String>,
+        locked_commitment: Option<CipherText>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if change.is_some() && split_proof_json.is_none() {
             return Err("split mode requires a zk_proof".into());
         }
-        if change.is_none() && split_proof_json.is_some() {
-            return Err("zk_proof supplied without a change output (non-split mode)".into());
-        }
-
         let type_int = match order.trade_type {
             TradeType::Buy => 0u8,
             TradeType::Sell => 1u8,
@@ -323,25 +375,104 @@ impl ChainClient {
                 amount: c.amount.clone(),
             }),
             zk_proof: split_proof_json,
+            locked_commitment,
         };
         self.client
             .write_chain("orderbook", "SendOrder", &params, self.chain_id, 100, 0)
             .await
     }
 
-    /// Requests settlement of a matched order pair. `legs` must be the two
-    /// pre-proven token legs (one larger + one smaller, or two larger when both
-    /// orders fully fill); the wallet builds these by running rapidsnark for
-    /// each side. See `cli_settle` for the demo driver that produces them.
-    pub async fn settle_order(
+    /// Submits this party's MPC shares for order comparison.
+    /// The chain collects both parties' shares and verifies the MAC,
+    /// then sets both orders to Compared status.
+    pub async fn compare_orders(
         &self,
-        order_ids: Vec<OrderID>,
-        legs: Vec<SettleTokenLegParam>,
+        order_id: OrderID,
+        match_order_id: OrderID,
+        mpc_share: MpcShareParam,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let params = SettleOrderParams { order_ids, legs };
+        let params = CompareOrderParams {
+            order_id,
+            match_order_id,
+            mpc_share: MpcShareParamJson {
+                cmp_share: mpc_share.cmp_share,
+                cmp_mac: mpc_share.cmp_mac,
+                r_smaller_share: mpc_share.r_smaller_share,
+                r_smaller_mac: mpc_share.r_smaller_mac,
+                mac_key_share: mpc_share.mac_key_share,
+            },
+        };
         self.client
-            .write_chain("orderbook", "SettleOrder", &params, self.chain_id, 100, 0)
+            .write_chain("orderbook", "CompareOrders", &params, self.chain_id, 100, 0)
             .await
+    }
+
+    /// Submits this party's settlement confirmation (after comparison).
+    /// The larger party (IsSmaller=false) must provide a ZK `leg`; the smaller
+    /// party (IsSmaller=true) confirms without proof (`leg` is `None`).
+    pub async fn settle_orders(
+        &self,
+        order_id: OrderID,
+        match_order_id: OrderID,
+        leg: Option<SettleTokenLegParam>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let params = SettleOrderParams {
+            order_id,
+            match_order_id,
+            leg,
+        };
+        self.client
+            .write_chain("orderbook", "SettleOrders", &params, self.chain_id, 100, 0)
+            .await
+    }
+
+    /// Registers this party's QUIC address on-chain for MPC peer discovery.
+    /// NOTE: This on-chain address exchange is temporary. In production, peer
+    /// addresses will be exchanged via Tor or similar anonymous overlay network.
+    pub async fn register_settle_addr(
+        &self,
+        order_id: OrderID,
+        match_order_id: OrderID,
+        addr: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let params = RegisterSettleAddrParams {
+            order_id,
+            match_order_id,
+            addr: addr.to_string(),
+        };
+        self.client
+            .write_chain(
+                "orderbook",
+                "RegisterSettleAddr",
+                &params,
+                self.chain_id,
+                10,
+                0,
+            )
+            .await
+    }
+
+    /// Queries the counterparty's registered QUIC address for MPC settle.
+    /// Returns `None` if the counterparty hasn't registered yet.
+    pub async fn query_settle_addr(
+        &self,
+        order_id: OrderID,
+        match_order_id: OrderID,
+    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let params = QuerySettleAddrParams {
+            order_id,
+            match_order_id,
+        };
+        let value: Value = self
+            .client
+            .read_chain("orderbook", "QuerySettleAddr", &params)
+            .await?;
+        let resp: QuerySettleAddrResponse = serde_json::from_value(value)?;
+        if resp.addr.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(resp.addr))
+        }
     }
 
     /// Queries orders from the chain with optional filters and pagination.
@@ -370,6 +501,7 @@ impl ChainClient {
                 OrderStatus::Done => 2,
                 OrderStatus::Cancelled => 3,
                 OrderStatus::Frozen => 4,
+                OrderStatus::Settling => 5,
             }),
             limit,
             offset,
@@ -681,6 +813,7 @@ fn query_item_to_order(item: QueryOrderItem) -> Order {
         1 => OrderStatus::Matched,
         2 => OrderStatus::Done,
         3 => OrderStatus::Cancelled,
+        5 => OrderStatus::Settling,
         _ => OrderStatus::Frozen,
     };
     Order {
@@ -698,5 +831,6 @@ fn query_item_to_order(item: QueryOrderItem) -> Order {
         block_height: item.block_height,
         status,
         match_order: item.match_order,
+        is_smaller: item.is_smaller,
     }
 }

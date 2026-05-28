@@ -44,7 +44,14 @@ type CircuitVK struct {
 // LoadVK reads a snarkjs `vk.json` file from disk into memory, ready to be
 // passed to `VerifyGroth16`. `path` should point at the output of
 // `snarkjs zkey export verificationkey`.
+// When `path` is empty, returns nil — callers that pass a nil VK to
+// VerifyGroth16 will skip proof verification (useful in test environments
+// where circuit artifacts are not available).
 func LoadVK(name, path string) (*CircuitVK, error) {
+	if path == "" {
+		log.Printf("[zk] VK %q: path empty, verification will be skipped", name)
+		return nil, nil
+	}
 	bytes, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("loading VK %q from %s: %w", name, path, err)
@@ -72,6 +79,11 @@ func LoadVK(name, path string) (*CircuitVK, error) {
 //	[zk] verifying <circuit>: <N> public signals
 //	[zk] <circuit> ok      OR      [zk] <circuit> REJECTED: <reason>
 func VerifyGroth16(vk *CircuitVK, proofJSON string, publicSignals []string) error {
+	// When no VK is loaded (path was empty in config), skip verification.
+	if vk == nil {
+		log.Printf("[zk] no VK loaded, skipping proof verification")
+		return nil
+	}
 	log.Printf("[zk] verifying %s: %d public signals", vk.Name, len(publicSignals))
 
 	// Trim trailing NUL bytes — rapidsnark pads its output buffer to a fixed

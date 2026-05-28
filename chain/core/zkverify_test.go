@@ -286,17 +286,6 @@ func TestVerifyGroth16AcceptsValidSettleLargerProof(t *testing.T) {
 	}
 }
 
-func TestVerifyGroth16AcceptsValidSettleSmallerProof(t *testing.T) {
-	fx := loadSettleFixture(t)
-	vk, err := LoadVK("settle_smaller", fx.Smaller.VKPath)
-	if err != nil {
-		t.Fatalf("loading VK: %v", err)
-	}
-	if err := VerifyGroth16(vk, string(fx.Smaller.ProofJSON), fx.Smaller.PublicJSON); err != nil {
-		t.Fatalf("verify on a valid settle_smaller proof must succeed, got: %v", err)
-	}
-}
-
 func TestVerifyGroth16RejectsTamperedSettleLargerOtherMatch(t *testing.T) {
 	fx := loadSettleFixture(t)
 	vk, err := LoadVK("settle_larger", fx.Larger.VKPath)

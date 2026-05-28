@@ -1,12 +1,8 @@
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{fs, path::PathBuf, sync::Arc};
 
-use dioxus::html::HasFileData;
-use dioxus::prelude::*;
+use dioxus::{html::HasFileData, prelude::*};
 
-use invisibook_lib::cash_store::CashStore;
-use invisibook_lib::chain::ChainClient;
-use invisibook_lib::config::ClientConfig;
+use invisibook_lib::{cash_store::CashStore, chain::ChainClient, config::ClientConfig};
 
 /// Modal panel for importing a BIP-39 mnemonic phrase and optionally a cash file.
 #[component]
@@ -17,6 +13,8 @@ pub fn KeyImport(
     cash_store: Signal<CashStore>,
     visible: Signal<bool>,
     key_imported: Signal<bool>,
+    seed_signal: Signal<Option<[u8; 32]>>,
+    data_dir: PathBuf,
 ) -> Element {
     let mut mnemonic_input = use_signal(String::new);
     let mut cash_file_input = use_signal(String::new);
@@ -37,10 +35,7 @@ pub fn KeyImport(
         let seed = match invisibook_lib::hd::mnemonic_to_ed25519_key(&mnemonic_text, 60, 0) {
             Ok(s) => s,
             Err(e) => {
-                message.set(Some((
-                    format!("✗ Invalid mnemonic: {}", e),
-                    true,
-                )));
+                message.set(Some((format!("✗ Invalid mnemonic: {}", e), true)));
                 return;
             }
         };
@@ -58,6 +53,11 @@ pub fn KeyImport(
         chain_client.set(Some(new_client));
         my_address.set(pubkey.clone());
         key_imported.set(true);
+        seed_signal.set(Some(seed));
+
+        // Persist mnemonic to data_dir/mnemonic for auto-login on next launch.
+        let _ = fs::create_dir_all(&data_dir);
+        let _ = fs::write(data_dir.join("mnemonic"), &mnemonic_text);
 
         // Optionally import cash file
         let cash_file = cash_file_input.read().trim().to_string();
@@ -65,19 +65,24 @@ pub fn KeyImport(
             let path = PathBuf::from(&cash_file);
             match cash_store.write().load_from_file(&path) {
                 Ok(n) => message.set(Some((
-                    format!("✓ Key imported ({}) — {} cash records loaded", &pubkey[..10], n),
+                    format!(
+                        "✓ Key imported ({}) — {} cash records loaded",
+                        &pubkey[..10],
+                        n
+                    ),
                     false,
                 ))),
                 Err(e) => message.set(Some((
-                    format!("✓ Key imported ({}) — cash file error: {}", &pubkey[..10], e),
+                    format!(
+                        "✓ Key imported ({}) — cash file error: {}",
+                        &pubkey[..10],
+                        e
+                    ),
                     true,
                 ))),
             }
         } else {
-            message.set(Some((
-                format!("✓ Key imported ({})", &pubkey[..10]),
-                false,
-            )));
+            message.set(Some((format!("✓ Key imported ({})", &pubkey[..10]), false)));
         }
 
         mnemonic_input.set(String::new());

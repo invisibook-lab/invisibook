@@ -4,10 +4,12 @@ use dioxus::prelude::*;
 #[component]
 pub fn Toast(mut message: Signal<Option<(String, bool)>>) -> Element {
     // Spawn a dismiss task whenever a new message appears.
+    // Errors stay visible twice as long (5s) so the user can read them.
     use_effect(move || {
-        if message.read().is_some() {
+        if let Some((_, is_err)) = message.read().clone() {
+            let duration = if is_err { 5000 } else { 2500 };
             spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(duration)).await;
                 message.set(None);
             });
         }

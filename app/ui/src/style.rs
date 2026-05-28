@@ -142,6 +142,7 @@ body {
 .status-matched   { color: var(--green); }
 .status-done      { color: var(--text-third); }
 .status-cancelled { color: var(--red); }
+.status-settling  { color: #f5a623; }
 .status-frozen    { color: #3a86ff; }
 
 .amount-cipher {
@@ -189,6 +190,27 @@ body {
     word-break: break-all;
     font-family: 'SF Mono', 'Fira Code', monospace;
     font-size: 11px;
+}
+
+.settle-btn {
+    grid-column: 1 / -1;
+    margin-top: 6px;
+    padding: 6px 16px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    background: var(--green);
+    color: var(--bg);
+    transition: background 0.15s;
+}
+.settle-btn:hover { background: var(--green-hover); }
+.settle-btn.settling {
+    background: var(--text-secondary);
+    color: var(--bg);
+    cursor: not-allowed;
+    opacity: 0.7;
 }
 
 /* ── Trade Panel (right) ── */

@@ -1,17 +1,20 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dioxus::prelude::*;
 
-use invisibook_lib::orderbook;
-use invisibook_lib::types::*;
+use invisibook_lib::{orderbook, types::*};
 
 /// The order book panel: table header + scrollable order rows.
+/// `settling_ids` tracks order IDs currently being settled (for disabling button).
+/// `on_settle` is called with the order ID when the user clicks "Settle".
 #[component]
 pub fn OrderBook(
     orders: Signal<Vec<Order>>,
     own_order_ids: Signal<HashMap<OrderID, String>>,
     selected: Signal<Option<usize>>,
     expanded: Signal<Option<usize>>,
+    settling_ids: Signal<HashSet<OrderID>>,
+    on_settle: EventHandler<OrderID>,
 ) -> Element {
     rsx! {
         div { class: "orderbook-panel",
@@ -29,7 +32,7 @@ pub fn OrderBook(
                         span { class: "col-amount", "Amount" }
                         span { class: "col-status", "Status" }
                     }
-                    {render_rows(&orders.read(), &own_order_ids.read(), &selected.read(), &expanded.read(), selected, expanded)}
+                    {render_rows(&orders.read(), &own_order_ids.read(), &selected.read(), &expanded.read(), &settling_ids.read(), selected, expanded, on_settle)}
                 }
             }
         }
@@ -38,13 +41,16 @@ pub fn OrderBook(
 
 // ────────────────────── Row Rendering ──────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn render_rows(
     orders: &[Order],
     own_ids: &HashMap<OrderID, String>,
     selected: &Option<usize>,
     expanded: &Option<usize>,
+    settling_ids: &HashSet<OrderID>,
     mut sel_signal: Signal<Option<usize>>,
     mut exp_signal: Signal<Option<usize>>,
+    on_settle: EventHandler<OrderID>,
 ) -> Element {
     rsx! {
         for (i, order) in orders.iter().enumerate() {
@@ -62,6 +68,7 @@ fn render_rows(
                     OrderStatus::Done => "status-done",
                     OrderStatus::Cancelled => "status-cancelled",
                     OrderStatus::Frozen => "status-frozen",
+                    OrderStatus::Settling => "status-settling",
                 };
                 let price_str = match order.price {
                     Some(p) => p.to_string(),
@@ -84,7 +91,14 @@ fn render_rows(
                     order.amount.clone()
                 };
 
+                // Determine whether this matched order can be settled.
+                let can_settle = is_own
+                    && order.status == OrderStatus::Matched
+                    && order.match_order.is_some();
+                let is_settling = settling_ids.contains(&order.id);
+
                 let order_id = order.id.clone();
+                let settle_order_id = order.id.clone();
                 let short_id = orderbook::short_id(&order.id).to_string();
                 let type_str = order.trade_type.to_string();
                 let pair_str = order.subject.to_string();
@@ -131,6 +145,25 @@ fn render_rows(
 
                             span { class: "detail-label", "Status" }
                             span { class: "detail-value {status_class}", "{status_str}" }
+
+                            if can_settle {
+                                if is_settling {
+                                    button {
+                                        class: "settle-btn settling",
+                                        disabled: true,
+                                        "Settling..."
+                                    }
+                                } else {
+                                    button {
+                                        class: "settle-btn",
+                                        onclick: move |evt: Event<MouseData>| {
+                                            evt.stop_propagation();
+                                            on_settle.call(settle_order_id.clone());
+                                        },
+                                        "Settle"
+                                    }
+                                }
+                            }
                         }
                     }
                 }

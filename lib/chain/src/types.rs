@@ -33,6 +33,7 @@ pub enum OrderStatus {
     Done,
     Cancelled,
     Frozen,
+    Settling,
 }
 
 impl fmt::Display for OrderStatus {
@@ -43,6 +44,7 @@ impl fmt::Display for OrderStatus {
             OrderStatus::Done => write!(f, "Done"),
             OrderStatus::Cancelled => write!(f, "Cancelled"),
             OrderStatus::Frozen => write!(f, "Frozen"),
+            OrderStatus::Settling => write!(f, "Settling"),
         }
     }
 }
@@ -108,6 +110,19 @@ pub struct CashChange {
     pub amount: CipherText, // encrypted change amount
 }
 
+// ────────────────────── MPC Share ──────────────────────
+
+/// One party's authenticated SPDZ share from the MPC settle protocol.
+/// Decimal-string BN254 scalar field elements.
+#[derive(Debug, Clone)]
+pub struct MpcShareParam {
+    pub cmp_share: String,
+    pub cmp_mac: String,
+    pub r_smaller_share: String,
+    pub r_smaller_mac: String,
+    pub mac_key_share: String,
+}
+
 // ────────────────────── Order ──────────────────────
 
 #[derive(Debug, Clone)]
@@ -123,4 +138,5 @@ pub struct Order {
     pub block_height: u32,
     pub status: OrderStatus,
     pub match_order: Option<OrderID>,
+    pub is_smaller: bool, // true if this order is the smaller side after MPC comparison
 }

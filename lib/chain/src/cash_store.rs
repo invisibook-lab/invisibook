@@ -11,6 +11,15 @@ pub struct CashRecord {
     pub amount: u64,
     pub random: String, // hex-encoded 32-byte random
     pub status: u8,     // 0 = Active, 1 = Locked, 2 = Spent
+    /// For buy orders: token1 quantity (order.amount commits to this, not USDT total).
+    /// `None` for sell orders (order amount == cash amount).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_amount: Option<u64>,
+    /// For buy orders: random used in the order.amount commitment.
+    /// Separate from `random` (which is the cash commitment random).
+    /// `None` for sell orders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_random: Option<String>,
 }
 
 /// Persistent store for (cashID, amount, random) tuples.
@@ -30,12 +39,10 @@ impl CashStore {
         Self { path, records }
     }
 
-    /// Default path: `~/.invisibook/cash.json`
+    /// Default path: `~/.invisibook/cash.json`.
+    /// Prefer `ClientConfig::cash_path()` when a config is available.
     pub fn default_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".invisibook")
-            .join("cash.json")
+        crate::config::ClientConfig::default().cash_path()
     }
 
     pub fn records(&self) -> &[CashRecord] {

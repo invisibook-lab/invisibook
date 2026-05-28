@@ -40,7 +40,7 @@ func NewAccount(cfg *AccountConfig) *Account {
 	}
 	a := &Account{
 		Tripod:     tri,
-		db:         InitAccountDB(cfg.DBPath),
+		db:         InitAccountDB(cfg.DBPath, ParseGormLogLevel(cfg.DBLogLevel)),
 		cfg:        cfg,
 		depositVK:  depositVK,
 		withdrawVK: withdrawVK,
@@ -52,8 +52,12 @@ func NewAccount(cfg *AccountConfig) *Account {
 
 // InitChain inserts genesis Cash records at chain startup.
 // Cash IDs are taken directly from the config — no derivation happens on-chain.
+// Idempotent: skips records that already exist so the chain can restart safely.
 func (a *Account) InitChain(block *types.Block) {
 	for _, gc := range a.cfg.GenesisCash {
+		if a.CashExists(gc.ID) {
+			continue
+		}
 		cash := &Cash{
 			ID:      gc.ID,
 			Pubkey:  gc.Pubkey,
@@ -65,7 +69,7 @@ func (a *Account) InitChain(block *types.Block) {
 		if err := a.CreateCash(cash); err != nil {
 			panic(fmt.Sprintf("failed to seed genesis cash %s: %v", gc.ID, err))
 		}
-		fmt.Printf("genesis: id=%s pubkey=%s token=%s amount=%s\n", gc.ID, gc.Pubkey, gc.Token, gc.Amount)
+		fmt.Printf("genesis: id=%s pubkey=%s token=%s\n", gc.ID, gc.Pubkey, gc.Token)
 	}
 }
 

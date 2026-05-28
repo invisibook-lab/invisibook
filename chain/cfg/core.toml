@@ -1,17 +1,18 @@
 # Core Tripod Configuration
 
 [orderbook]
-db_path = "data/orders.db"
+db_path      = "data/orders.db"
+db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
 # Verification keys for the OrderBook tripod's circuits. Split is for
-# SendOrder's split branch; settle_larger / settle_smaller are the two
-# asymmetric SettleOrder circuits (larger side has change + cross-leg ratio
-# check, smaller side fully fills with no change).
-split_vk_path          = "../lib/target/circuit-build/split/vk.json"
-settle_larger_vk_path  = "../lib/target/circuit-build/settle_larger/vk.json"
-settle_smaller_vk_path = "../lib/target/circuit-build/settle_smaller/vk.json"
+# SendOrder's split branch; settle_larger is the settle circuit for the
+# larger side (change + cross-leg ratio check). The smaller party confirms
+# settlement without ZK proof, so no settle_smaller VK is needed.
+split_vk_path         = "../lib/target/circuit-build/split/vk.json"
+settle_larger_vk_path = "../lib/target/circuit-build/settle_larger/vk.json"
 
 [account]
-db_path = "data/accounts.db"
+db_path      = "data/accounts.db"
+db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
 # Deposit / Withdraw verification keys — produced by `snarkjs zkey export verificationkey`
 # (or by re-running the corresponding `dev_setup_snarkjs` test). Paths are
 # relative to wherever you launch the chain from.
@@ -28,24 +29,24 @@ withdraw_vk_path = "../lib/target/circuit-build/withdraw/vk.json"
 
 [[account.genesis_cash]]
 id     = "f8c0ea0222c6acba512cc9ed613b64e3"
-pubkey = "3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb"
+pubkey = "3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb"  # alice
 token  = "ETH"
-amount = "06fd5d63a99250c4b5c8dbd7e9d84eed86fd13f5108d10323e5c278fba524582"
+amount = "067dcf69a72312493e98a059d4f3b68035fc4b1c096a87d557b7de6df8d4362d"  # 2000
 
 [[account.genesis_cash]]
 id     = "68ff80c3b73a39798be67087fb9f97ed"
-pubkey = "3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb"
+pubkey = "3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb"  # alice
 token  = "USDT"
-amount = "045f937abf56c53ba43116be5ad32a1c52a08329fe08fb9b57cefda4d9c5127b"
+amount = "0ad0dcac78d801a291089d043d1627a04004e760c3b791637d40807486557f9a"  # 800000
 
 [[account.genesis_cash]]
 id     = "4e88dd94be4154a37da7dd5b9d06a4a1"
-pubkey = "175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b"
+pubkey = "175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b"  # bob
 token  = "ETH"
-amount = "165fa4d0dad9b08c83ebea6362e22dbf373b3d734a9dd1b73df787ec975f221b"
+amount = "08ad5f1147b02de6de96ef4d694628a7c6f0dc1e61b9a5d7d56a3817caf2d125"  # 1500
 
 [[account.genesis_cash]]
 id     = "ddada5eb9484fa322a931d53bb945431"
-pubkey = "175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b"
+pubkey = "175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b"  # bob
 token  = "USDT"
-amount = "14794eafad293b03995020d7214028001c98cd66a6c15b89dc16fc577eec0bd4"
+amount = "08dc6ec7efa5cb39b1ed533b754eae8e76b99d1c8cb1a867caa954ce0b082c9b"  # 600000

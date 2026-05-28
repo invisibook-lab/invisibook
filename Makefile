@@ -1,13 +1,9 @@
-.PHONY: build-desktop build-cli build-chain run-chain clean
+.PHONY: build build-desktop build-chain run-chain run-test clean reset reset-chain reset-test
 
-build: build-desktop build-cli build-chain
+build: build-desktop build-chain
 
 build-desktop:
 	cd app/desktop && cargo build --release
-
-build-cli:
-	cd cli && cargo build --release
-	cp cli/target/release/invisibook-cli ./invisibook
 
 build-chain:
 	cd chain && go build -o invisibook .
@@ -18,11 +14,18 @@ run-desktop:
 run-chain:
 	cd chain && go run .
 
+# Launch Alice + Bob dual desktop for testing (resets cash each time).
+run-test:
+	@./scripts/dev-dual.sh clean
+	@./scripts/dev-dual.sh
+
 clean:
 	rm -f invisibook
 
-reset-chain:
-	cd chain && rm -rf data  
+reset: reset-chain reset-test
 
-reset-cash:
-	rm -f ~/.invisibook/*
+reset-chain:
+	cd chain && rm -rf data
+
+reset-test:
+	./scripts/dev-dual.sh clean
