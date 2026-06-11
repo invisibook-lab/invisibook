@@ -2,7 +2,8 @@ name: CD
 
 on:
   push:
-    tags: ['v*']
+    tags: ['*']
+  workflow_dispatch:
 
 permissions:
   contents: write
