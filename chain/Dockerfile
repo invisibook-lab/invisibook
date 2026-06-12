@@ -15,7 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 WORKDIR /app
 COPY --from=builder /build/invisibook .
-COPY cfg/ cfg/
 
 EXPOSE 7999 8999 8887
 
