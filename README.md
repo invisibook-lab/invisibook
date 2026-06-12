@@ -42,7 +42,6 @@ docker-compose build
 docker-compose up -d
 ```
 
-The image ships with default config. Config and data are mounted to the host at `~/.invisibook/chain/cfg/` and `~/.invisibook/chain/data/`. To customize config, edit the files in `~/.invisibook/chain/cfg/` and restart the container.
 
 To stop:
 
