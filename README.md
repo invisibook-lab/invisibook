@@ -33,6 +33,30 @@ Configuration files are in `chain/cfg/`:
 - `chain.toml` – yu framework config (ports, consensus, chain_id)
 - `core.toml` – tripod config (DB paths, genesis accounts)
 
+### Docker
+
+1. Copy config files to the host path:
+
+```bash
+mkdir -p ~/.invisibook/chain/cfg
+cp chain/cfg/*.toml ~/.invisibook/chain/cfg/
+```
+
+2. Build the image and start the container:
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+The chain data is persisted at `~/.invisibook/chain/data/` and config is read from `~/.invisibook/chain/cfg/`.
+
+To stop:
+
+```bash
+docker compose down
+```
+
 ### Desktop
 
 ```bash
