@@ -33,6 +33,23 @@ Configuration files are in `chain/cfg/`:
 - `chain.toml` – yu framework config (ports, consensus, chain_id)
 - `core.toml` – tripod config (DB paths, genesis accounts)
 
+### Docker
+
+Build the image and start the container:
+
+```bash
+docker-compose build
+docker-compose up -d
+```
+
+The image ships with default config. Config and data are mounted to the host at `~/.invisibook/chain/cfg/` and `~/.invisibook/chain/data/`. To customize config, edit the files in `~/.invisibook/chain/cfg/` and restart the container.
+
+To stop:
+
+```bash
+docker-compose down
+```
+
 ### Desktop
 
 ```bash

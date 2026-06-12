@@ -7,8 +7,8 @@ db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
 # SendOrder's split branch; settle_larger is the settle circuit for the
 # larger side (change + cross-leg ratio check). The smaller party confirms
 # settlement without ZK proof, so no settle_smaller VK is needed.
-split_vk_path         = "../lib/target/circuit-build/split/vk.json"
-settle_larger_vk_path = "../lib/target/circuit-build/settle_larger/vk.json"
+split_vk_path         = "vk/split_vk.json"
+settle_larger_vk_path = "vk/settle_larger_vk.json"
 
 [account]
 db_path      = "data/accounts.db"
@@ -16,8 +16,8 @@ db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
 # Deposit / Withdraw verification keys — produced by `snarkjs zkey export verificationkey`
 # (or by re-running the corresponding `dev_setup_snarkjs` test). Paths are
 # relative to wherever you launch the chain from.
-deposit_vk_path  = "../lib/target/circuit-build/deposit/vk.json"
-withdraw_vk_path = "../lib/target/circuit-build/withdraw/vk.json"
+deposit_vk_path  = "vk/deposit_vk.json"
+withdraw_vk_path = "vk/withdraw_vk.json"
 
 # Genesis cash: explicit Cash records inserted at chain startup.
 # IDs and ciphertexts must match cfg/tests/alice_cash.json and bob_cash.json.

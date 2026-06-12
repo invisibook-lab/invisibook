@@ -9,45 +9,6 @@ permissions:
   contents: write
 
 jobs:
-  # ────────────────────── Go: chain (cross-compile all targets) ──────────────────────
-  build-chain:
-    name: Chain (${{ matrix.goos }}-${{ matrix.goarch }})
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: darwin
-            goarch: amd64
-            artifact: invisibook-chain-darwin-amd64
-          - goos: darwin
-            goarch: arm64
-            artifact: invisibook-chain-darwin-arm64
-          - goos: windows
-            goarch: amd64
-            artifact: invisibook-chain-windows-amd64.exe
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: chain/go.mod
-
-      - name: Build chain
-        working-directory: chain
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-        run: go build -o ${{ matrix.artifact }} .
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: chain/${{ matrix.artifact }}
-
   # ────────────────────── Rust: desktop (macOS) ──────────────────────
   build-desktop-macos:
     name: Desktop (macOS ${{ matrix.target }})
@@ -127,7 +88,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build-chain, build-desktop-macos, build-desktop-windows]
+    needs: [build-desktop-macos, build-desktop-windows]
 
     steps:
       - uses: actions/checkout@v4
