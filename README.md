@@ -35,26 +35,19 @@ Configuration files are in `chain/cfg/`:
 
 ### Docker
 
-1. Copy config files to the host path:
+Build the image and start the container:
 
 ```bash
-mkdir -p ~/.invisibook/chain/cfg
-cp chain/cfg/*.toml ~/.invisibook/chain/cfg/
+docker-compose build
+docker-compose up -d
 ```
 
-2. Build the image and start the container:
-
-```bash
-docker compose build
-docker compose up -d
-```
-
-The chain data is persisted at `~/.invisibook/chain/data/` and config is read from `~/.invisibook/chain/cfg/`.
+The image ships with default config. Config and data are mounted to the host at `~/.invisibook/chain/cfg/` and `~/.invisibook/chain/data/`. To customize config, edit the files in `~/.invisibook/chain/cfg/` and restart the container.
 
 To stop:
 
 ```bash
-docker compose down
+docker-compose down
 ```
 
 ### Desktop

@@ -7,6 +7,5 @@ services:
       - "8999:8999"
       - "8887:8887"
     volumes:
-      - ~/.invisibook/chain/cfg:/app/cfg
       - ~/.invisibook/chain/data:/app/data
     restart: unless-stopped
