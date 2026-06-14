@@ -1,5 +1,12 @@
 # Core Tripod Configuration
 
+[consensus]
+vdf_difficulty  = 1000
+min_payment     = "100"
+finality_period = 10
+block_interval  = 3000   # milliseconds between blocks
+pack_num        = 30000  # max transactions per block
+
 [orderbook]
 db_path      = "data/orders.db"
 db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
