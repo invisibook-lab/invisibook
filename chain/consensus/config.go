@@ -2,7 +2,8 @@ package consensus
 
 // Config holds all configurable parameters for the Proof-of-Buying consensus.
 type Config struct {
-	// VDFDifficulty is the number of SHA256 iterations for the VDF.
+	// VDFDifficulty is the number of squaring iterations for the Wesolowski VDF.
+	// Linearly controls computation delay (~1.1ms per iteration).
 	VDFDifficulty uint64 `toml:"vdf_difficulty"`
 	// MinPayment is the minimum L1 payment amount (decimal string).
 	MinPayment string `toml:"min_payment"`

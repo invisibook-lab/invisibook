@@ -17,20 +17,22 @@ import (
 type ProofOfBuy struct {
 	*tripod.Tripod
 
-	cfg       *Config
-	myPubkey  keypair.PubKey
-	myPrivKey keypair.PrivKey
+	cfg        *Config
+	myPubkey   keypair.PubKey
+	myPrivKey  keypair.PrivKey
+	l1Verifier L1PaymentVerifier
 }
 
 // NewProofOfBuy constructs a ProofOfBuy tripod with the given config and keypair.
 // `cfg` must not be nil.
-func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey) *ProofOfBuy {
+func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier) *ProofOfBuy {
 	tri := tripod.NewTripod()
 	return &ProofOfBuy{
-		Tripod:    tri,
-		cfg:       cfg,
-		myPubkey:  pubkey,
-		myPrivKey: privkey,
+		Tripod:     tri,
+		cfg:        cfg,
+		myPubkey:   pubkey,
+		myPrivKey:  privkey,
+		l1Verifier: l1Verifier,
 	}
 }
 
@@ -139,8 +141,8 @@ func (p *ProofOfBuy) EndBlock(block *types.Block) {
 		logrus.Panic("VDF verification failed")
 	}
 
-	// Verify L1 payment (mock — always passes)
-	if !VerifyL1Payment(cdata.L1Payment) {
+	// Verify L1 payment via pluggable verifier
+	if !p.l1Verifier.VerifyPayment(cdata.L1Payment) {
 		logrus.Panic("L1 payment verification failed")
 	}
 

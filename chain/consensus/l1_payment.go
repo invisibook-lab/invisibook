@@ -17,10 +17,19 @@ type L1Payment struct {
 	Payer string `json:"payer"`
 }
 
-// VerifyL1Payment checks the validity of an L1 payment proof.
-// Phase 1 mock: always returns true.
-// TODO: implement real L1 payment verification.
-func VerifyL1Payment(_ *L1Payment) bool {
+// L1PaymentVerifier abstracts L1 payment verification.
+// Implement this interface for each supported L1 (e.g. CKB).
+type L1PaymentVerifier interface {
+	// VerifyPayment checks whether the given L1 payment proof is valid.
+	VerifyPayment(payment *L1Payment) bool
+}
+
+// MockL1PaymentVerifier is a no-op verifier that always returns true.
+// Used in Phase 1 / testing.
+type MockL1PaymentVerifier struct{}
+
+// VerifyPayment always returns true for mock usage.
+func (m *MockL1PaymentVerifier) VerifyPayment(_ *L1Payment) bool {
 	return true
 }
 

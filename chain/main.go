@@ -36,7 +36,8 @@ func main() {
 		logrus.Fatal("generate keypair failed: ", err)
 	}
 
-	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey)
+	l1Verifier := &consensus.MockL1PaymentVerifier{}
+	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier)
 	accountTri := core.NewAccount(&coreCfg.Account)
 	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook)
 
