@@ -78,7 +78,7 @@ func (p *ProofOfBuy) StartBlock(block *types.Block) {
 	payment := MockL1Payment(paymentAmount)
 
 	// Calculate block score
-	score := CalcBlockScore(payment.Amount, vdfResult.Output)
+	score := CalcBlockScore(payment.Amount, VDFOutput(vdfResult))
 
 	// Encode consensus data into block.Extra
 	cdata := &ConsensusData{
@@ -145,7 +145,7 @@ func (p *ProofOfBuy) EndBlock(block *types.Block) {
 	}
 
 	// Recalculate score and compare with claimed score
-	expectedScore := CalcBlockScore(cdata.L1Payment.Amount, cdata.VDFResult.Output)
+	expectedScore := CalcBlockScore(cdata.L1Payment.Amount, VDFOutput(cdata.VDFResult))
 	claimedScore, ok := new(big.Int).SetString(cdata.BlockScore, 10)
 	if !ok {
 		logrus.Panic("invalid block score in consensus data")
