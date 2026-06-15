@@ -16,9 +16,10 @@ type ConsensusData struct {
 // consensusDataJSON is an intermediate type for JSON marshalling of L1Payment,
 // since big.Int does not have a default JSON representation.
 type l1PaymentJSON struct {
-	TxHash string `json:"tx_hash"`
-	Amount string `json:"amount"`
-	Payer  string `json:"payer"`
+	TxHash      string `json:"tx_hash"`
+	Amount      string `json:"amount"`
+	Payer       string `json:"payer"`
+	MinerPubkey string `json:"miner_pubkey"`
 }
 
 type consensusDataJSON struct {
@@ -35,9 +36,10 @@ func EncodeConsensusData(data *ConsensusData) ([]byte, error) {
 	}
 	if data.L1Payment != nil {
 		j.L1Payment = &l1PaymentJSON{
-			TxHash: data.L1Payment.TxHash,
-			Amount: data.L1Payment.Amount.String(),
-			Payer:  data.L1Payment.Payer,
+			TxHash:      data.L1Payment.TxHash,
+			Amount:      data.L1Payment.Amount.String(),
+			Payer:       data.L1Payment.Payer,
+			MinerPubkey: data.L1Payment.MinerPubkey,
 		}
 	}
 	return json.Marshal(j)
@@ -59,9 +61,10 @@ func DecodeConsensusData(raw []byte) (*ConsensusData, error) {
 			return nil, fmt.Errorf("decode consensus data: invalid payment amount %q", j.L1Payment.Amount)
 		}
 		data.L1Payment = &L1Payment{
-			TxHash: j.L1Payment.TxHash,
-			Amount: amount,
-			Payer:  j.L1Payment.Payer,
+			TxHash:      j.L1Payment.TxHash,
+			Amount:      amount,
+			Payer:       j.L1Payment.Payer,
+			MinerPubkey: j.L1Payment.MinerPubkey,
 		}
 	}
 	return data, nil
