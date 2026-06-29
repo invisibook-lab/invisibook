@@ -1,0 +1,11 @@
+[package]
+name = "tfhe-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tfhe = { version = "~1.6", features = ["integer"] }
+
+[profile.release]
+opt-level = 3
+lto = true
