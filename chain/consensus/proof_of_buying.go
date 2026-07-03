@@ -256,16 +256,6 @@ func (p *ProofOfBuy) EndBlock(block *types.Block) {
 		logrus.Panic("VDF verification failed")
 	}
 
-	// Recalculate score and compare with claimed score
-	expectedScore := CalcBlockScore(cdata.L1Payment.Amount, VDFOutput(cdata.VDFResult))
-	claimedScore, ok := new(big.Int).SetString(cdata.BlockScore, 10)
-	if !ok {
-		logrus.Panic("invalid block score in consensus data")
-	}
-	if expectedScore.Cmp(claimedScore) != 0 {
-		logrus.Panicf("block score mismatch: expected %s, got %s", expectedScore, claimedScore)
-	}
-
 	// Execute all transactions in the block
 	logrus.Infof("PoB: executing block %d", block.Height)
 	if err = p.Execute(block); err != nil {
