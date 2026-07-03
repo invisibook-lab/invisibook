@@ -23,13 +23,14 @@ type L1Payment struct {
 // L1PaymentVerifier abstracts L1 payment fetching and verification.
 // Implement this interface for each supported L1 (e.g. CKB).
 type L1PaymentVerifier interface {
-	// FetchAndVerifyPayments polls L1 for all miners' payments,
-	// verifies them, and returns only the valid ones.
-	FetchAndVerifyPayments(ctx context.Context) ([]*L1Payment, error)
+	// FetchMyPayment fetches this node's own L1 payment from L1.
+	FetchMyPayment(ctx context.Context) (*L1Payment, error)
+	// VerifyPayment checks whether the given payment exists on L1.
+	VerifyPayment(ctx context.Context, payment *L1Payment) bool
 }
 
-// MockL1PaymentVerifier is a mock verifier that returns a single payment
-// for the local node. Used in Phase 1 / testing.
+// MockL1PaymentVerifier is a mock verifier used in Phase 1 / testing.
+// FetchMyPayment returns a mock payment; VerifyPayment always returns true.
 type MockL1PaymentVerifier struct {
 	// MinPayment is the mock payment amount (decimal string).
 	MinPayment string
@@ -37,14 +38,18 @@ type MockL1PaymentVerifier struct {
 	MinerPubkey string
 }
 
-// FetchAndVerifyPayments returns a single mock payment for this node.
-func (m *MockL1PaymentVerifier) FetchAndVerifyPayments(_ context.Context) ([]*L1Payment, error) {
+// FetchMyPayment returns a single mock payment for this node.
+func (m *MockL1PaymentVerifier) FetchMyPayment(_ context.Context) (*L1Payment, error) {
 	amount, ok := new(big.Int).SetString(m.MinPayment, 10)
 	if !ok {
 		amount = big.NewInt(100)
 	}
-	payment := MockL1Payment(amount, m.MinerPubkey)
-	return []*L1Payment{payment}, nil
+	return MockL1Payment(amount, m.MinerPubkey), nil
+}
+
+// VerifyPayment always returns true for mock usage.
+func (m *MockL1PaymentVerifier) VerifyPayment(_ context.Context, _ *L1Payment) bool {
+	return true
 }
 
 // MockL1Payment creates a mock L1 payment with the given amount and miner pubkey.

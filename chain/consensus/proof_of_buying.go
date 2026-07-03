@@ -24,17 +24,14 @@ type ProofOfBuy struct {
 	myPrivKey  keypair.PrivKey
 	l1Verifier L1PaymentVerifier
 
-	// paymentCh receives L1 payments fetched by the background fetcher goroutine.
-	paymentCh chan []*L1Payment
-	// vdfMsgCh receives VDF messages from other miners via P2P.
-	vdfMsgCh chan *VDFMessage
-	// blockCh receives blocks broadcast by the winning miner via P2P.
+	// blockCh receives blocks broadcast by other miners via P2P.
 	blockCh chan *types.Block
 	// cancelFunc cancels the background goroutines' context.
 	cancelFunc context.CancelFunc
 }
 
-// NewProofOfBuy constructs a ProofOfBuy tripod with the given config and keypair.
+// NewProofOfBuy constructs a ProofOfBuy tripod with the given config, keypair
+// and L1 verifier.
 // `cfg` must not be nil.
 func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier) *ProofOfBuy {
 	tri := tripod.NewTripod()
@@ -44,95 +41,17 @@ func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, 
 		myPubkey:   pubkey,
 		myPrivKey:  privkey,
 		l1Verifier: l1Verifier,
-		paymentCh:  make(chan []*L1Payment, 1),
-		vdfMsgCh:   make(chan *VDFMessage, 64),
-		blockCh:    make(chan *types.Block, 1),
+		blockCh:    make(chan *types.Block, 16),
 	}
 }
 
-// InitChain starts 3 background goroutines:
-//  1. L1 payment fetcher: periodically polls L1 for miner payments.
-//  2. VDF listener: subscribes to VDFMessageTopic for other miners' VDF results.
-//  3. Block listener: subscribes to StartBlockTopic for blocks from the winning miner.
+// InitChain starts the block listener goroutine that receives blocks
+// from other miners via P2P.
 func (p *ProofOfBuy) InitChain(_ *types.Block) {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancelFunc = cancel
 
-	// Register custom VDF message topic
-	p.P2pNetwork.AddTopic(VDFMessageTopic)
-
-	go p.l1PaymentFetcher(ctx)
-	go p.vdfListener(ctx)
 	go p.blockListener(ctx)
-}
-
-// l1PaymentFetcher periodically calls FetchAndVerifyPayments and sends
-// the results to paymentCh. The channel is non-blocking: if StartBlock
-// hasn't consumed the previous batch, it is replaced.
-func (p *ProofOfBuy) l1PaymentFetcher(ctx context.Context) {
-	// Fetch interval is half the block interval so payments are ready
-	// before StartBlock needs them.
-	interval := time.Duration(p.cfg.BlockInterval/2) * time.Millisecond
-	if interval <= 0 {
-		interval = 1 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			payments, err := p.l1Verifier.FetchAndVerifyPayments(ctx)
-			if err != nil {
-				logrus.Warnf("PoB: fetch L1 payments failed: %v", err)
-				continue
-			}
-			// Non-blocking send: replace stale data if not consumed yet.
-			select {
-			case p.paymentCh <- payments:
-			default:
-				// Drain old value and push new one.
-				select {
-				case <-p.paymentCh:
-				default:
-				}
-				p.paymentCh <- payments
-			}
-		}
-	}
-}
-
-// vdfListener subscribes to the VDF P2P topic and forwards validated
-// messages to vdfMsgCh for StartBlock to collect.
-func (p *ProofOfBuy) vdfListener(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		raw, err := p.P2pNetwork.SubP2P(VDFMessageTopic)
-		if err != nil {
-			logrus.Warnf("PoB: subscribe VDF message failed: %v", err)
-			continue
-		}
-		msg, err := DecodeVDFMessage(raw)
-		if err != nil {
-			logrus.Warnf("PoB: decode VDF message failed: %v", err)
-			continue
-		}
-
-		// TODO(phase2): verify signature and VDF proof before forwarding.
-
-		select {
-		case p.vdfMsgCh <- msg:
-		default:
-			logrus.Warn("PoB: vdfMsgCh full, dropping VDF message")
-		}
-	}
 }
 
 // blockListener subscribes to the P2P block topic and forwards
@@ -174,13 +93,12 @@ func (p *ProofOfBuy) myPubkeyHex() string {
 }
 
 // StartBlock runs at the beginning of each block:
-//  1. Fetches latest L1 payments from paymentCh
-//  2. Computes local VDF from the previous block hash
-//  3. Signs and broadcasts VDF to VDFMessageTopic
-//  4. Collects other miners' VDFs during BlockInterval
-//  5. Matches VDFs with payments to compute scores
-//  6. If this node has the highest score: packs transactions, signs and broadcasts block
-//  7. Otherwise: waits for the winning miner's block from blockCh
+//  1. Computes local VDF from the previous block hash
+//  2. Calculates this node's score using its own L1 payment
+//  3. Packs transactions, signs and broadcasts the block
+//  4. Collects candidate blocks from other miners during BlockInterval
+//  5. For each candidate: verifies VDF, verifies L1 payment, compares score
+//  6. If another miner wins, replaces this block with the winner's
 func (p *ProofOfBuy) StartBlock(block *types.Block) {
 	now := time.Now()
 	defer func() {
@@ -193,95 +111,77 @@ func (p *ProofOfBuy) StartBlock(block *types.Block) {
 
 	logrus.Infof("PoB: start block height=%d", block.Height)
 
-	// Step 1: Get the latest L1 payments (non-blocking with fallback).
-	payments := p.drainPayments()
+	// Step 1: Fetch this node's L1 payment.
+	myPayment, err := p.l1Verifier.FetchMyPayment(context.Background())
+	if err != nil {
+		logrus.Panicf("PoB: fetch my L1 payment failed: %v", err)
+	}
 
 	// Step 2: Compute local VDF.
 	vdfInput := block.PrevHash.Bytes()
 	vdfResult := Compute(vdfInput, p.cfg.VDFDifficulty)
 	logrus.Infof("PoB: VDF computed, difficulty=%d", p.cfg.VDFDifficulty)
 
-	// Step 3: Sign and broadcast VDF message.
-	signPayload := append(vdfInput, vdfResult.ProofBlob...)
-	sig, err := p.myPrivKey.SignData(signPayload)
-	if err != nil {
-		logrus.Panic("PoB: sign VDF message failed: ", err)
-	}
-	vdfMsg := &VDFMessage{
-		VDFResult: vdfResult,
-		Input:     vdfInput,
-		Signature: sig,
-	}
-	vdfBytes, err := EncodeVDFMessage(vdfMsg)
-	if err != nil {
-		logrus.Panic("PoB: encode VDF message failed: ", err)
-	}
-	if err = p.P2pNetwork.PubP2P(VDFMessageTopic, vdfBytes); err != nil {
-		logrus.Warnf("PoB: publish VDF message failed: %v", err)
-	}
-
-	// Step 4: Collect other miners' VDFs during a short collection window.
-	// Phase 1: no other miners, so this immediately returns empty.
-	_ = p.collectVDFMessages()
-
-	// Step 5: Find this node's payment and compute score.
-	myPayment := p.findMyPayment(payments)
-	if myPayment == nil {
-		logrus.Warn("PoB: no payment found for this miner, using MinPayment fallback")
-		amount, ok := new(big.Int).SetString(p.cfg.MinPayment, 10)
-		if !ok {
-			amount = big.NewInt(100)
-		}
-		myPayment = MockL1Payment(amount, p.myPubkeyHex())
-	}
+	// Step 3: Calculate this node's score.
 	myScore := CalcBlockScore(myPayment.Amount, VDFOutput(vdfResult))
 
-	// Step 6: Determine if we are the highest-scoring miner.
-	// Phase 1: single node, always highest score.
-	iAmHighest := true
+	// Step 4: Produce, sign and broadcast our block.
+	p.produceBlock(block, vdfResult, myPayment, myScore)
 
-	if iAmHighest {
-		p.produceBlock(block, vdfResult, myPayment, myScore)
-	} else {
-		// Step 7: Wait for the winning miner's block.
-		p.waitForWinnerBlock(block)
+	// Step 5: Collect candidate blocks during the remaining block interval.
+	candidates := p.collectCandidateBlocks()
+
+	// Step 6: Verify each candidate and find the highest-scoring block.
+	bestBlock := block
+	bestScore := myScore
+
+	for _, candidate := range candidates {
+		// Decode consensus data from candidate's Extra field.
+		cdata, err := DecodeConsensusData(candidate.Extra)
+		if err != nil {
+			logrus.Warnf("PoB: decode candidate consensus data failed: %v", err)
+			continue
+		}
+
+		// Verify VDF proof.
+		if !Verify(vdfInput, cdata.VDFResult, p.cfg.VDFDifficulty) {
+			logrus.Warn("PoB: candidate VDF verification failed, skipping")
+			continue
+		}
+
+		// Verify L1 payment existence.
+		if !p.l1Verifier.VerifyPayment(context.Background(), cdata.L1Payment) {
+			logrus.Warn("PoB: candidate L1 payment verification failed, skipping")
+			continue
+		}
+
+		// Recalculate candidate's score.
+		candidateScore := CalcBlockScore(cdata.L1Payment.Amount, VDFOutput(cdata.VDFResult))
+		if candidateScore.Cmp(bestScore) > 0 {
+			bestBlock = candidate
+			bestScore = candidateScore
+		}
+	}
+
+	// Step 7: If another miner won, replace our block with theirs.
+	if bestBlock != block {
+		logrus.Infof("PoB: another miner won with score=%s, replacing block", bestScore)
+		*block = *bestBlock
 	}
 }
 
-// drainPayments returns the latest L1 payments from paymentCh.
-// Returns nil if no payments are available.
-func (p *ProofOfBuy) drainPayments() []*L1Payment {
-	select {
-	case payments := <-p.paymentCh:
-		return payments
-	default:
-		return nil
-	}
-}
-
-// collectVDFMessages drains all pending VDF messages from vdfMsgCh.
-// In Phase 1 this returns an empty slice since there are no other miners.
-func (p *ProofOfBuy) collectVDFMessages() []*VDFMessage {
-	var msgs []*VDFMessage
+// collectCandidateBlocks drains all pending blocks from blockCh.
+// Returns all candidate blocks received from other miners.
+func (p *ProofOfBuy) collectCandidateBlocks() []*types.Block {
+	var candidates []*types.Block
 	for {
 		select {
-		case msg := <-p.vdfMsgCh:
-			msgs = append(msgs, msg)
+		case candidate := <-p.blockCh:
+			candidates = append(candidates, candidate)
 		default:
-			return msgs
+			return candidates
 		}
 	}
-}
-
-// findMyPayment looks up this node's payment from the fetched list.
-func (p *ProofOfBuy) findMyPayment(payments []*L1Payment) *L1Payment {
-	myPub := p.myPubkeyHex()
-	for _, pay := range payments {
-		if pay.MinerPubkey == myPub {
-			return pay
-		}
-	}
-	return nil
 }
 
 // produceBlock packs transactions, encodes consensus data, signs and broadcasts the block.
@@ -332,20 +232,6 @@ func (p *ProofOfBuy) produceBlock(block *types.Block, vdfResult *VDFResult, paym
 	}
 	if err = p.P2pNetwork.PubP2P(common.StartBlockTopic, blockByt); err != nil {
 		logrus.Panic("publish block to p2p: ", err)
-	}
-}
-
-// waitForWinnerBlock waits for the winning miner's block from blockCh.
-// If no block arrives within BlockInterval, the round is skipped.
-func (p *ProofOfBuy) waitForWinnerBlock(block *types.Block) {
-	timeout := time.Duration(p.cfg.BlockInterval) * time.Millisecond
-	select {
-	case winner := <-p.blockCh:
-		logrus.Infof("PoB: received winner block height=%d hash=%s", winner.Height, winner.Hash.String())
-		// Copy winner block data into current block frame.
-		*block = *winner
-	case <-time.After(timeout):
-		logrus.Warn("PoB: timeout waiting for winner block, skipping round")
 	}
 }
 
