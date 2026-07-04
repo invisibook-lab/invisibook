@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/hex"
 	"flag"
 	"log"
 
@@ -37,10 +36,7 @@ func main() {
 		logrus.Fatal("generate keypair failed: ", err)
 	}
 
-	l1Verifier := &consensus.MockL1PaymentVerifier{
-		MinPayment:  coreCfg.Consensus.MinPayment,
-		MinerPubkey: hex.EncodeToString(pubkey.BytesWithType()),
-	}
+	l1Verifier := &consensus.MockL1PaymentVerifier{}
 	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier)
 	accountTri := core.NewAccount(&coreCfg.Account)
 	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook)

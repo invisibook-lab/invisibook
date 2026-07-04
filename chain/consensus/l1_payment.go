@@ -7,6 +7,15 @@ import (
 	"math/big"
 )
 
+// L1PaymentInput carries a payment hash submitted by an external client
+// via the Reading interface.
+type L1PaymentInput struct {
+	// PaymentHash is the L1 payment hash (e.g. from Fiber send_payment).
+	PaymentHash string `json:"payment_hash"`
+	// BlockHeight is the target block height this payment is intended for.
+	BlockHeight uint64 `json:"block_height"`
+}
+
 // L1Payment represents a payment proof from L1.
 // In Phase 1 this is fully mocked.
 type L1Payment struct {
@@ -20,32 +29,16 @@ type L1Payment struct {
 	MinerPubkey string `json:"miner_pubkey"`
 }
 
-// L1PaymentVerifier abstracts L1 payment fetching and verification.
+// L1PaymentVerifier abstracts L1 payment verification.
 // Implement this interface for each supported L1 (e.g. CKB).
 type L1PaymentVerifier interface {
-	// FetchMyPayment fetches this node's own L1 payment from L1.
-	FetchMyPayment(ctx context.Context) (*L1Payment, error)
 	// VerifyPayment checks whether the given payment exists on L1.
 	VerifyPayment(ctx context.Context, payment *L1Payment) bool
 }
 
 // MockL1PaymentVerifier is a mock verifier used in Phase 1 / testing.
-// FetchMyPayment returns a mock payment; VerifyPayment always returns true.
-type MockL1PaymentVerifier struct {
-	// MinPayment is the mock payment amount (decimal string).
-	MinPayment string
-	// MinerPubkey is the hex-encoded public key of this node.
-	MinerPubkey string
-}
-
-// FetchMyPayment returns a single mock payment for this node.
-func (m *MockL1PaymentVerifier) FetchMyPayment(_ context.Context) (*L1Payment, error) {
-	amount, ok := new(big.Int).SetString(m.MinPayment, 10)
-	if !ok {
-		amount = big.NewInt(100)
-	}
-	return MockL1Payment(amount, m.MinerPubkey), nil
-}
+// VerifyPayment always returns true.
+type MockL1PaymentVerifier struct{}
 
 // VerifyPayment always returns true for mock usage.
 func (m *MockL1PaymentVerifier) VerifyPayment(_ context.Context, _ *L1Payment) bool {
