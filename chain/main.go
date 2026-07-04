@@ -41,5 +41,7 @@ func main() {
 	accountTri := core.NewAccount(&coreCfg.Account)
 	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook)
 
+	consensus.StartPaymentServer(coreCfg.Consensus.PaymentListen, coreCfg.Consensus.FiberRPCUrl)
+
 	startup.InitDefaultKernel(yuCfg).WithTripods(pobTri, accountTri, orderBookTri).Startup()
 }

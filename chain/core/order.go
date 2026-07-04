@@ -26,7 +26,7 @@ type Order struct {
 	BlockHeight  uint32     `json:"block_height"`
 	MatchOrder   OrderID    `json:"match_order,omitempty"`
 	Status       OrderStat  `json:"status"  validate:"oneof=0 1 2 3 4 5"`
-	IsSmaller bool `json:"is_smaller"` // true if this order is the smaller side after MPC comparison
+	IsSmaller    bool       `json:"is_smaller"` // true if this order is the smaller side after MPC comparison
 }
 
 // Validate checks all struct tag constraints on the Order.

@@ -30,7 +30,7 @@ type OrderScheme struct {
 	BlockHeight  uint32 `gorm:"column:block_height"`
 	Status       int    `gorm:"column:status;index"`
 	MatchOrder   string `gorm:"column:match_order"`
-	IsSmaller int `gorm:"column:is_smaller;default:0"` // 0=false, 1=true
+	IsSmaller    int    `gorm:"column:is_smaller;default:0"` // 0=false, 1=true
 }
 
 // TableName returns the SQL table name used by GORM for OrderScheme rows.
@@ -246,8 +246,8 @@ func orderToScheme(o *Order) *OrderScheme {
 		HandlingFee:  feeJSON,
 		BlockHeight:  o.BlockHeight,
 		Status:       int(o.Status),
-		MatchOrder: string(o.MatchOrder),
-		IsSmaller:  isSmaller,
+		MatchOrder:   string(o.MatchOrder),
+		IsSmaller:    isSmaller,
 	}
 }
 
@@ -283,8 +283,8 @@ func schemeToOrder(s *OrderScheme) *Order {
 		HandlingFee:  fees,
 		BlockHeight:  s.BlockHeight,
 		MatchOrder:   OrderID(s.MatchOrder),
-		Status:    OrderStat(s.Status),
-		IsSmaller: s.IsSmaller == 1,
+		Status:       OrderStat(s.Status),
+		IsSmaller:    s.IsSmaller == 1,
 	}
 }
 

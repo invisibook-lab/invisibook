@@ -234,9 +234,9 @@ func TestVerifyGroth16RejectsTamperedSplitLockedSlot(t *testing.T) {
 // One file holds both legs (larger + smaller) so chain tests cover the full
 // pair — including the cross-leg match-commitment equality the chain enforces.
 type settleFixture struct {
-	Price                 uint64               `json:"price"`
-	Larger                settleLargerLeg      `json:"larger"`
-	Smaller               settleSmallerLeg     `json:"smaller"`
+	Price                 uint64                `json:"price"`
+	Larger                settleLargerLeg       `json:"larger"`
+	Smaller               settleSmallerLeg      `json:"smaller"`
 	SharedRecvCommitments sharedRecvCommitments `json:"shared_recv_commitments"`
 }
 type settleLargerLeg struct {

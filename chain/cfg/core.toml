@@ -6,6 +6,8 @@ min_payment     = "100"
 finality_period = 10
 block_interval  = 3000   # milliseconds between blocks
 pack_num        = 30000  # max transactions per block
+fiber_rpc_url   = "http://127.0.0.1:8227"
+payment_listen  = ":8081"
 
 [orderbook]
 db_path      = "data/orders.db"

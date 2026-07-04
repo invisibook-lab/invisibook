@@ -466,8 +466,8 @@ func (ot *OrderBook) CompareOrders(ctx *context.WriteContext) error {
 // (IsSmaller=false) must include a ZK `Leg`; the smaller party
 // (IsSmaller=true) confirms settlement without proof (Leg is nil).
 type SettleOrderRequest struct {
-	OrderID      OrderID        `json:"order_id"       validate:"required"`
-	MatchOrderID OrderID        `json:"match_order_id" validate:"required"`
+	OrderID      OrderID         `json:"order_id"       validate:"required"`
+	MatchOrderID OrderID         `json:"match_order_id" validate:"required"`
 	Leg          *SettleTokenLeg `json:"leg,omitempty"`
 }
 

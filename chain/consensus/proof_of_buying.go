@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/hex"
 	"math/big"
-	"net/http"
 	"time"
 
 	"github.com/sirupsen/logrus"
 
 	"github.com/yu-org/yu/common"
-	yuctx "github.com/yu-org/yu/core/context"
 	"github.com/yu-org/yu/core/keypair"
 	"github.com/yu-org/yu/core/tripod"
 	"github.com/yu-org/yu/core/types"
@@ -26,9 +24,9 @@ type ProofOfBuy struct {
 	myPrivKey  keypair.PrivKey
 	l1Verifier L1PaymentVerifier
 
-	// pendingPaymentCh holds at most one payment input submitted by external
-	// clients via the L1PaymentHash reading endpoint, ready for StartBlock.
-	pendingPaymentCh chan *L1PaymentInput
+	// lastPaymentInput holds the most recent payment input received from
+	// PendingPaymentCh by the paymentListener goroutine.
+	lastPaymentInput *L1PaymentInput
 	// blockCh receives blocks broadcast by other miners via P2P.
 	blockCh chan *types.Block
 }
@@ -39,45 +37,32 @@ type ProofOfBuy struct {
 func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier) *ProofOfBuy {
 	tri := tripod.NewTripod()
 	p := &ProofOfBuy{
-		Tripod:         tri,
-		cfg:            cfg,
-		myPubkey:       pubkey,
-		myPrivKey:      privkey,
-		l1Verifier:     l1Verifier,
-		pendingPaymentCh: make(chan *L1PaymentInput, 1),
-		blockCh:        make(chan *types.Block, 16),
+		Tripod:     tri,
+		cfg:        cfg,
+		myPubkey:   pubkey,
+		myPrivKey:  privkey,
+		l1Verifier: l1Verifier,
+		blockCh:    make(chan *types.Block, 16),
 	}
-	p.SetReadings(p.L1PaymentHash)
 	return p
 }
 
-// L1PaymentHash is a Reading endpoint that accepts a payment hash from
-// an external client and forwards it to the consensus loop via paymentInputCh.
-// Request body: `{"payment_hash": "...", "block_height": N}`
-func (p *ProofOfBuy) L1PaymentHash(ctx *yuctx.ReadContext) {
-	input := new(L1PaymentInput)
-	if err := ctx.BindJson(input); err != nil {
-		ctx.Json(http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	if input.PaymentHash == "" {
-		ctx.Json(http.StatusBadRequest, map[string]string{"error": "payment_hash is required"})
-		return
-	}
-
-	// Drain stale value if present, then push the new one.
-	select {
-	case <-p.pendingPaymentCh:
-	default:
-	}
-	p.pendingPaymentCh <- input
-	ctx.JsonOk(map[string]string{"status": "accepted"})
-}
-
-// InitChain starts the block listener goroutine that receives blocks
-// from other miners via P2P.
+// InitChain starts the block listener and payment listener goroutines.
 func (p *ProofOfBuy) InitChain(_ *types.Block) {
 	go p.blockListener()
+	go p.paymentListener()
+}
+
+// paymentListener reads from the global PendingPaymentCh and stores
+// the latest payment input for StartBlock to consume.
+func (p *ProofOfBuy) paymentListener() {
+	for {
+		select {
+		case input := <-PendingPaymentCh:
+			p.lastPaymentInput = input
+			logrus.Infof("PoB: paymentListener received payment_hash=%s", input.PaymentHash)
+		}
+	}
 }
 
 // blockListener subscribes to the P2P block topic and forwards
@@ -131,20 +116,20 @@ func (p *ProofOfBuy) StartBlock(block *types.Block) {
 
 	logrus.Infof("PoB: start block height=%d", block.Height)
 
-	// Step 1: Consume the latest external payment input (non-blocking).
+	// Step 1: Consume the latest external payment input.
 	amount, ok := new(big.Int).SetString(p.cfg.MinPayment, 10)
 	if !ok {
 		amount = big.NewInt(100)
 	}
 
 	var myPayment *L1Payment
-	select {
-	case input := <-p.pendingPaymentCh:
-		logrus.Infof("PoB: received external payment_hash=%s for height=%d", input.PaymentHash, input.BlockHeight)
-		// TODO(phase2): call Fiber get_payment(input.PaymentHash) to get full payment info.
+	if p.lastPaymentInput != nil {
+		logrus.Infof("PoB: using payment_hash=%s", p.lastPaymentInput.PaymentHash)
+		// TODO(phase2): call Fiber get_payment(paymentHash) to get full payment info.
 		// Phase 1: construct mock payment with MinPayment amount.
 		myPayment = MockL1Payment(amount, p.myPubkeyHex())
-	default:
+		p.lastPaymentInput = nil
+	} else {
 		logrus.Info("PoB: no external payment input, using fallback mock payment")
 		myPayment = MockL1Payment(amount, p.myPubkeyHex())
 	}

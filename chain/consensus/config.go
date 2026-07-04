@@ -13,6 +13,10 @@ type Config struct {
 	BlockInterval int `toml:"block_interval"`
 	// PackNum is the maximum number of transactions to pack per block.
 	PackNum uint64 `toml:"pack_num"`
+	// FiberRPCUrl is the Fiber node JSON-RPC endpoint for send_payment.
+	FiberRPCUrl string `toml:"fiber_rpc_url"`
+	// PaymentListen is the listen address for the gin payment HTTP server.
+	PaymentListen string `toml:"payment_listen"`
 }
 
 // DefaultConsensusConfig returns a Config with sensible defaults.
@@ -23,5 +27,7 @@ func DefaultConsensusConfig() Config {
 		FinalityPeriod: 10,
 		BlockInterval:  3000,
 		PackNum:        30000,
+		FiberRPCUrl:    "http://127.0.0.1:8227",
+		PaymentListen:  ":8081",
 	}
 }
