@@ -104,6 +104,47 @@ pub struct SettleTokenLegParam {
     pub zk_proof: String,
 }
 
+/// Mirror of chain Go `CoZkSettleRequest` — the single-submission co-zk
+/// settlement message. `order_a_id` must be the maker's order (earlier block
+/// height; ties broken by the smaller order ID), `cmp` the public three-way
+/// comparison sign(a - b), and the six commitments the circuit's public
+/// outputs. `sig_a`/`sig_b` are ed25519 signatures over
+/// `settle_cozk_message` by each order's key.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettleCoZkParams {
+    pub order_a_id: OrderID,
+    pub order_b_id: OrderID,
+    pub cmp: i8,
+    pub new_order_a_commitment: String,
+    pub new_order_b_commitment: String,
+    pub new_locked_a_commitment: String,
+    pub new_locked_b_commitment: String,
+    pub recv_a_commitment: String,
+    pub recv_b_commitment: String,
+    pub sig_a: String,
+    pub sig_b: String,
+    pub zk_proof: String,
+}
+
+/// Canonical byte string both traders ed25519-sign for a co-zk settlement.
+/// Must stay in lockstep with Go `core.CoZkSettleMessage`. The signature
+/// fields of `params` are not part of the message and may be empty.
+pub fn settle_cozk_message(params: &SettleCoZkParams) -> Vec<u8> {
+    let msg = format!(
+        "invisibook-cozk-settle:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        params.order_a_id,
+        params.order_b_id,
+        params.cmp,
+        params.new_order_a_commitment,
+        params.new_order_b_commitment,
+        params.new_locked_a_commitment,
+        params.new_locked_b_commitment,
+        params.recv_a_commitment,
+        params.recv_b_commitment,
+    );
+    msg.into_bytes()
+}
+
 /// Register settle address request params.
 #[derive(Debug, Serialize)]
 struct RegisterSettleAddrParams {
@@ -423,6 +464,32 @@ impl ChainClient {
         };
         self.client
             .write_chain("orderbook", "SettleOrders", &params, self.chain_id, 100, 0)
+            .await
+    }
+
+    /// ed25519-signs the canonical co-zk settlement message with this
+    /// client's key, returning the 128-char hex signature. The signature
+    /// fields of `params` are ignored (they are not part of the message).
+    pub fn sign_settle_cozk(&self, params: &SettleCoZkParams) -> String {
+        self.sign(&settle_cozk_message(params))
+    }
+
+    /// Submits the jointly generated co-zk settlement in a single writing.
+    /// `params` must carry both traders' signatures (`sig_a`, `sig_b`) and
+    /// the collaboratively generated proof; either party may submit.
+    pub async fn settle_orders_cozk(
+        &self,
+        params: &SettleCoZkParams,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.client
+            .write_chain(
+                "orderbook",
+                "SettleOrdersCoZk",
+                params,
+                self.chain_id,
+                100,
+                0,
+            )
             .await
     }
 

@@ -92,6 +92,27 @@ Use the trade form on the right panel to place orders:
 - **Your own orders:** amount is displayed in plain text.
 - **Other orders:** amount is shown as encrypted cipher text.
 
+## Collaborative ZK Settlement (co-zk)
+
+Matched orders can settle with a **single Groth16 proof generated jointly by
+both traders via MPC** ([co-snarks](https://github.com/invisibook-lab/co-snarks)
+REP3: the two traders + one helper node), so neither trader ever learns the
+other's hidden amount. The chain verifies the proof, removes the fully-filled
+order from the book, and updates the surviving order's hidden amount
+commitment in place (keeping its time priority). See
+[docs/cozk_design.md](docs/cozk_design.md) for the protocol, circuit, and
+threat model, and [docs/cozk_experiments.md](docs/cozk_experiments.md) for
+measurements.
+
+```bash
+# circuit + collaborative-proving tests
+cd lib && cargo test -p zk settle_cozk && cargo test -p cozk
+
+# 3-node distributed proving demo / benchmark
+cargo build --release -p cozk --bins
+./target/release/bench_settle_cozk --runs 5
+```
+
 ## License
 
 See [LICENSE](LICENSE).

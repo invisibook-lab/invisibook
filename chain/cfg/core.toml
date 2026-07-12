@@ -7,8 +7,11 @@ db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
 # SendOrder's split branch; settle_larger is the settle circuit for the
 # larger side (change + cross-leg ratio check). The smaller party confirms
 # settlement without ZK proof, so no settle_smaller VK is needed.
+# settle_cozk is the joint settlement circuit whose single Groth16 proof is
+# generated collaboratively by both traders (SettleOrdersCoZk writing).
 split_vk_path         = "vk/split_vk.json"
 settle_larger_vk_path = "vk/settle_larger_vk.json"
+settle_cozk_vk_path   = "vk/settle_cozk_vk.json"
 
 [account]
 db_path      = "data/accounts.db"

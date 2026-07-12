@@ -38,6 +38,7 @@ type OrderBook struct {
 	db             *gorm.DB
 	splitVK        *CircuitVK
 	settleLargerVK *CircuitVK
+	settleCoZkVK   *CircuitVK
 }
 
 // NewOrderBook constructs the OrderBook tripod and registers its writings and
@@ -55,13 +56,18 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	if err != nil {
 		panic(fmt.Sprintf("loading settle_larger VK: %v", err))
 	}
+	settleCoZkVK, err := LoadVK("settle_cozk", cfg.SettleCoZkVKPath)
+	if err != nil {
+		panic(fmt.Sprintf("loading settle_cozk VK: %v", err))
+	}
 	ot := &OrderBook{
 		Tripod:         tri,
 		db:             InitOrderDB(cfg.DBPath, ParseGormLogLevel(cfg.DBLogLevel)),
 		splitVK:        splitVK,
 		settleLargerVK: settleLargerVK,
+		settleCoZkVK:   settleCoZkVK,
 	}
-	ot.SetWritings(ot.SendOrder, ot.CompareOrders, ot.SettleOrders, ot.RegisterSettleAddr)
+	ot.SetWritings(ot.SendOrder, ot.CompareOrders, ot.SettleOrders, ot.SettleOrdersCoZk, ot.RegisterSettleAddr)
 	ot.SetReadings(ot.QueryOrders, ot.QuerySettleAddr)
 	return ot
 }
@@ -573,19 +579,7 @@ func (ot *OrderBook) SettleOrders(ctx *context.WriteContext) error {
 
 	// Execution price: maker's price (earlier block height).
 	// Same block height: use the lower price (favorable to buyer).
-	var expectedPrice uint64
-	if myOrder.BlockHeight < matchOrder.BlockHeight {
-		expectedPrice = myOrder.Price.Uint64()
-	} else if matchOrder.BlockHeight < myOrder.BlockHeight {
-		expectedPrice = matchOrder.Price.Uint64()
-	} else {
-		p, q := myOrder.Price.Uint64(), matchOrder.Price.Uint64()
-		if p < q {
-			expectedPrice = p
-		} else {
-			expectedPrice = q
-		}
-	}
+	expectedPrice := executionPrice(myOrder, matchOrder)
 
 	// Validate the larger leg fields.
 	if largerLeg.MyMatchCommitment == "" || largerLeg.OtherMatchCommitment == "" || largerLeg.ChangeCommitment == "" {

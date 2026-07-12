@@ -20,11 +20,14 @@ type Config struct {
 // `SettleLargerVKPath` is the settle circuit for the larger side (change +
 // cross-leg ratio check). Only the larger party submits a ZK proof; the
 // smaller party confirms settlement without proof.
+// `SettleCoZkVKPath` is the joint settle_cozk circuit whose single proof is
+// generated collaboratively by both traders (SettleOrdersCoZk writing).
 // `DBLogLevel` controls GORM SQL logging: "silent", "error", "warn", "info".
 type OrderBookConfig struct {
 	DBPath             string `toml:"db_path"`
 	SplitVKPath        string `toml:"split_vk_path"`
 	SettleLargerVKPath string `toml:"settle_larger_vk_path"`
+	SettleCoZkVKPath   string `toml:"settle_cozk_vk_path"`
 	DBLogLevel         string `toml:"db_log_level"`
 }
 

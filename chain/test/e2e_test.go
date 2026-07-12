@@ -562,6 +562,7 @@ func getAccount(t *testing.T, pubkey, token string) []CashItem {
 type OrderItem struct {
 	ID           string   `json:"id"`
 	Status       int      `json:"status"`
+	Amount       string   `json:"amount"`
 	MatchOrder   string   `json:"match_order"`
 	Pubkey       string   `json:"pubkey"`
 	InputCashIDs []string `json:"input_cash_ids"`
