@@ -1,5 +1,11 @@
 # Co-zk Settlement — Experiments
 
+Two collaborative provers are measured: the **3-party REP3** path
+(`lib/cozk`, co-snarks, Groth16) and the **2-party SPDZ** path
+(`cozk2p/`, mpc-jellyfish, TurboPlonk — see
+[cozk2p_design.md](cozk2p_design.md)). §"2-party" at the bottom compares
+them.
+
 Measurements of the collaborative settlement prover (`settle_cozk` circuit)
 against single-prover baselines: **time**, **memory**, and **proof size**.
 
@@ -95,6 +101,82 @@ commitments, simulatable and hiding.
 Communication is dominated by witness extension and is a few hundred KiB per
 node for this ~3.6k-constraint circuit — trivial on any real link, matching
 the Θ(n) field-element communication bound for collaborative Groth16.
+
+## 2-party settlement (cozk2p, mpc-jellyfish + ark-mpc SPDZ)
+
+Reproduce with:
+
+```bash
+cd cozk2p
+cargo build --release --bins
+cargo run --release --bin bench_settle2p -- --runs 5
+```
+
+Same trade, same statement (15 public signals, canonical order), same
+Poseidon commitments — different proof system (TurboPlonk/KZG instead of
+Groth16) and different MPC (2-party malicious-secure SPDZ instead of
+3-party semi-honest REP3).
+
+### Circuit
+
+| metric | value |
+|---|---|
+| TurboPlonk gates | 8192 (domain 16384) |
+| public signals | 15 |
+| proof size | **769 B compressed** (1185 B uncompressed; 13 G1 + 10 Fr) |
+| verifying key | 938 B compressed |
+
+### Results (5 runs, same machine as above)
+
+| configuration | prove wall-clock | verify | peak RSS |
+|---|---|---|---|
+| single prover (TurboPlonk, same relation/keys) | 618 ± 62 ms | 6 ms | — |
+| **2-party collaborative, in-process mock network** | ~24 s | 6 ms | shared process |
+| **2-party collaborative, 2 processes over QUIC** | ~20–22 s steady-state (48 s first run, cold cache) | 4–6 ms | **~7.4 GB per trader** |
+
+Phase split (QUIC, per trader): circuit build ~40 ms, PLONK rounds ~6 s,
+open/drain ~14 s. The fabric evaluates lazily, so "open" includes draining
+the whole dataflow graph; the split is indicative, not a strict phase
+boundary. Both traders always revealed byte-identical proofs, each locally
+verified before release.
+
+### Reading the numbers
+
+- **The 2-party protocol works end-to-end** — two processes, QUIC
+  transport, malicious-secure SPDZ shares, standard PLONK proof out. That
+  answers the feasibility question this path was built for.
+- **The overhead is ~35× a single prover** (vs ~2–3× for 3-party REP3).
+  This is not the 2PC arithmetic itself but `ark-mpc`'s dataflow-fabric
+  constant cost per operation: the Poseidon-heavy witness (12 hashes × 65
+  rounds, each S-box = 2 Beaver multiplications) creates ~10⁵ sequential
+  fabric results, and memory (~7.4 GB/trader) is the retained dataflow
+  graph plus its growable buffers. The `multithreaded_executor` feature was
+  tried and measured 5–6× *slower* (lock contention), so the serial
+  executor is kept.
+- **Structural directions to close the gap** (not pursued here): batch the
+  Poseidon layers with `batch_mul` (ark-mpc's batch ops amortize the per-op
+  overhead), a Rescue-style hash native to TurboPlonk's `q_hash` selector,
+  or ark-mpc's `ExecutorSizeHints` to right-size buffers.
+
+### 3-party vs 2-party at a glance
+
+| | 3-party (lib/cozk) | 2-party (cozk2p) |
+|---|---|---|
+| topology | 2 traders + helper node | **2 traders only** |
+| adversary tolerated | semi-honest, no 2-of-3 collusion; helper must not collude | **1 fully malicious counterparty** |
+| proof system | Groth16 (circom, snarkjs zkey) | TurboPlonk (KZG) |
+| proof size | 128 B (ark) / ~720 B (snarkjs JSON) | 769 B compressed |
+| chain verifier | go-rapidsnark (already wired) | needs a PLONK verifier bridge (documented follow-up) |
+| prove wall-clock | 0.4 s (in-proc) / ~1.6-2 s (TCP) | ~24 s (in-proc) / ~20 s (QUIC) |
+| peak RSS per node | ~110 MB | ~7.4 GB |
+| offline phase | none (REP3) | Beaver triples (mock in dev; LowGear/OT for production) |
+| trusted setup | circuit-specific (snarkjs dev) | universal KZG SRS (dev seed) |
+
+The trade-off is clean: the 2-party path buys the *right topology* (no
+third machine, no non-collusion assumption) and *malicious security* at a
+~10× wall-clock and ~70× memory premium under this framework, plus a
+chain-verifier gap. The 3-party path stays the performance-practical
+default; the 2-party path matches the application's trust model.
 
 ## Note on the TCP loopback harness
 

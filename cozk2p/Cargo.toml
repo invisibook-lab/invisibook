@@ -1,0 +1,50 @@
+[workspace]
+
+[package]
+name = "cozk2p"
+version = "0.1.0"
+edition = "2021"
+
+# NOTE: Cargo.lock is load-bearing and must stay committed — it holds back
+# `time`/`time-core` to versions whose MSRV fits the pinned toolchain (see
+# rust-toolchain.toml). Regenerating the lock breaks the build.
+
+[dependencies]
+anyhow = "1"
+ark-bn254 = "0.4"
+ark-ec = "0.4"
+ark-ff = "0.4"
+ark-serialize = "0.4"
+ark-std = "0.4"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+# Renegade's 2-party malicious-secure SPDZ MPC framework. `test_helpers` is
+# enabled unconditionally because the demo binaries use the mock Beaver
+# source (`PartyIDBeaverSource`); a production deployment must replace it
+# with a real offline phase (e.g. ark-mpc-offline's LowGear).
+# Note: ark-mpc's `multithreaded_executor` was measured 5-6x SLOWER than the
+# default serial executor on this circuit (lock contention on the dataflow
+# graph) — keep the default.
+ark-mpc = { git = "https://github.com/invisibook-lab/ark-mpc-1", rev = "178b66b6e9e5c7ff9217fa3ab236865770917cf1", features = [
+    "test_helpers",
+] }
+# Renegade's collaborative-PLONK fork of jellyfish.
+mpc-plonk = { git = "https://github.com/invisibook-lab/mpc-jellyfish", rev = "311568a467d0ee84517729217e0668536c1855a5", features = [
+    "test_apis",
+    "test-srs",
+] }
+mpc-relation = { git = "https://github.com/invisibook-lab/mpc-jellyfish", rev = "311568a467d0ee84517729217e0668536c1855a5" }
+
+# mpc-plonk's workspace refers to ark-mpc by the upstream URL; redirect it to
+# the invisibook-lab fork so the whole tree resolves to ONE ark-mpc crate
+# (two URLs would otherwise produce two incompatible copies of MpcFabric).
+[patch."https://github.com/renegade-fi/ark-mpc"]
+ark-mpc = { git = "https://github.com/invisibook-lab/ark-mpc-1", rev = "178b66b6e9e5c7ff9217fa3ab236865770917cf1" }
+
+[profile.release]
+opt-level = 3

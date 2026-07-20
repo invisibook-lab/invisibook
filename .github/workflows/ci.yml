@@ -23,6 +23,7 @@ jobs:
       zk: ${{ steps.filter.outputs.zk }}
       mpc: ${{ steps.filter.outputs.mpc }}
       cozk: ${{ steps.filter.outputs.cozk }}
+      cozk2p: ${{ steps.filter.outputs.cozk2p }}
       app: ${{ steps.filter.outputs.app }}
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +41,8 @@ jobs:
               - 'lib/mpc/**'
             cozk:
               - 'lib/cozk/**'
+            cozk2p:
+              - 'cozk2p/**'
             app:
               - 'app/**'
               - 'lib/chain/**'
@@ -187,3 +190,38 @@ jobs:
       - name: Build desktop app
         working-directory: app/desktop
         run: cargo build
+
+  # ────────────────────── Rust: cozk2p (2-party collaborative ZK) ──────────────────────
+  # Separate workspace with its own pinned toolchain (see cozk2p/rust-toolchain.toml);
+  # rustup resolves the pin automatically from the working directory.
+  cozk2p:
+    name: CoZk2p (Rust, 2-party)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.cozk2p == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pinned Rust toolchain
+        working-directory: cozk2p
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cozk2p/target
+          key: ${{ runner.os }}-cargo-cozk2p-${{ hashFiles('cozk2p/Cargo.lock') }}
+
+      - name: Build
+        working-directory: cozk2p
+        run: cargo build --release --bins
+
+      # Release mode: the mock-MPC e2e proving test is impractically slow in
+      # debug (SPDZ share ops + 16k-domain MSMs).
+      - name: Test
+        working-directory: cozk2p
+        run: cargo test --release
