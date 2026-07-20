@@ -16,7 +16,10 @@ import (
 // CoZkSettleRequest is the single-submission settlement message of the co-zk
 // protocol (docs/cozk_design.md). Both traders jointly generated `ZkProof`
 // via MPC and both signed the canonical settlement message, so either party
-// (or anyone relaying on their behalf) may submit it.
+// (or anyone relaying on their behalf) may submit it. The same request shape
+// serves both collaborative variants: SettleOrdersCoZk (3-party, Groth16)
+// and SettleOrdersCoZk2p (2-party, PLONK) — only the proof format and the
+// signed message's domain prefix differ.
 //
 // Order A must be the maker (see makerTakerOrder). `Cmp` is the public
 // three-way comparison sign(a - b) of the two hidden order amounts. The six
@@ -39,7 +42,9 @@ type CoZkSettleRequest struct {
 	SigA string `json:"sig_a" validate:"required,len=128"`
 	SigB string `json:"sig_b" validate:"required,len=128"`
 
-	// snarkjs-format Groth16 proof produced collaboratively.
+	// The collaboratively produced proof: snarkjs-format Groth16 JSON for
+	// SettleOrdersCoZk, hex-encoded ark-compressed PLONK bytes for
+	// SettleOrdersCoZk2p.
 	ZkProof string `json:"zk_proof" validate:"required"`
 }
 
@@ -47,7 +52,7 @@ type CoZkSettleRequest struct {
 // carries the surviving larger order (already updated and back to Pending),
 // and `Matched` its immediate re-match if one happened.
 type CoZkSettleEvent struct {
-	EventType string `json:"event_type"` // always "cozk_settled"
+	EventType string `json:"event_type"` // "cozk_settled" or "cozk2p_settled"
 	Cmp       int    `json:"cmp"`
 	OrderA    *Order `json:"order_a"`
 	OrderB    *Order `json:"order_b"`
@@ -55,15 +60,28 @@ type CoZkSettleEvent struct {
 	Matched   *Order `json:"matched,omitempty"`
 }
 
-// CoZkSettleMessage builds the canonical byte string both traders ed25519-sign.
-// Must stay in lockstep with the Rust client (lib/chain settle_cozk_message).
-func CoZkSettleMessage(req *CoZkSettleRequest) []byte {
-	msg := "invisibook-cozk-settle:" + string(req.OrderAID) + ":" + string(req.OrderBID) +
+// coZkSettleMessage builds the canonical byte string both traders
+// ed25519-sign, domain-separated by `prefix` so a signature for one settle
+// variant can never authorize the other.
+func coZkSettleMessage(prefix string, req *CoZkSettleRequest) []byte {
+	msg := prefix + ":" + string(req.OrderAID) + ":" + string(req.OrderBID) +
 		":" + strconv.Itoa(req.Cmp) +
 		":" + req.NewOrderACommitment + ":" + req.NewOrderBCommitment +
 		":" + req.NewLockedACommitment + ":" + req.NewLockedBCommitment +
 		":" + req.RecvACommitment + ":" + req.RecvBCommitment
 	return []byte(msg)
+}
+
+// CoZkSettleMessage builds the message signed for SettleOrdersCoZk. Must stay
+// in lockstep with the Rust client (lib/chain settle_cozk_message).
+func CoZkSettleMessage(req *CoZkSettleRequest) []byte {
+	return coZkSettleMessage("invisibook-cozk-settle", req)
+}
+
+// CoZk2pSettleMessage builds the message signed for SettleOrdersCoZk2p (the
+// 2-party PLONK path); the distinct prefix domain-separates the variants.
+func CoZk2pSettleMessage(req *CoZkSettleRequest) []byte {
+	return coZkSettleMessage("invisibook-cozk2p-settle", req)
 }
 
 // makerTakerOrder orders a matched pair deterministically: the maker is the
@@ -208,6 +226,65 @@ func verifyCoZkSignature(pubkeyHex, sigHex string, msg []byte) error {
 	return nil
 }
 
+// verifyCoZkPairSignatures checks both traders' ed25519 signatures over the
+// canonical settlement message, each by its own order's pubkey.
+func verifyCoZkPairSignatures(req *CoZkSettleRequest, orderA, orderB *Order, msg []byte) error {
+	if err := verifyCoZkSignature(orderA.Pubkey, req.SigA, msg); err != nil {
+		return fmt.Errorf("order A signature: %w", err)
+	}
+	if err := verifyCoZkSignature(orderB.Pubkey, req.SigB, msg); err != nil {
+		return fmt.Errorf("order B signature: %w", err)
+	}
+	return nil
+}
+
+// loadCoZkMatchedPair loads the pair referenced by `req` and enforces every
+// precondition shared by the co-zk settle variants: both orders exist, are
+// Matched with each other on opposite sides, order A is the maker of the
+// pair, and both quote the same price. Returns the orders plus the execution
+// price and whether A is the token1 seller.
+func (ot *OrderBook) loadCoZkMatchedPair(req *CoZkSettleRequest) (*Order, *Order, uint64, bool, error) {
+	orderA, err := ot.GetOrder(req.OrderAID)
+	if err != nil {
+		return nil, nil, 0, false, fmt.Errorf("order %s not found: %w", req.OrderAID, err)
+	}
+	orderB, err := ot.GetOrder(req.OrderBID)
+	if err != nil {
+		return nil, nil, 0, false, fmt.Errorf("order %s not found: %w", req.OrderBID, err)
+	}
+	if orderA.Status != Matched {
+		return nil, nil, 0, false, fmt.Errorf("order %s is not Matched (current: %s)", orderA.ID, orderA.Status.String())
+	}
+	if orderB.Status != Matched {
+		return nil, nil, 0, false, fmt.Errorf("order %s is not Matched (current: %s)", orderB.ID, orderB.Status.String())
+	}
+	if orderA.MatchOrder != orderB.ID || orderB.MatchOrder != orderA.ID {
+		return nil, nil, 0, false, fmt.Errorf("orders %s and %s are not matched with each other", orderA.ID, orderB.ID)
+	}
+	if orderA.Type == orderB.Type {
+		return nil, nil, 0, false, fmt.Errorf("matched orders must be on opposite sides")
+	}
+
+	// Role assignment is deterministic: order A must be the maker, so the
+	// circuit's a-side always corresponds to the same trader for everyone.
+	if maker, _ := makerTakerOrder(orderA, orderB); maker.ID != orderA.ID {
+		return nil, nil, 0, false, fmt.Errorf("order_a %s must be the maker of the pair", req.OrderAID)
+	}
+
+	// Equal-price requirement. The buyer's locked collateral was fixed at
+	// order creation to amount*buyer_price, but the joint circuits constrain
+	// it to amount*exec_price with strict equality and have no buyer-change
+	// output. That only holds when exec_price == buyer_price, i.e. when both
+	// orders quote the same price. A cross-price (marketable) match would make
+	// the joint proof unsatisfiable, so we reject it here (it can still settle
+	// via the legacy change-producing path) rather than let the pair wedge.
+	if orderA.Price == nil || orderB.Price == nil || orderA.Price.Cmp(orderB.Price) != 0 {
+		return nil, nil, 0, false, fmt.Errorf("co-zk settlement requires equal order prices; use the legacy settle path for cross-price matches")
+	}
+
+	return orderA, orderB, executionPrice(orderA, orderB), orderA.Type == Sell, nil
+}
+
 // SettleOrdersCoZk settles a matched pair with ONE jointly generated Groth16
 // proof: verifies both traders' signatures over the settlement message and
 // the proof against on-chain state, then spends both locked collaterals,
@@ -226,53 +303,14 @@ func (ot *OrderBook) SettleOrdersCoZk(ctx *context.WriteContext) error {
 		return err
 	}
 
-	orderA, err := ot.GetOrder(req.OrderAID)
+	orderA, orderB, price, aIsSeller, err := ot.loadCoZkMatchedPair(req)
 	if err != nil {
-		return fmt.Errorf("order %s not found: %w", req.OrderAID, err)
-	}
-	orderB, err := ot.GetOrder(req.OrderBID)
-	if err != nil {
-		return fmt.Errorf("order %s not found: %w", req.OrderBID, err)
-	}
-	if orderA.Status != Matched {
-		return fmt.Errorf("order %s is not Matched (current: %s)", orderA.ID, orderA.Status.String())
-	}
-	if orderB.Status != Matched {
-		return fmt.Errorf("order %s is not Matched (current: %s)", orderB.ID, orderB.Status.String())
-	}
-	if orderA.MatchOrder != orderB.ID || orderB.MatchOrder != orderA.ID {
-		return fmt.Errorf("orders %s and %s are not matched with each other", orderA.ID, orderB.ID)
-	}
-	if orderA.Type == orderB.Type {
-		return fmt.Errorf("matched orders must be on opposite sides")
-	}
-
-	// Role assignment is deterministic: order A must be the maker, so the
-	// circuit's a-side always corresponds to the same trader for everyone.
-	if maker, _ := makerTakerOrder(orderA, orderB); maker.ID != orderA.ID {
-		return fmt.Errorf("order_a %s must be the maker of the pair", req.OrderAID)
-	}
-	aIsSeller := orderA.Type == Sell
-	price := executionPrice(orderA, orderB)
-
-	// Equal-price requirement. The buyer's locked collateral was fixed at
-	// order creation to amount*buyer_price, but settle_cozk.circom constrains
-	// it to amount*exec_price with strict equality and has no buyer-change
-	// output. That only holds when exec_price == buyer_price, i.e. when both
-	// orders quote the same price. A cross-price (marketable) match would make
-	// the joint proof unsatisfiable, so we reject it here (it can still settle
-	// via the legacy change-producing path) rather than let the pair wedge.
-	if orderA.Price == nil || orderB.Price == nil || orderA.Price.Cmp(orderB.Price) != 0 {
-		return fmt.Errorf("co-zk settlement requires equal order prices; use the legacy settle path for cross-price matches")
+		return err
 	}
 
 	// Both traders must have signed the settlement message.
-	msg := CoZkSettleMessage(req)
-	if err := verifyCoZkSignature(orderA.Pubkey, req.SigA, msg); err != nil {
-		return fmt.Errorf("order A signature: %w", err)
-	}
-	if err := verifyCoZkSignature(orderB.Pubkey, req.SigB, msg); err != nil {
-		return fmt.Errorf("order B signature: %w", err)
+	if err := verifyCoZkPairSignatures(req, orderA, orderB, CoZkSettleMessage(req)); err != nil {
+		return err
 	}
 
 	// Verify the jointly generated proof against the reconstructed publics.
@@ -284,6 +322,17 @@ func (ot *OrderBook) SettleOrdersCoZk(ctx *context.WriteContext) error {
 		return fmt.Errorf("settle_cozk proof verification failed: %w", err)
 	}
 
+	return ot.applyCoZkSettlement(ctx, req, orderA, orderB, "cozk")
+}
+
+// applyCoZkSettlement performs the state mutation shared by the co-zk settle
+// variants, to be called only after all signature and proof checks passed:
+// spends both locked collaterals, mints both receive cashes, updates the book
+// according to `req.Cmp`, and emits the settlement event. `variant` ("cozk"
+// or "cozk2p") tags the spend attribution and the emitted event type.
+func (ot *OrderBook) applyCoZkSettlement(
+	ctx *context.WriteContext, req *CoZkSettleRequest, orderA, orderB *Order, variant string,
+) error {
 	// Pre-flight the cash IDs we are about to mint. computeCashID is
 	// content-addressed over client-chosen commitments, so a caller could set
 	// a recv/locked commitment that collides with an existing cash and make a
@@ -310,7 +359,7 @@ func (ot *OrderBook) SettleOrdersCoZk(ctx *context.WriteContext) error {
 	}
 
 	// All checks passed — mutate state.
-	settleBy := fmt.Sprintf("cozk-settle:%s:%s", orderA.ID[:8], orderB.ID[:8])
+	settleBy := fmt.Sprintf("%s-settle:%s:%s", variant, orderA.ID[:8], orderB.ID[:8])
 	if err := ot.Account.SpendCash(orderA.InputCashIDs, settleBy); err != nil {
 		return fmt.Errorf("failed to spend cash for order %s: %w", orderA.ID, err)
 	}
@@ -343,6 +392,7 @@ func (ot *OrderBook) SettleOrdersCoZk(ctx *context.WriteContext) error {
 
 	// Update the book according to the public comparison result.
 	var relisted, rematched *Order
+	var err error
 	fullyFilled := func(ord *Order) error {
 		if err := ot.UpdateOrderStatus(ord.ID, Done); err != nil {
 			return fmt.Errorf("failed to close order %s: %w", ord.ID, err)
@@ -393,7 +443,7 @@ func (ot *OrderBook) SettleOrdersCoZk(ctx *context.WriteContext) error {
 		return fmt.Errorf("re-reading order %s: %w", orderB.ID, err)
 	}
 	event := &CoZkSettleEvent{
-		EventType: "cozk_settled",
+		EventType: variant + "_settled",
 		Cmp:       req.Cmp,
 		OrderA:    finalA,
 		OrderB:    finalB,

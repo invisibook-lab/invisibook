@@ -22,12 +22,16 @@ type Config struct {
 // smaller party confirms settlement without proof.
 // `SettleCoZkVKPath` is the joint settle_cozk circuit whose single proof is
 // generated collaboratively by both traders (SettleOrdersCoZk writing).
+// `SettleCoZk2pVKPath` is the ark-compressed PLONK verifying key of the
+// 2-party collaborative settlement (SettleOrdersCoZk2p writing; verification
+// requires a chain binary built with `-tags cozk2p`).
 // `DBLogLevel` controls GORM SQL logging: "silent", "error", "warn", "info".
 type OrderBookConfig struct {
 	DBPath             string `toml:"db_path"`
 	SplitVKPath        string `toml:"split_vk_path"`
 	SettleLargerVKPath string `toml:"settle_larger_vk_path"`
 	SettleCoZkVKPath   string `toml:"settle_cozk_vk_path"`
+	SettleCoZk2pVKPath string `toml:"settle_cozk2p_vk_path"`
 	DBLogLevel         string `toml:"db_log_level"`
 }
 

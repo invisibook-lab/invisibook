@@ -9,9 +9,12 @@ db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
 # settlement without ZK proof, so no settle_smaller VK is needed.
 # settle_cozk is the joint settlement circuit whose single Groth16 proof is
 # generated collaboratively by both traders (SettleOrdersCoZk writing).
+# settle_cozk2p is the 2-party PLONK variant (SettleOrdersCoZk2p writing);
+# its verification additionally needs a chain built with `-tags cozk2p`.
 split_vk_path         = "vk/split_vk.json"
 settle_larger_vk_path = "vk/settle_larger_vk.json"
 settle_cozk_vk_path   = "vk/settle_cozk_vk.json"
+settle_cozk2p_vk_path = "vk/settle_cozk2p_vk.bin"
 
 [account]
 db_path      = "data/accounts.db"

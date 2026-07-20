@@ -166,7 +166,7 @@ verified before release.
 | adversary tolerated | semi-honest, no 2-of-3 collusion; helper must not collude | **1 fully malicious counterparty** |
 | proof system | Groth16 (circom, snarkjs zkey) | TurboPlonk (KZG) |
 | proof size | 128 B (ark) / ~720 B (snarkjs JSON) | 769 B compressed |
-| chain verifier | go-rapidsnark (already wired) | needs a PLONK verifier bridge (documented follow-up) |
+| chain verifier | go-rapidsnark (already wired) | cozk2p staticlib over cgo (`-tags cozk2p`, wired; `SettleOrdersCoZk2p`) |
 | prove wall-clock | 0.4 s (in-proc) / ~1.6-2 s (TCP) | ~24 s (in-proc) / ~20 s (QUIC) |
 | peak RSS per node | ~110 MB | ~7.4 GB |
 | offline phase | none (REP3) | Beaver triples (mock in dev; LowGear/OT for production) |

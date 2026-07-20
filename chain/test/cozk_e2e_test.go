@@ -31,6 +31,27 @@ func hexCommit(seed byte) string {
 // leaves the book while the maker is relisted in place with its remainder
 // commitments and a fresh locked collateral cash.
 func TestCoZkSettleLifecycle(t *testing.T) {
+	runCoZkSettleLifecycle(t, "SettleOrdersCoZk", core.CoZkSettleMessage, core.CoZk2pSettleMessage)
+}
+
+// TestCoZk2pSettleLifecycle drives the same state machine through the
+// 2-party writing (PLONK VK path empty in test mode → proof verification
+// skipped; signatures still enforced over the domain-separated 2p message).
+func TestCoZk2pSettleLifecycle(t *testing.T) {
+	runCoZkSettleLifecycle(t, "SettleOrdersCoZk2p", core.CoZk2pSettleMessage, core.CoZkSettleMessage)
+}
+
+// runCoZkSettleLifecycle is the shared lifecycle driver for the co-zk settle
+// variants. `writing` names the orderbook writing to submit; `signMsg` builds
+// the variant's canonical settlement message; `crossMsg` builds the OTHER
+// variant's message — a request signed with it must be rejected, pinning the
+// signature domain separation end to end.
+func runCoZkSettleLifecycle(
+	t *testing.T,
+	writing string,
+	signMsg func(*core.CoZkSettleRequest) []byte,
+	crossMsg func(*core.CoZkSettleRequest) []byte,
+) {
 	alicePriv, alicePubkey := deriveKeypair(t, aliceDerivedSeedHex)
 	bobPriv, bobPubkey := deriveKeypair(t, bobDerivedSeedHex)
 
@@ -118,14 +139,14 @@ func TestCoZkSettleLifecycle(t *testing.T) {
 		RecvBCommitment:      hexCommit(0xB3),
 		ZkProof:              "test-proof-skip",
 	}
-	msg := core.CoZkSettleMessage(req)
+	msg := signMsg(req)
 	req.SigA = hex.EncodeToString(ed25519.Sign(alicePriv, msg))
 	req.SigB = hex.EncodeToString(ed25519.Sign(bobPriv, msg))
 
 	// --- Negative case: a tampered signature must not change any state ---
 	badReq := *req
 	badReq.SigB = hex.EncodeToString(ed25519.Sign(alicePriv, msg)) // signed by the wrong key
-	if err := wrCall("orderbook", "SettleOrdersCoZk", &badReq); err != nil {
+	if err := wrCall("orderbook", writing, &badReq); err != nil {
 		t.Fatalf("submitting bad-signature settle failed at HTTP level: %v", err)
 	}
 	waitBlock()
@@ -133,9 +154,24 @@ func TestCoZkSettleLifecycle(t *testing.T) {
 		t.Fatalf("bad signature must be rejected: sell order moved to %d", st)
 	}
 
+	// --- Negative case: signatures over the OTHER variant's message must be
+	// rejected — a settlement signed for one protocol cannot replay on the
+	// other ---
+	crossReq := *req
+	wrongMsg := crossMsg(req)
+	crossReq.SigA = hex.EncodeToString(ed25519.Sign(alicePriv, wrongMsg))
+	crossReq.SigB = hex.EncodeToString(ed25519.Sign(bobPriv, wrongMsg))
+	if err := wrCall("orderbook", writing, &crossReq); err != nil {
+		t.Fatalf("submitting cross-domain settle failed at HTTP level: %v", err)
+	}
+	waitBlock()
+	if st := queryOrders(t, sellOrderID)[0].Status; st != 1 {
+		t.Fatalf("cross-domain signature must be rejected: sell order moved to %d", st)
+	}
+
 	// --- Happy path ---
-	if err := wrCall("orderbook", "SettleOrdersCoZk", req); err != nil {
-		t.Fatalf("SettleOrdersCoZk failed: %v", err)
+	if err := wrCall("orderbook", writing, req); err != nil {
+		t.Fatalf("%s failed: %v", writing, err)
 	}
 	waitBlock()
 
@@ -204,7 +240,7 @@ func TestCoZkSettleLifecycle(t *testing.T) {
 	// A second submission must be rejected — either at the txpool level
 	// ("Transaction duplicated") or, if it reaches execution, by the
 	// Matched-status check leaving state untouched.
-	if err := wrCall("orderbook", "SettleOrdersCoZk", req); err == nil {
+	if err := wrCall("orderbook", writing, req); err == nil {
 		waitBlock()
 	} else {
 		t.Logf("replay rejected at txpool level: %v", err)
@@ -213,5 +249,5 @@ func TestCoZkSettleLifecycle(t *testing.T) {
 		t.Fatalf("replayed settle must not change relisted order, got status %d", st)
 	}
 
-	t.Log("=== Co-zk settle lifecycle verified ===")
+	t.Logf("=== %s lifecycle verified ===", writing)
 }

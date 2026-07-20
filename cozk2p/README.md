@@ -44,5 +44,17 @@ Both parties end with the identical, locally-verified PLONK proof.
 cargo run --release --bin bench_settle2p -- --runs 5 --out results.json
 ```
 
+## Chain verification
+
+The chain verifies the revealed proof through this crate's C ABI
+(`src/ffi.rs`), built as a staticlib and linked over cgo into the
+`SettleOrdersCoZk2p` writing (`go build -tags cozk2p`). From the repo root:
+
+```bash
+make build-chain-cozk2p   # staticlib + tagged chain binary
+make dump-cozk2p-fixture  # chain/vk/settle_cozk2p_vk.bin + test fixture
+make test-e2e-cozk2p      # real proof settled on a running chain
+```
+
 Dev caveats (SRS from a public seed, mock Beaver triples, unauthenticated
 TLS) are listed in the design doc §5 — testnet only.

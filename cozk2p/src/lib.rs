@@ -19,6 +19,7 @@
 //! (e.g. `ark-mpc-offline`'s LowGear).
 
 pub mod constants;
+pub mod ffi;
 pub mod gadgets;
 pub mod net;
 pub mod poseidon;

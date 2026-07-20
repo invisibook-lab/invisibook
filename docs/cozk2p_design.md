@@ -99,15 +99,29 @@ instantiation transparently runs on SPDZ shares.
 ## 4. Chain verification story
 
 The collaborative proof opens to a **standard jellyfish TurboPlonk proof**
-(13 G1 + 10 Fr; ~1 KB compressed) verifying against a fixed verifying key
+(13 G1 + 10 Fr; 769 B compressed) verifying against a fixed verifying key
 with the same 15 public signals the chain already rebuilds for
 `SettleOrdersCoZk`. It is *not* snarkjs-Groth16-compatible, so go-rapidsnark
-cannot verify it; chain integration needs a PLONK verifier reachable from
-Go — the clean path is a small Rust `staticlib` (`verify(vk, publics,
-proof) -> bool`) linked via cgo. That is deliberately **out of scope for
-this pass** (it couples the Go build to the pinned Rust toolchain); the
-crate exposes `verify_settle` with exactly the signature such a bridge
-needs, and the public-signal layout is already chain-canonical.
+cannot verify it; instead the chain links the `cozk2p` crate as a Rust
+`staticlib` over **cgo**:
+
+- `cozk2p/src/ffi.rs` exports `cozk2p_verify_settle(vk, public_json,
+  proof)` — vk/proof as ark-compressed bytes, the statement as the same
+  `SettlePublic` JSON both traders agreed on (reusing the serde layer keeps
+  the Go side free of field-element encodings).
+- `chain/core/plonkverify.go` + the `SettleOrdersCoZk2p` writing rebuild
+  the statement from on-chain state (`chain/core/orderbook_cozk2p.go`) and
+  call the bridge. The signed settlement message is domain-separated from
+  the 3-party variant (`invisibook-cozk2p-settle:` prefix).
+- The bridge compiles in only with `go build -tags cozk2p` (see
+  `make build-chain-cozk2p`), so the default chain build stays pure Go and
+  decoupled from the pinned Rust toolchain; without the tag the writing
+  rejects PLONK settlements at runtime.
+- Artifacts: `chain/vk/settle_cozk2p_vk.bin` (ark-compressed vk, committed)
+  and a chain-test fixture, both from `dump_settle2p_fixture`. Layout
+  lockstep and accept/reject are pinned by `chain/core/cozk2p_*_test.go`;
+  `chain/test/cozk2p_real_proof_test.go` settles a real collaborative proof
+  on a running chain end to end (`make test-e2e-cozk2p`).
 
 ## 5. Trust caveats (dev/testnet)
 

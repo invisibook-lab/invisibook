@@ -9,6 +9,11 @@ edition = "2021"
 # `time`/`time-core` to versions whose MSRV fits the pinned toolchain (see
 # rust-toolchain.toml). Regenerating the lock breaks the build.
 
+# `staticlib` feeds the chain's cgo bridge (src/ffi.rs); `rlib` keeps the
+# crate usable by its own bins/tests.
+[lib]
+crate-type = ["rlib", "staticlib"]
+
 [dependencies]
 anyhow = "1"
 ark-bn254 = "0.4"
