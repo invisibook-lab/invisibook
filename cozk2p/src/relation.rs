@@ -391,6 +391,19 @@ pub fn side_wires_from_vars(vars: &[Variable]) -> SideWires {
     }
 }
 
+/// A record of the relation's satisfiability checks, sufficient to test the
+/// joint witness for validity outside the proof: `eq_pairs` are the variable
+/// pairs an `enforce_equal` requires to be equal, `bool_vars` the variables an
+/// `enforce_bool` requires to be in `{0, 1}`. The MPC prover uses this to abort
+/// on an invalid witness BEFORE any proof element is opened (see
+/// `check_witness_valid` in `prove.rs`) — a proof over an invalid witness is
+/// outside the zk-SNARK's zero-knowledge guarantee (eprint 2025/1026).
+#[derive(Clone, Debug, Default)]
+pub struct SatisfiabilityWitness {
+    pub eq_pairs: Vec<(Variable, Variable)>,
+    pub bool_vars: Vec<Variable>,
+}
+
 /// Encode the settlement constraints over already-allocated wires. Works on
 /// any `Circuit<Fr>` implementation (single-prover or MPC).
 pub fn build_settle_relation<Cs: Circuit<Fr>>(
@@ -399,17 +412,60 @@ pub fn build_settle_relation<Cs: Circuit<Fr>>(
     a: &SideWires,
     b: &SideWires,
 ) -> Result<(), CircuitError> {
+    let mut sat = SatisfiabilityWitness::default();
+    settle_relation_impl(cs, public, a, b, &mut sat)
+}
+
+/// [`build_settle_relation`] that also returns the [`SatisfiabilityWitness`]
+/// (the enforced equalities and booleanity variables) so the collaborative
+/// prover can validity-check the joint witness before revealing a proof.
+pub fn build_settle_relation_collecting<Cs: Circuit<Fr>>(
+    cs: &mut Cs,
+    public: &PublicWires,
+    a: &SideWires,
+    b: &SideWires,
+) -> Result<SatisfiabilityWitness, CircuitError> {
+    let mut sat = SatisfiabilityWitness::default();
+    settle_relation_impl(cs, public, a, b, &mut sat)?;
+    Ok(sat)
+}
+
+/// Shared body of the two builders. Every `enforce_equal`/`enforce_bool` is
+/// mirrored into `sat` so the exact set of checks that make the circuit
+/// satisfiable can be re-tested on the witness shares. `sat` collection is the
+/// only addition over the plain relation; the emitted constraints are
+/// identical.
+fn settle_relation_impl<Cs: Circuit<Fr>>(
+    cs: &mut Cs,
+    public: &PublicWires,
+    a: &SideWires,
+    b: &SideWires,
+    sat: &mut SatisfiabilityWitness,
+) -> Result<(), CircuitError> {
     // 1. Booleanity of every amount bit (both sides).
     for side in [a, b] {
         enforce_bits(cs, &side.amount_bits)?;
         enforce_bits(cs, &side.locked_bits[0])?;
         enforce_bits(cs, &side.locked_bits[1])?;
+        sat.bool_vars.extend_from_slice(&side.amount_bits);
+        sat.bool_vars.extend_from_slice(&side.locked_bits[0]);
+        sat.bool_vars.extend_from_slice(&side.locked_bits[1]);
     }
     // a_is_seller is chain-provided but constrain it anyway; its complement
     // selects B's role.
     cs.enforce_bool(public.a_is_seller)?;
+    sat.bool_vars.push(public.a_is_seller);
     let a_seller = as_bool_unchecked(public.a_is_seller);
     let b_seller = cs.logic_neg(a_seller)?;
+
+    // Enforce `x == y` and record the pair for the validity gate. Defined
+    // after the booleanity block so it does not hold a borrow of `sat` while
+    // `bool_vars` is still being filled above.
+    let mut eq = |cs: &mut Cs, x: Variable, y: Variable| -> Result<(), CircuitError> {
+        cs.enforce_equal(x, y)?;
+        sat.eq_pairs.push((x, y));
+        Ok(())
+    };
 
     // 2. Reconstruct amounts from bits (guarantees 64-bit range).
     let a_amt = le_bits_to_field(cs, &a.amount_bits)?;
@@ -417,9 +473,9 @@ pub fn build_settle_relation<Cs: Circuit<Fr>>(
 
     // 3. Open the on-chain order commitments.
     let order_a_hash = poseidon_hash2(cs, a_amt, a.r_order)?;
-    cs.enforce_equal(order_a_hash, public.order_a)?;
+    eq(cs, order_a_hash, public.order_a)?;
     let order_b_hash = poseidon_hash2(cs, b_amt, b.r_order)?;
-    cs.enforce_equal(order_b_hash, public.order_b)?;
+    eq(cs, order_b_hash, public.order_b)?;
 
     // 4. Open the locked collateral commitments and sum each side.
     let mut locked_sum = [cs.zero(); 2];
@@ -433,7 +489,7 @@ pub fn build_settle_relation<Cs: Circuit<Fr>>(
         for slot in 0..MAX_LOCKED {
             let amt = le_bits_to_field(cs, &side.locked_bits[slot])?;
             let h = poseidon_hash2(cs, amt, side.locked_rand[slot])?;
-            cs.enforce_equal(h, pub_hashes[slot])?;
+            eq(cs, h, pub_hashes[slot])?;
             sum = cs.add(sum, amt)?;
         }
         locked_sum[idx] = sum;
@@ -447,18 +503,18 @@ pub fn build_settle_relation<Cs: Circuit<Fr>>(
     //    integer-exact. The circuit does not re-range-check price.
     let a_times_price = cs.mul(a_amt, public.price)?;
     let a_needed = cs.mux(a_seller, a_amt, a_times_price)?;
-    cs.enforce_equal(locked_sum[0], a_needed)?;
+    eq(cs, locked_sum[0], a_needed)?;
     let b_times_price = cs.mul(b_amt, public.price)?;
     let b_needed = cs.mux(b_seller, b_amt, b_times_price)?;
-    cs.enforce_equal(locked_sum[1], b_needed)?;
+    eq(cs, locked_sum[1], b_needed)?;
 
     // 6. Comparison: cmp = (a > b) - (a < b) must equal the public claim.
-    let (lt, eq) = cmp_from_bits(cs, &a.amount_bits, &b.amount_bits)?;
+    let (lt, eq_flag) = cmp_from_bits(cs, &a.amount_bits, &b.amount_bits)?;
     // gt = 1 - lt - eq
     let one_var = cs.one();
     let zero = cs.zero();
     let gt = cs.lc(
-        &[one_var, lt, eq, zero],
+        &[one_var, lt, eq_flag, zero],
         &[
             Fr::from(1u64),
             -Fr::from(1u64),
@@ -467,7 +523,7 @@ pub fn build_settle_relation<Cs: Circuit<Fr>>(
         ],
     )?;
     let cmp_expected = cs.sub(gt, lt)?;
-    cs.enforce_equal(cmp_expected, public.cmp)?;
+    eq(cs, cmp_expected, public.cmp)?;
 
     // 7. fill = min(a, b) = b + lt * (a - b); remainders a' , b'.
     let diff = cs.sub(a_amt, b_amt)?;
@@ -478,29 +534,29 @@ pub fn build_settle_relation<Cs: Circuit<Fr>>(
 
     // 8. Updated order commitments.
     let new_order_a = poseidon_hash2(cs, a_new, a.r_order_new)?;
-    cs.enforce_equal(new_order_a, public.new_order_a)?;
+    eq(cs, new_order_a, public.new_order_a)?;
     let new_order_b = poseidon_hash2(cs, b_new, b.r_order_new)?;
-    cs.enforce_equal(new_order_b, public.new_order_b)?;
+    eq(cs, new_order_b, public.new_order_b)?;
 
     // 9. Updated locked collateral commitments (remainder, per side token).
     let a_new_price = cs.mul(a_new, public.price)?;
     let a_locked_new = cs.mux(a_seller, a_new, a_new_price)?;
     let h = poseidon_hash2(cs, a_locked_new, a.r_locked_new)?;
-    cs.enforce_equal(h, public.new_locked_a)?;
+    eq(cs, h, public.new_locked_a)?;
     let b_new_price = cs.mul(b_new, public.price)?;
     let b_locked_new = cs.mux(b_seller, b_new, b_new_price)?;
     let h = poseidon_hash2(cs, b_locked_new, b.r_locked_new)?;
-    cs.enforce_equal(h, public.new_locked_b)?;
+    eq(cs, h, public.new_locked_b)?;
 
     // 10. Receive commitments: a seller of token1 receives fill*price
     //     token2; a buyer receives fill token1.
     let fill_price = cs.mul(fill, public.price)?;
     let recv_a_amt = cs.mux(a_seller, fill_price, fill)?;
     let h = poseidon_hash2(cs, recv_a_amt, a.r_recv)?;
-    cs.enforce_equal(h, public.recv_a)?;
+    eq(cs, h, public.recv_a)?;
     let recv_b_amt = cs.mux(b_seller, fill_price, fill)?;
     let h = poseidon_hash2(cs, recv_b_amt, b.r_recv)?;
-    cs.enforce_equal(h, public.recv_b)?;
+    eq(cs, h, public.recv_b)?;
 
     Ok(())
 }

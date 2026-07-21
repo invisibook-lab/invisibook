@@ -97,3 +97,38 @@ async fn collaborative_prove_and_verify() {
         "both parties must reveal the same proof"
     );
 }
+
+/// The witness-validity gate: if a party inputs shares that make the joint
+/// witness unsatisfiable (here B claims an amount that does not open the
+/// agreed `order_b` commitment), collaborative proving must ABORT for both
+/// parties — no proof is produced, so an invalid-witness proof never reaches
+/// the counterparty (eprint 2025/1026, Pitfall 1).
+#[tokio::test(flavor = "multi_thread")]
+async fn validity_gate_aborts_on_invalid_witness() {
+    let (a, b, price, a_is_seller) = sample_trade();
+    // Statement is agreed from the honest amounts...
+    let public = compute_public(&a, &b, price, a_is_seller).unwrap();
+    let (pk, _vk) = dev_keys(&keys_dir()).unwrap();
+
+    // ...but B lies to the MPC: an amount whose commitment differs from the
+    // agreed `public.order_b`, so the joint witness cannot satisfy the relation.
+    let mut b_bad = b.clone();
+    b_bad.order_amount = b.order_amount + 1;
+
+    let (r0, r1) = execute_mock_mpc(|fabric| {
+        let (a, b_bad, public, pk) = (a.clone(), b_bad.clone(), public.clone(), pk.clone());
+        async move {
+            let party = fabric.party_id();
+            let my_side: SidePrivate = if party == PARTY0 { a } else { b_bad };
+            prove_collaborative(fabric.clone(), party, &my_side, &public, &pk).await
+        }
+    })
+    .await;
+
+    assert!(
+        r0.is_err() && r1.is_err(),
+        "both parties must abort on an invalid joint witness (got ok: p0={}, p1={})",
+        r0.is_ok(),
+        r1.is_ok()
+    );
+}

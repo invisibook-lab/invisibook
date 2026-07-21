@@ -90,7 +90,13 @@ async fn main() -> Result<()> {
     )
     .await
     .map_err(|_| anyhow::anyhow!("timed out waiting for the counterparty to connect"))??;
-    // Mock Beaver source: dev only (see module docs).
+    // Mock Beaver source: dev only (see module docs). The masks are
+    // predictable constants, so this leaks the counterparty's inputs and
+    // strips the proof's zero-knowledge — functional demo, never production.
+    eprintln!(
+        "WARNING [cozk2p]: PartyIDBeaverSource is a MOCK offline phase — inputs \
+         are recoverable and the proof carries no zero-knowledge. DEV ONLY."
+    );
     let fabric = MpcFabric::new(net, PartyIDBeaverSource::new(party));
 
     println!("[{role_name}] proving collaboratively...");

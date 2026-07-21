@@ -34,6 +34,21 @@ pub const MAX_DEGREE: usize = 1 << 15;
 /// Fixed dev-SRS seed. Public and reproducible — DEV ONLY, see module docs.
 const DEV_SRS_SEED: u64 = 0x1B00C_C02C;
 
+/// Print a one-time warning that these keys come from a publicly reproducible
+/// dev SRS (forgeable). Guarded by `Once` so repeated `dev_keys` calls (the
+/// app and both party processes all call it) emit it at most once per process.
+fn warn_dev_srs_once() {
+    use std::sync::Once;
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "WARNING [cozk2p]: using the fixed-seed dev KZG SRS — the toxic tau \
+             is publicly recomputable and any proof can be forged. DEV/TESTNET \
+             ONLY; swap in a ceremony SRS before touching real value."
+        );
+    });
+}
+
 /// A sample well-formed trade used only to instantiate the circuit shape for
 /// key generation (witness values are irrelevant to `preprocess`; only the
 /// gate/permutation structure matters). Also reused by tests and benches.
@@ -69,6 +84,7 @@ const RELATION_VERSION: u32 = 1;
 /// parties proving — and locally verifying — against outdated keys would
 /// otherwise succeed while attesting the wrong statement).
 pub fn dev_keys(cache_dir: &Path) -> Result<(ProvingKey<Bn254>, VerifyingKey<Bn254>)> {
+    warn_dev_srs_once();
     // Build the (cheap) keygen circuit first: its shape keys the cache.
     let (a, b, price, a_is_seller) = sample_trade();
     let public = compute_public(&a, &b, price, a_is_seller)?;

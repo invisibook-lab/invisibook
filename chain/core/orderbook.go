@@ -65,6 +65,21 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	if err != nil {
 		panic(fmt.Sprintf("loading settle_cozk2p VK: %v", err))
 	}
+	// Fail-closed in production: a nil VK means LoadVK/LoadPlonkVK found an
+	// empty path and verification would be silently skipped. Refuse to boot
+	// so a misconfigured node never accepts unverified settlements.
+	if cfg.RequireProofs {
+		for name, missing := range map[string]bool{
+			"split":         splitVK == nil,
+			"settle_larger": settleLargerVK == nil,
+			"settle_cozk":   settleCoZkVK == nil,
+			"settle_cozk2p": settleCoZk2pVK == nil,
+		} {
+			if missing {
+				panic(fmt.Sprintf("require_proofs is set but %s VK path is empty; refusing to start with proof verification disabled", name))
+			}
+		}
+	}
 	ot := &OrderBook{
 		Tripod:         tri,
 		db:             InitOrderDB(cfg.DBPath, ParseGormLogLevel(cfg.DBLogLevel)),
@@ -478,8 +493,8 @@ func (ot *OrderBook) CompareOrders(ctx *context.WriteContext) error {
 // (IsSmaller=false) must include a ZK `Leg`; the smaller party
 // (IsSmaller=true) confirms settlement without proof (Leg is nil).
 type SettleOrderRequest struct {
-	OrderID      OrderID        `json:"order_id"       validate:"required"`
-	MatchOrderID OrderID        `json:"match_order_id" validate:"required"`
+	OrderID      OrderID         `json:"order_id"       validate:"required"`
+	MatchOrderID OrderID         `json:"match_order_id" validate:"required"`
 	Leg          *SettleTokenLeg `json:"leg,omitempty"`
 }
 

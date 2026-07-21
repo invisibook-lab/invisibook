@@ -125,10 +125,14 @@ cannot verify it; instead the chain links the `cozk2p` crate as a Rust
 
 ## 5. Trust caveats (dev/testnet)
 
+> **These two rows are not "reduced security" — they are NO security.** The
+> current binaries are strictly a functional demo. Do not deploy against real
+> value until both are replaced (see §7).
+
 | concern | status |
 |---|---|
-| KZG SRS | fixed-seed dev SRS (`setup.rs`) — toxic tau derivable; needs a ceremony SRS for production |
-| Beaver triples | `PartyIDBeaverSource` mock (insecure) in demo binaries; production = real SPDZ offline phase — `ark-mpc-offline` ships LowGear (FHE, C++ MP-SPDZ dep), or an OT-based generator per `CLAUDE.md`'s roadmap could implement `PreprocessingPhase` |
+| KZG SRS | fixed-seed dev SRS (`setup.rs`, `DEV_SRS_SEED`) — **the toxic tau is publicly recomputable from the committed seed, so anyone can forge a proof that passes `settle_cozk2p_vk.bin` for an arbitrary statement: on-chain soundness is zero.** Needs a ceremony SRS (e.g. a Perpetual Powers of Tau export) for any non-demo use |
+| Beaver triples | `PartyIDBeaverSource` mock in demo binaries — **the input masks and proving blinders are predictable constants, so (a) a counterparty reads the other trader's private inputs directly off the shares, and (b) the revealed PLONK proof carries zero zero-knowledge and is published on-chain. Not private even against a semi-honest counterparty.** Production = a real SPDZ offline phase — `ark-mpc-offline` ships LowGear (FHE, C++ MP-SPDZ dep), or an OT-based generator per `CLAUDE.md`'s roadmap could implement `PreprocessingPhase` |
 | QUIC TLS | ark-mpc uses a self-signed cert + pass-through verifier: transport encryption without peer authentication; peers authenticate at the application layer (both traders ed25519-sign the settlement message) and SPDZ MACs abort on in-protocol tampering |
 | Toolchain | pinned `nightly-2025-02-20` (ark-mpc uses the unstable `inherent_associated_types` feature, which regressed on newer nightlies); `time`/`time-core` held back in the lockfile |
 | `price` range | the circuit does not re-range-check `price`; soundness relies on the chain guaranteeing `price < 2^64` (it is a u64 on-chain). All in-circuit products then stay `< 2^128 < r`, i.e. integer-exact |
@@ -155,3 +159,43 @@ cozk2p/
 ```
 
 Results: [cozk_experiments.md](cozk_experiments.md) §"2-party".
+
+## 7. Security status & production checklist
+
+A multi-paper self-audit (Ozdemir–Boneh USENIX'22; eprint 2025/1026;
+Liu et al. USENIX'25; zkSaaS; Siniel; PLONK; Poseidon2) surfaced the gaps
+below. The 2-party path is a **functional demo**, not a secure deployment,
+until the P0 items are closed. Ordered by severity:
+
+- **Malicious-security claim is not yet earned (P0).** SPDZ MACs give
+  correct-or-abort on *shares*, not `t`-zero-knowledge. A counterparty may
+  input shares that make the joint witness unsatisfiable; the invalid-witness
+  proof is then opened to *both* parties before the local `verify_settle`,
+  and a proof over an invalid witness is outside the zk-SNARK's ZK guarantee
+  (2025/1026, Pitfalls 1–2; the positive "malicious security for free" result
+  explicitly does **not** cover the dishonest-majority / 2-party setting).
+  *Fix in progress:* an in-MPC witness-validity gate that aborts before any
+  proof element is opened (a random linear combination of the relation's
+  constraint residuals, opened as a single scalar). Until it lands, describe
+  the guarantee as **computational integrity + abort**, not "tolerates a
+  fully malicious counterparty".
+- **Statement agreement leaks `min(a,b)` pre-proof (P0).** The six updated
+  commitments are currently pre-agreed public *inputs*; computing one's own
+  side requires knowing `fill = min(a,b)`, so the surviving trader learns the
+  counterparty's amount *before* proving and even on a trade that never
+  settles. The 3-party path avoids this by computing them as MPC *outputs*
+  (`settle_cozk.circom`). *Fix:* compute the six commitments inside the MPC
+  and open only the commitments (matching the 3-party statement). Mitigated
+  in part, once implemented, by the on-chain confirm→irrevocable→freeze flow
+  (matching is size-blind, so the settlement handshake is the only
+  pre-settlement amount channel).
+- **Dev SRS + mock Beaver = no soundness, no privacy (P0).** See §5. Replace
+  with a ceremony SRS and a real SPDZ offline phase.
+- **Fail-open verification (P1).** An empty VK path silently skips
+  verification. Set `require_proofs = true` in the chain's orderbook config
+  to make this a startup error (production nodes should).
+- **No abort/timeout handling on-chain (P1).** A Matched pair whose
+  counterparty stalls the MPC has no cancel/timeout path; collateral can be
+  frozen indefinitely. Intended design: a confirmation step, after which
+  settlement is irrevocable and a stalled pair is force-frozen — the
+  `Frozen`/`Cancelled` order states exist but are not yet wired.
