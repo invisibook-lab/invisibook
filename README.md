@@ -94,23 +94,25 @@ Use the trade form on the right panel to place orders:
 
 ## Collaborative ZK Settlement (co-zk)
 
-Matched orders can settle with a **single Groth16 proof generated jointly by
-both traders via MPC** ([co-snarks](https://github.com/invisibook-lab/co-snarks)
-REP3: the two traders + one helper node), so neither trader ever learns the
-other's hidden amount. The chain verifies the proof, removes the fully-filled
-order from the book, and updates the surviving order's hidden amount
-commitment in place (keeping its time priority). See
-[docs/cozk_design.md](docs/cozk_design.md) for the protocol, circuit, and
+Matched orders settle with a **single proof generated jointly by both
+traders**, so neither ever learns the other's hidden amount. The chain
+verifies the proof, removes the fully-filled order from the book, and updates
+the surviving order's hidden amount commitment in place (keeping its time
+priority). The active path is the **2-party** variant ([cozk2p](cozk2p/):
+malicious-secure SPDZ + collaborative TurboPlonk, no helper node). See
+[docs/cozk2p_design.md](docs/cozk2p_design.md) for the protocol, circuit, and
 threat model, and [docs/cozk_experiments.md](docs/cozk_experiments.md) for
 measurements.
 
 ```bash
-# circuit + collaborative-proving tests
-cd lib && cargo test -p zk settle_cozk && cargo test -p cozk
+# unit + satisfiability + 2-party e2e (mock network)
+cd cozk2p && cargo test
 
-# 3-node distributed proving demo / benchmark
-cargo build --release -p cozk --bins
-./target/release/bench_settle_cozk --runs 5
+# benchmark: single-prover vs full 2-party session
+cargo run --release --bin bench_settle2p -- --runs 5
+
+# real collaborative proof settled on a running chain
+make test-e2e-cozk2p
 ```
 
 ## License

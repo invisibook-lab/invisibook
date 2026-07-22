@@ -21,10 +21,13 @@
 pub mod constants;
 pub mod ffi;
 pub mod gadgets;
+pub mod mpc_compare;
+pub mod mpc_poseidon;
 pub mod net;
 pub mod poseidon;
 pub mod prove;
 pub mod relation;
+pub mod session;
 pub mod setup;
 pub mod stats;
 

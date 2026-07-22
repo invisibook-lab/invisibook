@@ -1,11 +1,14 @@
-//! Experiment harness for the 2-party collaborative settlement prover.
-//! Measures, on the same relation and keys:
+//! Experiment harness for the 2-party collaborative settlement. Measures,
+//! on the same relation and keys:
 //!
 //! - single-prover jellyfish TurboPlonk baseline (a trusted prover holding
 //!   both sides' secrets),
-//! - the 2-party collaborative flow in-process (mock duplex network),
-//! - the 2-party collaborative flow as two OS processes over QUIC
-//!   (per-process peak RSS, real transport),
+//! - the FULL 2-party session in-process (mock duplex network) — the same
+//!   `run_session` the app drives: MPC compare, fill reveal, output-
+//!   commitment exchange, signature ferry, then the collaborative prove,
+//! - the FULL 2-party session as two OS processes over QUIC, spawning the
+//!   same `settle2p_session` binary the app spawns (real transport,
+//!   per-process peak RSS),
 //!
 //! reporting wall-clock, peak memory, and proof sizes. Run in release:
 //!
@@ -13,8 +16,9 @@
 
 use std::{
     fs,
+    io::Write as _,
     path::PathBuf,
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     time::Instant,
 };
 
@@ -22,11 +26,97 @@ use anyhow::{Context, Result, ensure};
 use ark_mpc::{PARTY0, test_helpers::execute_mock_mpc};
 use ark_serialize::CanonicalSerialize;
 use clap::Parser;
+use cozk2p::poseidon::{commit, fr_to_hex};
+use cozk2p::session::{LockedCash, MyPrivate, NeedSig, SessionInput, SigIo, run_session};
 use cozk2p::{
-    SidePrivate, compute_public, default_cache_dir, dev_keys, prove::prove_collaborative_timed,
-    prove_single, sample_trade, setup::circuit_size, stats::peak_rss_bytes, verify_settle,
+    SidePrivate, compute_public, default_cache_dir, dev_keys, prove_single, sample_trade,
+    setup::circuit_size, stats::peak_rss_bytes, verify_settle,
 };
 use serde_json::{Value, json};
+
+/// A fixed 128-hex dummy signature. The session ferries signatures
+/// opaquely (only the host app / chain verify them), so the benchmark can
+/// feed a placeholder without affecting timing.
+const DUMMY_SIG: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\
+                         aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+/// In-process signature ferry that returns the fixed dummy signature.
+struct DummySigIo;
+
+impl SigIo for DummySigIo {
+    fn request_sig(&mut self, _need: &NeedSig) -> Result<String> {
+        Ok(DUMMY_SIG.to_string())
+    }
+}
+
+/// The `Poseidon(v, r)` commitment hex the chain would hold for `(v, r)`.
+fn commit_hex(amount: u64, random: &[u8; 32]) -> String {
+    fr_to_hex(&commit(amount, random))
+}
+
+/// Build both traders' `SessionInput`s for a sample trade — the same
+/// chain-sourced publics + per-side witnesses the app assembles, so the
+/// benchmark drives the FULL session (compare + reveal + exchange + prove),
+/// not just the prove. Token/id fields are placeholders (no chain here).
+fn build_session_inputs(
+    a: &SidePrivate,
+    b: &SidePrivate,
+    price: u64,
+    a_is_seller: bool,
+) -> (SessionInput, SessionInput) {
+    let zero = commit_hex(0, &[0u8; 32]);
+    let order_a = commit_hex(a.order_amount, &a.r_order);
+    let order_b = commit_hex(b.order_amount, &b.r_order);
+    let pad = |locked: &[(u64, [u8; 32])]| -> [String; 2] {
+        let mut out = [zero.clone(), zero.clone()];
+        for (i, (amt, r)) in locked.iter().take(2).enumerate() {
+            out[i] = commit_hex(*amt, r);
+        }
+        out
+    };
+    let locked_a = pad(&a.locked);
+    let locked_b = pad(&b.locked);
+    let my_priv = |s: &SidePrivate| MyPrivate {
+        order_amount: s.order_amount,
+        r_order: hex::encode(s.r_order),
+        locked: s
+            .locked
+            .iter()
+            .map(|(amt, r)| LockedCash {
+                amount: *amt,
+                random: hex::encode(r),
+            })
+            .collect(),
+    };
+    // Seller locks/receives token1/token2; the buyer is the opposite leg.
+    let (a_lock, a_recv) = if a_is_seller {
+        ("ETH", "USDT")
+    } else {
+        ("USDT", "ETH")
+    };
+    let common = |role: &str, my_id: &str, cash: &str, lock: &str, recv: &str, my: MyPrivate| {
+        SessionInput {
+            role: role.to_string(),
+            order_a_id: "order-a".into(),
+            order_b_id: "order-b".into(),
+            my_order_id: my_id.into(),
+            my_input_cash_ids: vec![cash.into()],
+            my_lock_token: lock.into(),
+            my_recv_token: recv.into(),
+            price,
+            a_is_seller,
+            order_a: order_a.clone(),
+            order_b: order_b.clone(),
+            locked_a: locked_a.clone(),
+            locked_b: locked_b.clone(),
+            my,
+        }
+    };
+    (
+        common("trader-a", "order-a", "a-cash", a_lock, a_recv, my_priv(a)),
+        common("trader-b", "order-b", "b-cash", a_recv, a_lock, my_priv(b)),
+    )
+}
 
 #[derive(Parser)]
 #[command(about = "Benchmark settle2p: 2-party collaborative vs single prover")]
@@ -93,53 +183,81 @@ async fn main() -> Result<()> {
         proof_compressed
     );
 
-    // ── 2-party collaborative, in-process (mock duplex channels) ──
-    println!("=== co-zk 2-party, in-process (mock network) ===");
+    // ── Full 2-party session, in-process (mock duplex channels) ──
+    // Now the ENTIRE settlement session the app runs: MPC comparison, fill
+    // reveal, output-commitment exchange, signature ferry, then the same
+    // collaborative prove. `total` therefore includes the compare/reveal
+    // overhead the pure-prove numbers omitted.
+    println!("=== co-zk 2-party FULL session, in-process (mock network) ===");
+    let (input_a, input_b) = build_session_inputs(&a, &b, price, a_is_seller);
+    let session_tmp = std::env::temp_dir().join(format!("bench_settle2p_{}", std::process::id()));
+    fs::create_dir_all(&session_tmp)?;
     let mut mock_runs = Vec::new();
-    for _ in 0..args.runs {
+    for run in 0..args.runs {
+        let dir_a = session_tmp.join(format!("mock_{run}_a"));
+        let dir_b = session_tmp.join(format!("mock_{run}_b"));
         let t = Instant::now();
         let (r0, _r1) = execute_mock_mpc(|fabric| {
-            let (a, b, public, pk) = (a.clone(), b.clone(), public.clone(), pk.clone());
+            let (input_a, input_b, pk, vk) =
+                (input_a.clone(), input_b.clone(), pk.clone(), vk.clone());
+            let (dir_a, dir_b) = (dir_a.clone(), dir_b.clone());
             async move {
                 let party = fabric.party_id();
-                let my: SidePrivate = if party == PARTY0 { a } else { b };
-                prove_collaborative_timed(fabric.clone(), party, &my, &public, &pk)
-                    .await
-                    .expect("collaborative proving must succeed")
+                let (input, dir) = if party == PARTY0 {
+                    (input_a, dir_a)
+                } else {
+                    (input_b, dir_b)
+                };
+                let mut sig_io = DummySigIo;
+                run_session(
+                    fabric.clone(),
+                    party,
+                    &input,
+                    &mut sig_io,
+                    &pk,
+                    &vk,
+                    &dir,
+                    |_, _| {},
+                )
+                .await
+                .expect("full session must succeed")
             }
         })
         .await;
         let total_ms = t.elapsed().as_secs_f64() * 1e3;
-        let (proof, timings) = r0;
-        verify_settle(&vk, &public, &proof)?;
+        let tim = r0.timings;
+        // Everything in `total` that is not the prove's own phases: the MPC
+        // compare, the fill reveal, the commitment/signature exchange.
+        let session_overhead_ms = (total_ms - tim.build_ms - tim.prove_ms - tim.open_ms).max(0.0);
         mock_runs.push(json!({
             "total_ms": total_ms,
-            "build_ms": timings.build_ms,
-            "prove_ms": timings.prove_ms,
-            "open_ms": timings.open_ms,
+            "session_overhead_ms": session_overhead_ms,
+            "build_ms": tim.build_ms,
+            "prove_ms": tim.prove_ms,
+            "open_ms": tim.open_ms,
         }));
         println!(
-            "  run: total {:.0} ms (build {:.0}, prove {:.0}, open {:.0})",
-            total_ms, timings.build_ms, timings.prove_ms, timings.open_ms
+            "  run: total {:.0} ms (compare+reveal+exchange ~{:.0}, prove build {:.0}/prove {:.0}/open {:.0})",
+            total_ms, session_overhead_ms, tim.build_ms, tim.prove_ms, tim.open_ms
         );
     }
 
-    // ── 2-party collaborative, two OS processes over QUIC ──
+    // ── Full 2-party session, two OS processes over QUIC ──
+    // Spawns the SAME `settle2p_session` binary the app spawns, over real
+    // QUIC, feeding each child the dummy signature on stdin when it asks.
     let mut quic_runs = Vec::new();
     if !args.skip_quic {
-        println!("=== co-zk 2-party, 2 processes over QUIC (localhost) ===");
-        let party_bin = std::env::current_exe()?
+        println!("=== co-zk 2-party FULL session, 2 processes over QUIC (localhost) ===");
+        let session_bin = std::env::current_exe()?
             .parent()
-            .map(|d| d.join("settle2p_party"))
+            .map(|d| d.join("settle2p_session"))
             .filter(|p| p.exists())
             .context(
-                "settle2p_party binary not found — build with `cargo build --release --bins`",
+                "settle2p_session binary not found — build with `cargo build --release --bins`",
             )?;
-        let tmp = std::env::temp_dir().join(format!("bench_settle2p_{}", std::process::id()));
-        fs::create_dir_all(&tmp)?;
-        fs::write(tmp.join("a_side.json"), serde_json::to_string(&a)?)?;
-        fs::write(tmp.join("b_side.json"), serde_json::to_string(&b)?)?;
-        fs::write(tmp.join("public.json"), serde_json::to_string(&public)?)?;
+        let keys_dir = default_cache_dir();
+        fs::write(session_tmp.join("a_input.json"), serde_json::to_string(&input_a)?)?;
+        fs::write(session_tmp.join("b_input.json"), serde_json::to_string(&input_b)?)?;
 
         for run in 0..args.runs {
             // Fresh port pair per run to avoid rebind races.
@@ -147,26 +265,33 @@ async fn main() -> Result<()> {
             let pb = pa + 1;
             let t = Instant::now();
             let mut children: Vec<Child> = Vec::new();
-            for (role, side, listen, peer) in [
+            for (role, input_file, listen, peer) in [
                 // Listener (trader-b) first, dialer (trader-a) second.
-                ("trader-b", "b_side.json", pb, pa),
-                ("trader-a", "a_side.json", pa, pb),
+                ("trader-b", "b_input.json", pb, pa),
+                ("trader-a", "a_input.json", pa, pb),
             ] {
-                let out_dir = tmp.join(format!("out_{role}"));
-                let mut cmd = Command::new(&party_bin);
+                let out_dir = session_tmp.join(format!("out_{role}"));
+                let mut cmd = Command::new(&session_bin);
                 cmd.arg("--role")
                     .arg(role)
                     .arg("--listen")
                     .arg(format!("127.0.0.1:{listen}"))
                     .arg("--peer")
                     .arg(format!("127.0.0.1:{peer}"))
-                    .arg("--side-json")
-                    .arg(tmp.join(side))
-                    .arg("--public-json")
-                    .arg(tmp.join("public.json"))
+                    .arg("--input")
+                    .arg(session_tmp.join(input_file))
                     .arg("--out-dir")
-                    .arg(&out_dir);
-                children.push(cmd.spawn()?);
+                    .arg(&out_dir)
+                    .arg("--keys-dir")
+                    .arg(&keys_dir)
+                    .stdin(Stdio::piped());
+                let mut child = cmd.spawn()?;
+                // Pre-feed the signature: the child buffers it and reads the
+                // one line when it reaches its need_sig request.
+                let mut stdin = child.stdin.take().context("child stdin")?;
+                writeln!(stdin, "{{\"sig\":\"{DUMMY_SIG}\"}}")?;
+                drop(stdin);
+                children.push(child);
             }
             let mut ok = true;
             for c in children.iter_mut() {
@@ -175,19 +300,21 @@ async fn main() -> Result<()> {
             ensure!(ok, "a party process failed");
             let total_ms = t.elapsed().as_secs_f64() * 1e3;
 
+            // Read each party's result + stats; the proofs must be identical.
             let mut per_party = Vec::new();
+            let mut proofs = Vec::new();
             for role in ["trader-a", "trader-b"] {
-                let stats: Value = serde_json::from_str(&fs::read_to_string(
-                    tmp.join(format!("out_{role}")).join("stats.json"),
-                )?)?;
+                let dir = session_tmp.join(format!("out_{role}"));
+                let stats: Value =
+                    serde_json::from_str(&fs::read_to_string(dir.join("stats.json"))?)?;
                 per_party.push(stats);
+                let result: Value =
+                    serde_json::from_str(&fs::read_to_string(dir.join("result.json"))?)?;
+                proofs.push(result["proof_hex"].as_str().unwrap_or_default().to_string());
             }
-            // Both parties must have produced the identical proof.
-            let pa_hex = fs::read_to_string(tmp.join("out_trader-a").join("proof.hex"))?;
-            let pb_hex = fs::read_to_string(tmp.join("out_trader-b").join("proof.hex"))?;
-            ensure!(pa_hex == pb_hex, "parties revealed different proofs");
+            ensure!(proofs[0] == proofs[1], "parties revealed different proofs");
 
-            println!("  run: total {total_ms:.0} ms (incl. process startup + key load)");
+            println!("  run: total {total_ms:.0} ms (incl. process startup + key load + full session)");
             quic_runs.push(json!({ "total_ms": total_ms, "per_party": per_party }));
         }
     }

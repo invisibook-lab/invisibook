@@ -79,231 +79,179 @@ fn App() -> Element {
     let mut show_key_import = use_signal(|| false);
     let key_imported = use_signal(|| init_imported);
     let mut settling_ids: Signal<HashSet<OrderID>> = use_signal(HashSet::new);
+    // Pairs that can never settle via co-zk (cross-price, self-match) — never retried.
+    let mut unsettleable_ids: Signal<HashSet<OrderID>> = use_signal(HashSet::new);
+    // Transient failures: do not re-dispatch the order until this instant.
+    let mut retry_after: Signal<HashMap<OrderID, std::time::Instant>> = use_signal(HashMap::new);
 
-    // ── Settle coroutine: receives order IDs to settle ──
-    let settle_coro = use_coroutine(move |mut rx: UnboundedReceiver<OrderID>| {
-        async move {
-            while let Some(order_id) = rx.next().await {
-                let c = match client.read().clone() {
-                    Some(c) => c,
-                    None => {
-                        message.set(Some(("✗ No chain client".into(), true)));
+    // Prover binary + data-dir subpaths (the app links no crypto; the
+    // collaborative proof runs in the settle2p_session subprocess).
+    let settle2p_bin = cfg.settle2p_bin();
+    let settle2p_keys_dir = cfg.settle2p_keys_dir();
+    let settle2p_sessions_dir = cfg.settle2p_sessions_dir();
+
+    // ── Settle coroutine: receives order IDs to settle (strictly serial) ──
+    let settle_coro = use_coroutine({
+        let settle2p_bin = settle2p_bin.clone();
+        let settle2p_keys_dir = settle2p_keys_dir.clone();
+        let settle2p_sessions_dir = settle2p_sessions_dir.clone();
+        move |mut rx: UnboundedReceiver<OrderID>| {
+            let settle2p_bin = settle2p_bin.clone();
+            let settle2p_keys_dir = settle2p_keys_dir.clone();
+            let settle2p_sessions_dir = settle2p_sessions_dir.clone();
+            async move {
+                while let Some(order_id) = rx.next().await {
+                    // Receive-time guards: skip permanently-unsettleable and
+                    // not-yet-due retries (a duplicate may have queued before
+                    // the flag was set).
+                    if unsettleable_ids.read().contains(&order_id) {
                         continue;
                     }
-                };
-                // Find my order and counter order from the order list.
-                let (my_order, counter_order) = {
-                    let list = orders.read();
-                    let my = list.iter().find(|o| o.id == order_id).cloned();
-                    let counter = my.as_ref().and_then(|m| {
-                        m.match_order
-                            .as_ref()
-                            .and_then(|mid| list.iter().find(|o| &o.id == mid).cloned())
-                    });
-                    match (my, counter) {
-                        (Some(m), Some(co)) => (m, co),
-                        _ => {
-                            message.set(Some(("✗ Order or counterparty not found".into(), true)));
-                            settling_ids.write().remove(&order_id);
+                    if let Some(t) = retry_after.read().get(&order_id) {
+                        if std::time::Instant::now() < *t {
                             continue;
                         }
                     }
-                };
 
-                // Mark as settling in the UI.
-                settling_ids.write().insert(order_id.clone());
-
-                // Read cash records from the in-memory signal (always up-to-date).
-                let records_snapshot: Vec<_> = cash_store.read().records().to_vec();
-
-                let mut msg_signal = message;
-                let settle_order_id = order_id.clone();
-                let result = settle::run_settle(
-                    &c,
-                    &my_order,
-                    &counter_order,
-                    &records_snapshot,
-                    |status| {
-                        let short = orderbook::short_id(&settle_order_id);
-                        msg_signal.set(Some((format!("[{short}] {status}"), false)));
-                    },
-                )
-                .await;
-
-                match result {
-                    Ok(outcome) => {
-                        // Update local CashStore: mark locked cash as spent, add received cash.
-                        {
-                            let mut store = cash_store.write();
-                            let spent = settle::spent_cash_ids(&my_order);
-                            for rec in store.records_mut().iter_mut() {
-                                if spent.contains(&rec.cash_id) {
-                                    rec.status = CASH_SPENT;
-                                }
+                    let c = match client.read().clone() {
+                        Some(c) => c,
+                        None => {
+                            message.set(Some(("✗ No chain client".into(), true)));
+                            continue;
+                        }
+                    };
+                    // Find my order and counter order from the order list.
+                    let (my_order, counter_order) = {
+                        let list = orders.read();
+                        let my = list.iter().find(|o| o.id == order_id).cloned();
+                        let counter = my.as_ref().and_then(|m| {
+                            m.match_order
+                                .as_ref()
+                                .and_then(|mid| list.iter().find(|o| &o.id == mid).cloned())
+                        });
+                        match (my, counter) {
+                            (Some(m), Some(co)) => (m, co),
+                            _ => {
+                                message
+                                    .set(Some(("✗ Order or counterparty not found".into(), true)));
+                                continue;
                             }
-                            store.records_mut().push(CashRecord {
-                                cash_id: outcome.recv_cash_id,
-                                token: outcome.recv_token.clone(),
-                                amount: outcome.recv_amount,
-                                random: outcome.recv_random_hex,
-                                status: CASH_ACTIVE,
-                                order_amount: None,
-                                order_random: None,
-                            });
-                            // Persist change cash for the larger party.
-                            if let (Some(ref cid), Some(ref ctk), Some(camt), Some(ref crnd)) = (
-                                &outcome.change_cash_id,
-                                &outcome.change_token,
-                                outcome.change_amount,
-                                &outcome.change_random_hex,
-                            ) {
-                                if camt > 0 {
+                        }
+                    };
+
+                    let deps = match &settle2p_bin {
+                        Some(bin) => settle::SettleDeps {
+                            bin: bin.clone(),
+                            keys_dir: settle2p_keys_dir.clone(),
+                            sessions_dir: settle2p_sessions_dir.clone(),
+                        },
+                        None => {
+                            message.set(Some((
+                                "✗ settle2p_session prover not found (set INVISIBOOK_SETTLE2P_BIN)"
+                                    .into(),
+                                true,
+                            )));
+                            continue;
+                        }
+                    };
+
+                    // Mark as settling in the UI (cleared LAST, after persist).
+                    settling_ids.write().insert(order_id.clone());
+                    let records_snapshot: Vec<_> = cash_store.read().records().to_vec();
+
+                    let mut msg_signal = message;
+                    let settle_order_id = order_id.clone();
+                    let result = settle::run_settle(
+                        &c,
+                        &my_order,
+                        &counter_order,
+                        &records_snapshot,
+                        &deps,
+                        |status| {
+                            let short = orderbook::short_id(&settle_order_id);
+                            msg_signal.set(Some((format!("[{short}] {status}"), false)));
+                        },
+                    )
+                    .await;
+
+                    let short = orderbook::short_id(&order_id).to_string();
+                    match result {
+                        Ok(outcome) => {
+                            // Persist AFTER on-chain confirmation: spend inputs,
+                            // add recv, and (survivor) the relisted locked cash.
+                            {
+                                let mut store = cash_store.write();
+                                let spent = settle::spent_cash_ids(&my_order);
+                                for rec in store.records_mut().iter_mut() {
+                                    if spent.contains(&rec.cash_id) {
+                                        rec.status = CASH_SPENT;
+                                    }
+                                }
+                                let recv = &outcome.recv;
+                                if !store.records().iter().any(|r| r.cash_id == recv.cash_id) {
                                     store.records_mut().push(CashRecord {
-                                        cash_id: cid.clone(),
-                                        token: ctk.clone(),
-                                        amount: camt,
-                                        random: crnd.clone(),
+                                        cash_id: recv.cash_id.clone(),
+                                        token: recv.token.clone(),
+                                        amount: recv.amount,
+                                        random: recv.random_hex.clone(),
                                         status: CASH_ACTIVE,
                                         order_amount: None,
                                         order_random: None,
                                     });
                                 }
-                            }
-                            let _ = store.flush();
-                        }
-
-                        let short = orderbook::short_id(&order_id);
-                        message.set(Some((
-                            format!(
-                                "✓ Settled {short}: received {} {}",
-                                outcome.recv_amount, outcome.recv_token
-                            ),
-                            false,
-                        )));
-
-                        // Auto-repost remainder order if larger party has change.
-                        if let (
-                            Some(ref change_cash_id),
-                            Some(ref _change_token),
-                            Some(change_amount),
-                            Some(ref change_random_hex),
-                            Some(ref _change_commit),
-                        ) = (
-                            &outcome.change_cash_id,
-                            &outcome.change_token,
-                            outcome.change_amount,
-                            &outcome.change_random_hex,
-                            &outcome.change_commitment_hex,
-                        ) {
-                            if change_amount > 0 {
-                                // Compute user-facing amount (in token1, e.g. ETH).
-                                // change_amount is in the lock token:
-                                //   Buy locks token2 (USDT) → display = change / price (ETH)
-                                //   Sell locks token1 (ETH)  → display = change (ETH)
-                                let price = my_order.price.unwrap_or(1).max(1);
-                                let display_amount = match my_order.trade_type {
-                                    TradeType::Buy => change_amount / price,
-                                    TradeType::Sell => change_amount,
-                                };
-
-                                // Generate fresh commitment for the repost order.
-                                // order.amount always commits to token1 quantity.
-                                let (repost_cipher, _, repost_random_hex) =
-                                    orderbook::encrypt_amount_with_info(
-                                        &display_amount.to_string(),
-                                    );
-
-                                // Update CashStore: mark change cash as locked for repost.
-                                // For sell orders, the order commitment matches the cash
-                                // commitment, so we update the random directly.
-                                // For buy orders, cash random stays (for cash tracking),
-                                // and we store a separate order_random/order_amount.
-                                {
-                                    let mut store = cash_store.write();
-                                    for rec in store.records_mut().iter_mut() {
-                                        if &rec.cash_id == change_cash_id {
-                                            rec.status = CASH_LOCKED;
-                                            match my_order.trade_type {
-                                                TradeType::Buy => {
-                                                    // Cash random unchanged; store order commitment info.
-                                                    rec.order_amount = Some(display_amount);
-                                                    rec.order_random =
-                                                        Some(repost_random_hex.clone());
-                                                }
-                                                TradeType::Sell => {
-                                                    // Sell: order amount == cash amount,
-                                                    // replace random for MPC.
-                                                    rec.random = repost_random_hex.clone();
-                                                }
-                                            }
-                                        }
-                                    }
-                                    let _ = store.flush();
-                                }
-
-                                let repost_order_id =
-                                    orderbook::compute_order_id(&[change_cash_id.clone()]);
-                                let pubkey = c.pubkey_hex().to_string();
-                                let repost_order = Order {
-                                    id: repost_order_id.clone(),
-                                    trade_type: my_order.trade_type.clone(),
-                                    subject: my_order.subject.clone(),
-                                    price: my_order.price,
-                                    amount: repost_cipher,
-                                    pubkey: pubkey.clone(),
-                                    input_cash_ids: vec![change_cash_id.clone()],
-                                    handling_fee: my_order.handling_fee.clone(),
-                                    block_height: 0,
-                                    status: OrderStatus::Pending,
-                                    match_order: None,
-                                    is_smaller: false,
-                                };
-
-                                match c.send_order(&repost_order, None, None, None).await {
-                                    Ok(()) => {
-                                        own_order_ids.write().insert(
-                                            repost_order_id.clone(),
-                                            display_amount.to_string(),
-                                        );
-                                        let short_r = orderbook::short_id(&repost_order_id);
-                                        message.set(Some((
-                                            format!(
-                                                "✓ Re-posted remainder {short_r}: {} {}",
-                                                display_amount, my_order.subject.token1
-                                            ),
-                                            false,
-                                        )));
-                                    }
-                                    Err(e) => {
-                                        // Rollback: restore change cash to active.
-                                        let mut store = cash_store.write();
-                                        for rec in store.records_mut().iter_mut() {
-                                            if &rec.cash_id == change_cash_id {
-                                                rec.status = CASH_ACTIVE;
-                                                rec.order_amount = None;
-                                                rec.order_random = None;
-                                                // Sell orders had their random replaced; restore it.
-                                                if my_order.trade_type == TradeType::Sell {
-                                                    rec.random = change_random_hex.clone();
-                                                }
-                                            }
-                                        }
-                                        let _ = store.flush();
-                                        let short_r = orderbook::short_id(&order_id);
-                                        message
-                                            .set(Some((format!("✗ Repost {short_r}: {e}"), true)));
+                                if let Some(rem) = &outcome.remainder {
+                                    let l = &rem.locked;
+                                    if !store.records().iter().any(|r| r.cash_id == l.cash_id) {
+                                        store.records_mut().push(CashRecord {
+                                            cash_id: l.cash_id.clone(),
+                                            token: l.token.clone(),
+                                            amount: l.amount,
+                                            random: l.random_hex.clone(),
+                                            status: CASH_LOCKED,
+                                            order_amount: Some(rem.order_amount),
+                                            order_random: Some(rem.order_random_hex.clone()),
+                                        });
                                     }
                                 }
+                                let _ = store.flush();
                             }
+                            // The chain relisted the survivor in place (same id,
+                            // block height); the poller drives its next round.
+                            let _ = std::fs::remove_dir_all(&outcome.session_dir);
+                            retry_after.write().remove(&order_id);
+                            message.set(Some((
+                                format!(
+                                    "✓ Settled {short}: received {} {}",
+                                    outcome.recv.amount, outcome.recv.token
+                                ),
+                                false,
+                            )));
+                        }
+                        Err(settle::SettleError::CrossPrice(_)) => {
+                            unsettleable_ids.write().insert(order_id.clone());
+                            message.set(Some((
+                                format!("⚠ {short}: cross-price match not yet supported"),
+                                true,
+                            )));
+                        }
+                        Err(settle::SettleError::SelfMatch) => {
+                            unsettleable_ids.write().insert(order_id.clone());
+                            message.set(Some((
+                                format!("⚠ {short}: self-matched, cannot settle"),
+                                true,
+                            )));
+                        }
+                        Err(e) => {
+                            retry_after.write().insert(
+                                order_id.clone(),
+                                std::time::Instant::now() + std::time::Duration::from_secs(30),
+                            );
+                            message.set(Some((format!("✗ Settle {short}: {e}"), true)));
                         }
                     }
-                    Err(e) => {
-                        let short = orderbook::short_id(&order_id);
-                        message.set(Some((format!("✗ Settle {short}: {e}"), true)));
-                    }
+
+                    settling_ids.write().remove(&order_id);
                 }
-
-                settling_ids.write().remove(&order_id);
             }
         }
     });
@@ -327,6 +275,11 @@ fn App() -> Element {
                                 && order.match_order.is_some()
                                 && own_order_ids.read().contains_key(&order.id)
                                 && !settling_ids.read().contains(&order.id)
+                                && !unsettleable_ids.read().contains(&order.id)
+                                && retry_after
+                                    .read()
+                                    .get(&order.id)
+                                    .is_none_or(|t| std::time::Instant::now() >= *t)
                             {
                                 settle_coro.send(order.id.clone());
                             }
@@ -381,6 +334,11 @@ fn App() -> Element {
                                     && has_match
                                     && own_order_ids.read().contains_key(&order_id)
                                     && !settling_ids.read().contains(&order_id)
+                                    && !unsettleable_ids.read().contains(&order_id)
+                                    && retry_after
+                                        .read()
+                                        .get(&order_id)
+                                        .is_none_or(|t| std::time::Instant::now() >= *t)
                                 {
                                     settle_coro.send(order_id);
                                 }
@@ -398,6 +356,60 @@ fn App() -> Element {
                 }
             }
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    });
+
+    // ── Startup: warm the proving keys, then recover any unpersisted sessions ──
+    use_coroutine({
+        let bin = settle2p_bin.clone();
+        let keys_dir = settle2p_keys_dir.clone();
+        let sessions_dir = settle2p_sessions_dir.clone();
+        move |_: UnboundedReceiver<()>| {
+            let bin = bin.clone();
+            let keys_dir = keys_dir.clone();
+            let sessions_dir = sessions_dir.clone();
+            async move {
+                // Generate the proving-key cache off the settlement path
+                // (~1 min cold) so the first real settle is not blocked on it.
+                if let Some(bin) = bin.clone() {
+                    let _ = tokio::process::Command::new(&bin)
+                        .arg("--warm-keys")
+                        .arg("--keys-dir")
+                        .arg(&keys_dir)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .await;
+                }
+                // Recover sessions that landed on chain but crashed before the
+                // wallet persisted their UTXOs.
+                let c = loop {
+                    if let Some(c) = client.read().clone() {
+                        break c;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                };
+                let recovered = settle::recover_all_sessions(&c, &sessions_dir).await;
+                for rec in recovered {
+                    {
+                        let mut store = cash_store.write();
+                        for id in &rec.spent_ids {
+                            for r in store.records_mut().iter_mut() {
+                                if &r.cash_id == id {
+                                    r.status = CASH_SPENT;
+                                }
+                            }
+                        }
+                        for add in &rec.add {
+                            if !store.records().iter().any(|r| r.cash_id == add.cash_id) {
+                                store.records_mut().push(add.clone());
+                            }
+                        }
+                        let _ = store.flush();
+                    }
+                    let _ = std::fs::remove_dir_all(&rec.dir);
+                }
+            }
         }
     });
 

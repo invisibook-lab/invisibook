@@ -20,6 +20,11 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_DATA="$REPO_ROOT/chain/cfg/tests"
 DATA_ROOT="$REPO_ROOT/.dev"
 
+# Point both app instances at the collaborative-settlement prover
+# subprocess (build it with `make build-settle2p`). Respects an existing
+# override; the launch subshells inherit this env var.
+export INVISIBOOK_SETTLE2P_BIN="${INVISIBOOK_SETTLE2P_BIN:-$REPO_ROOT/cozk2p/target/release/settle2p_session}"
+
 ALICE_DIR="$DATA_ROOT/alice"
 BOB_DIR="$DATA_ROOT/bob"
 

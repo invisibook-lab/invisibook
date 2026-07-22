@@ -22,7 +22,6 @@ jobs:
       lib: ${{ steps.filter.outputs.lib }}
       zk: ${{ steps.filter.outputs.zk }}
       mpc: ${{ steps.filter.outputs.mpc }}
-      cozk: ${{ steps.filter.outputs.cozk }}
       cozk2p: ${{ steps.filter.outputs.cozk2p }}
       app: ${{ steps.filter.outputs.app }}
     steps:
@@ -39,8 +38,6 @@ jobs:
               - 'lib/zk/**'
             mpc:
               - 'lib/mpc/**'
-            cozk:
-              - 'lib/cozk/**'
             cozk2p:
               - 'cozk2p/**'
             app:
@@ -79,8 +76,7 @@ jobs:
     name: Lib (Rust)
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.lib == 'true' || needs.changes.outputs.mpc == 'true' || needs.changes.outputs.zk == 'true' || needs.changes.outputs.cozk == 'true'
-
+    if: needs.changes.outputs.lib == 'true' || needs.changes.outputs.mpc == 'true' || needs.changes.outputs.zk == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -100,28 +96,25 @@ jobs:
         working-directory: lib
         run: cargo build
 
-      - name: Test lib (exclude zk + cozk)
+      - name: Test lib (exclude zk)
         working-directory: lib
-        run: cargo test --workspace --exclude zk --exclude cozk
+        run: cargo test --workspace --exclude zk
 
-      # ZK/co-zk tests only when lib/zk/** or lib/cozk/** changed — they need
-      # the circom/snarkjs/rapidsnark toolchain installed below.
+      # ZK tests only when lib/zk/** changed — they need the
+      # circom/snarkjs/rapidsnark toolchain installed below.
       - name: Cache circuit build (ptau + zkey)
-        if: needs.changes.outputs.zk == 'true' || needs.changes.outputs.cozk == 'true'
-        uses: actions/cache@v4
+        if: needs.changes.outputs.zk == 'true'        uses: actions/cache@v4
         with:
           path: lib/target/circuit-build
           key: ${{ runner.os }}-circuit-build-${{ hashFiles('lib/zk/templates/**/*.circom') }}
 
       - name: Set up Node.js
-        if: needs.changes.outputs.zk == 'true' || needs.changes.outputs.cozk == 'true'
-        uses: actions/setup-node@v4
+        if: needs.changes.outputs.zk == 'true'        uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Install circom
-        if: needs.changes.outputs.zk == 'true' || needs.changes.outputs.cozk == 'true'
-        run: |
+        if: needs.changes.outputs.zk == 'true'        run: |
           rustup toolchain install stable
           git clone https://github.com/iden3/circom.git /tmp/circom
           cd /tmp/circom
@@ -129,12 +122,10 @@ jobs:
           sudo cp target/release/circom /usr/local/bin/
 
       - name: Install snarkjs
-        if: needs.changes.outputs.zk == 'true' || needs.changes.outputs.cozk == 'true'
-        run: npm install -g snarkjs
+        if: needs.changes.outputs.zk == 'true'        run: npm install -g snarkjs
 
       - name: Install rapidsnark
-        if: needs.changes.outputs.zk == 'true' || needs.changes.outputs.cozk == 'true'
-        run: |
+        if: needs.changes.outputs.zk == 'true'        run: |
           sudo apt-get install -y nasm libsodium-dev
           git clone https://github.com/iden3/rapidsnark.git /tmp/rapidsnark
           cd /tmp/rapidsnark
@@ -147,11 +138,6 @@ jobs:
         if: needs.changes.outputs.zk == 'true'
         working-directory: lib
         run: cargo test -p zk
-
-      - name: Test lib/cozk (collaborative proving)
-        if: needs.changes.outputs.zk == 'true' || needs.changes.outputs.cozk == 'true'
-        working-directory: lib
-        run: cargo test -p cozk
 
   # ────────────────────── Rust: app (desktop) ──────────────────────
   app-desktop:

@@ -1,5 +1,16 @@
 # MPC — Multi-Party Computation Settlement
 
+> **DEPRECATED — no in-repo consumers.** This crate powered the legacy
+> `CompareOrders` + `SettleOrders` settlement path, which the desktop app no
+> longer uses: the app now settles via the 2-party collaborative-ZK path
+> (`SettleOrdersCoZk2p`), whose comparison is ported onto the pinned ark-mpc
+> fork inside the [`cozk2p`](../../cozk2p) workspace (`src/mpc_compare.rs`).
+> This crate is retained only as documentation of the on-chain
+> `CompareOrders` protocol and should be removed together with the chain's
+> `CompareOrders` / `SettleOrders` writings. NOTE: `compare.rs`'s
+> borrow-propagation loop has a latent off-chain bug (it double-counts the
+> top bit); the ported `cozk2p` version fixes it.
+
 Pure Rust 2-party computation library for Invisibook order settlement, built on [ark-mpc](https://github.com/renegade-fi/ark-mpc) (SPDZ-style protocol over BN254).
 
 ## Architecture
