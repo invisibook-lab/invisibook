@@ -271,6 +271,16 @@ func (ot *OrderBook) loadCoZkMatchedPair(req *CoZkSettleRequest) (*Order, *Order
 		return nil, nil, 0, false, fmt.Errorf("order_a %s must be the maker of the pair", req.OrderAID)
 	}
 
+	// Defense in depth against silent truncation in executionPrice: SendOrder
+	// rejects out-of-range prices at ingress, but rows written before that
+	// check existed (or restored from a backup) would still reach the circuit
+	// as a different number than the book matched on.
+	for _, ord := range []*Order{orderA, orderB} {
+		if err := validateOrderPrice(ord.Price); err != nil {
+			return nil, nil, 0, false, fmt.Errorf("order %s: %w", ord.ID, err)
+		}
+	}
+
 	// Equal-price requirement. The buyer's locked collateral was fixed at
 	// order creation to amount*buyer_price, but the joint circuits constrain
 	// it to amount*exec_price with strict equality and have no buyer-change
