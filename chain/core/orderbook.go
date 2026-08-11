@@ -88,7 +88,10 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 		settleCoZkVK:   settleCoZkVK,
 		settleCoZk2pVK: settleCoZk2pVK,
 	}
-	ot.SetWritings(ot.SendOrder, ot.CompareOrders, ot.SettleOrders, ot.SettleOrdersCoZk, ot.SettleOrdersCoZk2p, ot.RegisterSettleAddr)
+	// `SettleOrders` (the legacy asymmetric larger/smaller path) is
+	// deliberately NOT registered — see the DO NOT RE-REGISTER note on the
+	// handler. Settlement goes through the co-zk paths.
+	ot.SetWritings(ot.SendOrder, ot.CompareOrders, ot.SettleOrdersCoZk, ot.SettleOrdersCoZk2p, ot.RegisterSettleAddr)
 	ot.SetReadings(ot.QueryOrders, ot.QuerySettleAddr)
 	return ot
 }
@@ -533,6 +536,29 @@ type SettleOrderRequest struct {
 // confirms without proof (Leg is nil). When both arrive, the chain verifies
 // only the larger party's proof, spends locked Cash, mints outputs, and marks
 // both orders Done.
+//
+// DO NOT RE-REGISTER THIS WRITING. It is unreachable on purpose, because it
+// mints from two values that no proof constrains:
+//
+//   - `Leg.RecvCommitment` is declared `counterparty_recv_commitment` in
+//     settle_larger.circom / settle_smaller.circom and appears in ZERO
+//     constraints there — read the templates, it is named in the signal
+//     declaration and the `public [...]` list and nowhere else. The prover
+//     therefore chooses it freely, and this handler mints a Cash from it. A
+//     larger party can commit to any amount they like and mint it from
+//     nothing. (The in-file comment claiming the proof is "bound to the
+//     specific counterparty cash" does not hold for a signal no constraint
+//     touches.)
+//   - `Leg.RecvPubkey` is never compared against the smaller order's pubkey,
+//     so the same party can also redirect the counterparty's payout to
+//     themselves.
+//
+// Unlike the co-zk paths, this handler has no signature check either, so
+// neither problem is caught elsewhere. The co-zk relations get this right by
+// computing every minted commitment inside the circuit and enforcing equality
+// with the public output; nothing here can be fixed by a chain-side check
+// alone, so the path stays disabled until the circuits are rebuilt or it is
+// deleted outright.
 func (ot *OrderBook) SettleOrders(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
 

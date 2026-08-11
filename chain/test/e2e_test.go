@@ -408,6 +408,14 @@ func TestFullOrderLifecycle(t *testing.T) {
 		t.Fatalf("expected buy order IsSmaller=false (cmp=1 means buy is larger)")
 	}
 
+	// Everything above — deposit, split, SendOrder, matching, CompareOrders —
+	// is still live and has been asserted. The remaining steps drive the
+	// legacy `SettleOrders` writing, which is no longer registered because it
+	// mints from an unconstrained commitment (see the DO NOT RE-REGISTER note
+	// on the handler). Settlement coverage lives in cozk_e2e_test.go and
+	// cozk2p_real_proof_test.go.
+	t.Skip("legacy SettleOrders path is unregistered; see cozk2p_real_proof_test.go for settlement")
+
 	// ═══════════════════ Step 5: SettleOrders (ZK phase) ═══════════════════
 	t.Log("=== Step 5a: Alice submits SettleOrders (sell=smaller, no leg) ===")
 
