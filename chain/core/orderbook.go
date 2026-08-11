@@ -128,6 +128,32 @@ type SendOrderRequest struct {
 	LockedCommitment CipherText `json:"locked_commitment,omitempty"`
 }
 
+// validateOrderPrice rejects prices the settlement circuits cannot represent.
+// A nil price is allowed: such an order simply never matches (see matchOrder).
+//
+// The settlement relation takes `price` as a public input and multiplies it by
+// 64-bit amounts. That arithmetic is only integer-exact while the products stay
+// below the BN254 modulus, which the circuits get from price < 2^64 — they
+// deliberately do not re-range-check a public input, so the bound has to hold
+// here. Every path from an Order to the circuit funnels through
+// big.Int.Uint64(), which truncates SILENTLY, so without this check the book
+// would match on one price and settle on another.
+//
+// Zero and negative prices are rejected as well: neither is a meaningful order,
+// and at price 0 a buy side backs its order with no collateral at all.
+func validateOrderPrice(price *big.Int) error {
+	if price == nil {
+		return nil
+	}
+	if price.Sign() <= 0 {
+		return fmt.Errorf("price must be positive, got %s", price)
+	}
+	if !price.IsUint64() {
+		return fmt.Errorf("price %s does not fit in 64 bits", price)
+	}
+	return nil
+}
+
 // SendOrder creates a new order, locks the input Cash, stores it via SQL, and attempts to match it.
 func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
@@ -139,6 +165,10 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 
 	if err := Validator.Struct(req); err != nil {
 		return err
+	}
+
+	if err := validateOrderPrice(req.Price); err != nil {
+		return fmt.Errorf("order %s: %w", req.ID, err)
 	}
 
 	// Validate that the client-submitted ID is the correct hash of the input cash IDs.
