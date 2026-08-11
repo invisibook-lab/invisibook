@@ -2,6 +2,14 @@
 //! `settle_cozk.circom` circuit (see `docs/cozk_design.md` §3), expressed as
 //! a jellyfish PLONK circuit.
 //!
+//! Range checks differ in FORM from the circom circuit, not in strength.
+//! circom range-checks each minted amount directly (`Num2Bits(64)` on
+//! `fill_t2`, `a_new_locked`, `b_new_locked`), which needs a witness
+//! generator that can bit-decompose any value. The MPC circuit has no such
+//! gadget for a *shared* wire, so this relation instead caps each side's
+//! locked-collateral sum at 64 bits — a value each party knows in plaintext
+//! — and derives the same bound on every minted amount from it.
+//!
 //! Public signals — 15, in the SAME canonical order the chain rebuilds for
 //! the Groth16 path (outputs first, then inputs):
 //!
@@ -246,6 +254,15 @@ pub fn compute_public(
         sum_locked(b) == needed(b.order_amount, !a_is_seller),
         "side B collateral does not back its order at the execution price"
     );
+    // Mirror the circuit's 64-bit cap on each side's collateral sum, which is
+    // what bounds every minted amount below. Two 64-bit slots can sum past
+    // u64, so this is a real rejection, not a tautology.
+    for (name, v) in [("side A", sum_locked(a)), ("side B", sum_locked(b))] {
+        ensure!(
+            v <= u64::MAX as u128,
+            "{name} locked collateral {v} exceeds 64 bits"
+        );
+    }
 
     let (av, bv) = (a.order_amount, b.order_amount);
     let cmp: i8 = if av < bv {
@@ -337,13 +354,19 @@ pub struct SideWires {
     pub locked_rand: [Variable; 2],
     pub r_locked_new: Variable,
     pub r_recv: Variable,
+    /// Little-endian bits of the SUM of this side's locked slots. The
+    /// per-slot bits bound each cash to 64 bits, but their sum can reach
+    /// 2^65; binding the sum to its own decomposition caps it at 64 bits,
+    /// which transitively caps every amount this circuit mints (see
+    /// `settle_relation_impl` step 4).
+    pub locked_sum_bits: Vec<Variable>,
 }
 
 /// The plaintext values of one side's private wires, in allocation order.
 /// Order MUST match `SideWires` allocation in the circuit builders and be
 /// identical between the single-prover and MPC flows.
 pub fn side_private_values(side: &SidePrivate) -> Vec<Fr> {
-    let mut vals = Vec::with_capacity(AMOUNT_BITS * 3 + 6);
+    let mut vals = Vec::with_capacity(SIDE_PRIVATE_LEN);
     for i in 0..AMOUNT_BITS {
         vals.push(Fr::from((side.order_amount >> i) & 1));
     }
@@ -360,11 +383,18 @@ pub fn side_private_values(side: &SidePrivate) -> Vec<Fr> {
     }
     vals.push(rand_fr(&side.r_locked_new));
     vals.push(rand_fr(&side.r_recv));
+    // Bits of the locked-slot sum. Emitting only the low 64 bits when the
+    // true sum exceeds u64 is deliberate: the circuit's equality against the
+    // summed slot wires then fails, which is exactly the rejection we want.
+    let locked_total: u128 = side.locked.iter().map(|(v, _)| *v as u128).sum();
+    for i in 0..AMOUNT_BITS {
+        vals.push(Fr::from(((locked_total >> i) & 1) as u64));
+    }
     vals
 }
 
 /// Number of private wires per side.
-pub const SIDE_PRIVATE_LEN: usize = AMOUNT_BITS * 3 + 6;
+pub const SIDE_PRIVATE_LEN: usize = AMOUNT_BITS * 4 + 6;
 
 /// Rebuild `SideWires` from `SIDE_PRIVATE_LEN` freshly created variables,
 /// in the same order `side_private_values` emits them.
@@ -379,12 +409,14 @@ pub fn side_wires_from_vars(vars: &[Variable]) -> SideWires {
     let locked_rand = [it.next().unwrap(), it.next().unwrap()];
     let r_locked_new = it.next().unwrap();
     let r_recv = it.next().unwrap();
+    let locked_sum_bits: Vec<Variable> = (&mut it).take(AMOUNT_BITS).collect();
     assert!(it.next().is_none());
     SideWires {
         amount_bits,
         r_order,
         r_order_new,
         locked_bits: [locked0, locked1],
+        locked_sum_bits,
         locked_rand,
         r_locked_new,
         r_recv,
@@ -447,9 +479,11 @@ fn settle_relation_impl<Cs: Circuit<Fr>>(
         enforce_bits(cs, &side.amount_bits)?;
         enforce_bits(cs, &side.locked_bits[0])?;
         enforce_bits(cs, &side.locked_bits[1])?;
+        enforce_bits(cs, &side.locked_sum_bits)?;
         sat.bool_vars.extend_from_slice(&side.amount_bits);
         sat.bool_vars.extend_from_slice(&side.locked_bits[0]);
         sat.bool_vars.extend_from_slice(&side.locked_bits[1]);
+        sat.bool_vars.extend_from_slice(&side.locked_sum_bits);
     }
     // a_is_seller is chain-provided but constrain it anyway; its complement
     // selects B's role.
@@ -492,15 +526,35 @@ fn settle_relation_impl<Cs: Circuit<Fr>>(
             eq(cs, h, pub_hashes[slot])?;
             sum = cs.add(sum, amt)?;
         }
+        // Cap the collateral SUM at 64 bits. Each slot is already 64-bit, but
+        // their sum can reach 2^65, and step 5 equates this sum with the
+        // side's `amount * price`. Capping it here is what transitively caps
+        // every amount step 9/10 mints, since `fill <= amount` and
+        // `remainder <= amount` give `fill * price <= amount * price < 2^64`
+        // and likewise for the remainder. Without it a settlement could mint
+        // a cash above 2^64 that the 64-bit wallet circuits can never open —
+        // funds frozen, not stolen (field wrap is impossible here: all
+        // products stay below 2^128 << r).
+        //
+        // The MPC circuit cannot bit-decompose a shared wire, so the bits
+        // arrive as a private input from the side that knows the sum in
+        // plaintext; `enforce_bits` above makes a lying decomposition
+        // unsatisfiable.
+        let sum_from_bits = le_bits_to_field(cs, &side.locked_sum_bits)?;
+        eq(cs, sum_from_bits, sum)?;
         locked_sum[idx] = sum;
     }
 
     // 5. Collateral backing at the execution price (strict equality; the
     //    equal-price limitation documented for the 3-party path applies).
-    //    SOUNDNESS ASSUMPTION: `price` is a public input the CHAIN provides
-    //    and guarantees < 2^64 (it is a u64 on-chain). Under that bound all
-    //    products here are < 2^128 < r, so field arithmetic is
-    //    integer-exact. The circuit does not re-range-check price.
+    //    SOUNDNESS ASSUMPTION: `price` is a PUBLIC input < 2^64. Under that
+    //    bound all products here are < 2^128 < r, so field arithmetic is
+    //    integer-exact. The circuit deliberately does not re-range-check it:
+    //    a prover cannot choose a public input, and every path that builds
+    //    the statement types price as u64 (`SettlePublic::price`, and Go's
+    //    `settle2pPublic.Price`), so the bound holds by construction on the
+    //    verification side. The one place it could be violated is ingress —
+    //    `Order.Price` is a big.Int — which `SendOrder` rejects explicitly.
     let a_times_price = cs.mul(a_amt, public.price)?;
     let a_needed = cs.mux(a_seller, a_amt, a_times_price)?;
     eq(cs, locked_sum[0], a_needed)?;
@@ -576,6 +630,71 @@ mod tests {
         assert_eq!(
             crate::poseidon::fr_to_hex(&p.locked_a[1]),
             "2098f5fb9e239eab3ceac3f27b81e481dc3124d55ffed523a839ee8446b64864"
+        );
+    }
+
+    /// A collateral sum above u64 would mint a receive cash the 64-bit wallet
+    /// circuits can never open. Both the native mirror and the circuit itself
+    /// must reject it — the circuit check is the load-bearing one, since a
+    /// malicious prover simply would not call `compute_public`.
+    #[test]
+    fn oversized_collateral_sum_is_rejected() {
+        use mpc_relation::traits::Circuit;
+
+        // A sells 2 token1 at price 2^63; B buys 2, locking 2 * 2^63 = 2^64
+        // of token2 across two individually-64-bit slots. The fill would mint
+        // A a receive cash of 2^64.
+        let price = 1u64 << 63;
+        let a = SidePrivate {
+            order_amount: 2,
+            r_order: [0xA1; 32],
+            r_order_new: [0xA2; 32],
+            locked: vec![(2, [0xA3; 32])],
+            r_locked_new: [0xA4; 32],
+            r_recv: [0xA5; 32],
+        };
+        let b = SidePrivate {
+            order_amount: 2,
+            r_order: [0xB1; 32],
+            r_order_new: [0xB2; 32],
+            locked: vec![(1 << 63, [0xB3; 32]), (1 << 63, [0xB4; 32])],
+            r_locked_new: [0xB5; 32],
+            r_recv: [0xB6; 32],
+        };
+        assert!(compute_public(&a, &b, price, true).is_err());
+
+        // Hand-build the statement the attacker would submit, with the
+        // oversized receive commitment, and confirm the relation is
+        // unsatisfiable on it.
+        let zero = Fr::zero();
+        let recv_a_amt = 2u128 * price as u128; // 2^64
+        let public = SettlePublic {
+            cmp: 0,
+            new_order_a: poseidon::hash2(zero, rand_fr(&a.r_order_new)),
+            new_order_b: poseidon::hash2(zero, rand_fr(&b.r_order_new)),
+            new_locked_a: poseidon::hash2(zero, rand_fr(&a.r_locked_new)),
+            new_locked_b: poseidon::hash2(zero, rand_fr(&b.r_locked_new)),
+            recv_a: poseidon::hash2(Fr::from(recv_a_amt), rand_fr(&a.r_recv)),
+            recv_b: poseidon::commit(2, &b.r_recv),
+            order_a: poseidon::commit(a.order_amount, &a.r_order),
+            order_b: poseidon::commit(b.order_amount, &b.r_order),
+            price,
+            a_is_seller: true,
+            locked_a: [
+                poseidon::commit(2, &a.locked[0].1),
+                poseidon::commit(0, &[0u8; 32]),
+            ],
+            locked_b: [
+                poseidon::commit(1 << 63, &b.locked[0].1),
+                poseidon::commit(1 << 63, &b.locked[1].1),
+            ],
+        };
+        let circuit = crate::prove::build_single_prover_circuit(&a, &b, &public).unwrap();
+        assert!(
+            circuit
+                .check_circuit_satisfiability(&public.to_vec())
+                .is_err(),
+            "collateral summing past u64 must make the relation unsatisfiable"
         );
     }
 

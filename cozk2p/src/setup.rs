@@ -75,7 +75,11 @@ pub fn sample_trade() -> (SidePrivate, SidePrivate, u64, bool) {
 /// Bump when the relation changes in a way that keeps the same gate count
 /// (the cache filename already includes gates/inputs, which move on
 /// virtually any edit; this covers the rest).
-const RELATION_VERSION: u32 = 1;
+///
+/// v2: added the 64-bit cap on each side's locked-collateral sum. The padded
+/// gate count stayed at 8192, so the cache tag would otherwise have been
+/// unchanged and a stale key silently reused.
+const RELATION_VERSION: u32 = 2;
 
 /// Generate (or load from `cache_dir`) the proving and verifying keys.
 /// Deterministic across machines: fixed-seed SRS + fixed circuit shape.
