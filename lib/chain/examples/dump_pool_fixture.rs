@@ -308,11 +308,9 @@ fn main() {
         fs::copy(&large_setup.vk_json, vk_dir.join("settle_large_vk.json"))
             .expect("copy settle_large vk");
         let so_setup = dev_setup_snarkjs("send_order").expect("setup send_order");
-        fs::copy(&so_setup.vk_json, vk_dir.join("send_order_vk.json"))
-            .expect("copy send_order vk");
+        fs::copy(&so_setup.vk_json, vk_dir.join("send_order_vk.json")).expect("copy send_order vk");
         let cf_setup = dev_setup_snarkjs("claim_fees").expect("setup claim_fees");
-        fs::copy(&cf_setup.vk_json, vk_dir.join("claim_fees_vk.json"))
-            .expect("copy claim_fees vk");
+        fs::copy(&cf_setup.vk_json, vk_dir.join("claim_fees_vk.json")).expect("copy claim_fees vk");
         println!("copied VKs into chain/vk/");
     }
 }
