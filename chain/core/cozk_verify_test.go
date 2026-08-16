@@ -2,143 +2,201 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
-	"strconv"
 	"testing"
 )
 
-// cozkFixture mirrors `lib/cozk/examples/dump_settle_cozk_fixture.rs` output.
-// The proof inside was generated COLLABORATIVELY by three in-process REP3
-// nodes, so these tests cover exactly what production settlement submits.
-type cozkFixture struct {
-	Price                   uint64          `json:"price"`
-	AIsSeller               bool            `json:"a_is_seller"`
-	Cmp                     int             `json:"cmp"`
-	OrderACommitmentHex     string          `json:"order_a_commitment_hex"`
-	OrderBCommitmentHex     string          `json:"order_b_commitment_hex"`
-	LockedAHashesHex        []string        `json:"locked_a_hashes_hex"`
-	LockedBHashesHex        []string        `json:"locked_b_hashes_hex"`
-	NewOrderACommitmentHex  string          `json:"new_order_a_commitment_hex"`
-	NewOrderBCommitmentHex  string          `json:"new_order_b_commitment_hex"`
-	NewLockedACommitmentHex string          `json:"new_locked_a_commitment_hex"`
-	NewLockedBCommitmentHex string          `json:"new_locked_b_commitment_hex"`
-	RecvACommitmentHex      string          `json:"recv_a_commitment_hex"`
-	RecvBCommitmentHex      string          `json:"recv_b_commitment_hex"`
-	ProofJSON               json.RawMessage `json:"proof_json"`
-	PublicJSON              []string        `json:"public_json"`
-	VKPath                  string          `json:"vk_path"`
+// settleFixture mirrors `lib/chain/examples/dump_pool_fixture.rs`'s settle
+// output (/tmp/pool_fixture_settle.json): one matched pair (A sells 80 ETH
+// at 3, B buys 60) through the comparison proof and both single-prover
+// settle proofs, with placeholder order ids baked into the binds.
+type settleFixture struct {
+	ChainID          uint64          `json:"chain_id"`
+	Price            uint64          `json:"price"`
+	OrderACommitment string          `json:"order_a_commitment"`
+	OrderBCommitment string          `json:"order_b_commitment"`
+	LockedA          []string        `json:"locked_a"`
+	LockedB          []string        `json:"locked_b"`
+	Cmp              cmpFixtureLeg   `json:"cmp"`
+	Small            smallFixtureLeg `json:"small"`
+	Large            largeFixtureLeg `json:"large"`
 }
 
-func loadCoZkFixture(t *testing.T) cozkFixture {
+type cmpFixtureLeg struct {
+	Cmp        int             `json:"cmp"`
+	ProofJSON  json.RawMessage `json:"proof_json"`
+	PublicJSON []string        `json:"public_json"`
+	VKPath     string          `json:"vk_path"`
+}
+
+type smallFixtureLeg struct {
+	OrderID      string          `json:"order_id"`
+	MatchOrderID string          `json:"match_order_id"`
+	CmNoteOut    string          `json:"cm_note_out"`
+	ProofJSON    json.RawMessage `json:"proof_json"`
+	PublicJSON   []string        `json:"public_json"`
+	VKPath       string          `json:"vk_path"`
+}
+
+type largeFixtureLeg struct {
+	OrderID          string          `json:"order_id"`
+	MatchOrderID     string          `json:"match_order_id"`
+	CmQResidual      string          `json:"cm_q_residual"`
+	CmLockedResidual string          `json:"cm_locked_residual"`
+	CmNoteOut        string          `json:"cm_note_out"`
+	ProofJSON        json.RawMessage `json:"proof_json"`
+	PublicJSON       []string        `json:"public_json"`
+	VKPath           string          `json:"vk_path"`
+}
+
+func loadSettleFixture(t *testing.T) settleFixture {
 	t.Helper()
-	const path = "/tmp/settle_cozk_fixture.json"
-	bytes, err := os.ReadFile(path)
+	const path = "/tmp/pool_fixture_settle.json"
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Skipf("fixture not found at %s — run `cargo run -p cozk --example dump_settle_cozk_fixture -- %s`", path, path)
+		t.Skipf("fixture not found at %s — run `cargo run -p invisibook-lib --example dump_pool_fixture -- /tmp/pool_fixture.json`", path)
 	}
-	var f cozkFixture
-	if err := json.Unmarshal(bytes, &f); err != nil {
+	var f settleFixture
+	if err := json.Unmarshal(raw, &f); err != nil {
 		t.Fatalf("decoding fixture: %v", err)
 	}
 	return f
 }
 
-// rebuildCoZkSignals lays out the 15 public signals from the fixture's fields
-// the same way SettleOrdersCoZk does from a request + on-chain state.
-func rebuildCoZkSignals(t *testing.T, fx cozkFixture) []string {
+func mustDec(t *testing.T, hex string) string {
 	t.Helper()
-	cmpDec, err := cmpToFrDecimal(fx.Cmp)
+	d, err := HexToDecimal(hex)
 	if err != nil {
-		t.Fatalf("cmpToFrDecimal: %v", err)
+		t.Fatalf("hex→dec: %v", err)
 	}
-	toDec := func(hex string) string {
-		dec, err := HexToDecimal(hex)
-		if err != nil {
-			t.Fatalf("HexToDecimal(%s): %v", hex, err)
-		}
-		return dec
-	}
-	aIsSeller := "0"
-	if fx.AIsSeller {
-		aIsSeller = "1"
-	}
-	signals := []string{
-		cmpDec,
-		toDec(fx.NewOrderACommitmentHex),
-		toDec(fx.NewOrderBCommitmentHex),
-		toDec(fx.NewLockedACommitmentHex),
-		toDec(fx.NewLockedBCommitmentHex),
-		toDec(fx.RecvACommitmentHex),
-		toDec(fx.RecvBCommitmentHex),
-		toDec(fx.OrderACommitmentHex),
-		toDec(fx.OrderBCommitmentHex),
-		strconv.FormatUint(fx.Price, 10),
-		aIsSeller,
-	}
-	for _, h := range fx.LockedAHashesHex {
-		signals = append(signals, toDec(h))
-	}
-	for _, h := range fx.LockedBHashesHex {
-		signals = append(signals, toDec(h))
-	}
-	return signals
+	return d
 }
 
-// The Go-side reconstruction of the public vector must byte-match what the
-// circuit produced — this pins the signal ordering between chain and circuit.
-func TestSettleCoZkPublicSignalLayoutMatchesCircuit(t *testing.T) {
-	fx := loadCoZkFixture(t)
-	signals := rebuildCoZkSignals(t, fx)
-	if len(signals) != len(fx.PublicJSON) {
-		t.Fatalf("signal count mismatch: rebuilt %d, circuit %d", len(signals), len(fx.PublicJSON))
+// The compare statement rebuild [cmp, order_a, order_b] must match the
+// prover's publics and verify; a flipped cmp must fail.
+func TestVerifySettleCmpProof(t *testing.T) {
+	fx := loadSettleFixture(t)
+	vk, err := LoadVK("settle_cozk", fx.Cmp.VKPath)
+	if err != nil {
+		t.Fatalf("loading VK: %v", err)
+	}
+	cmpDec, err := cmpToFrDecimal(fx.Cmp.Cmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signals := []string{cmpDec, mustDec(t, fx.OrderACommitment), mustDec(t, fx.OrderBCommitment)}
+	if len(signals) != len(fx.Cmp.PublicJSON) {
+		t.Fatalf("compare publics: %d != %d", len(signals), len(fx.Cmp.PublicJSON))
 	}
 	for i := range signals {
-		if signals[i] != fx.PublicJSON[i] {
-			t.Fatalf("signal %d mismatch: rebuilt %s, circuit %s", i, signals[i], fx.PublicJSON[i])
+		if signals[i] != fx.Cmp.PublicJSON[i] {
+			t.Fatalf("compare public[%d]: chain %s != prover %s", i, signals[i], fx.Cmp.PublicJSON[i])
 		}
 	}
-}
+	if err := VerifyGroth16(vk, string(fx.Cmp.ProofJSON), signals); err != nil {
+		t.Fatalf("valid compare proof must verify: %v", err)
+	}
 
-func TestVerifyGroth16AcceptsCollaborativeSettleCoZkProof(t *testing.T) {
-	fx := loadCoZkFixture(t)
-	vk, err := LoadVK("settle_cozk", fx.VKPath)
-	if err != nil {
-		t.Fatalf("loading VK: %v", err)
-	}
-	if err := VerifyGroth16(vk, string(fx.ProofJSON), rebuildCoZkSignals(t, fx)); err != nil {
-		t.Fatalf("verify on a valid collaborative settle_cozk proof must succeed, got: %v", err)
-	}
-}
-
-func TestVerifyGroth16RejectsTamperedSettleCoZkCmp(t *testing.T) {
-	fx := loadCoZkFixture(t)
-	vk, err := LoadVK("settle_cozk", fx.VKPath)
-	if err != nil {
-		t.Fatalf("loading VK: %v", err)
-	}
-	tampered := rebuildCoZkSignals(t, fx)
-	// Flipping the public comparison result must break verification — a
-	// submitter cannot lie about which order fully filled.
-	flipped, err := cmpToFrDecimal(-fx.Cmp)
-	if err != nil {
-		t.Fatalf("cmpToFrDecimal: %v", err)
-	}
-	tampered[0] = flipped
-	if err := VerifyGroth16(vk, string(fx.ProofJSON), tampered); err == nil {
-		t.Fatalf("verify must reject when the cmp public signal is altered")
+	lied, _ := cmpToFrDecimal(-fx.Cmp.Cmp)
+	tampered := append([]string{}, signals...)
+	tampered[0] = lied
+	if err := VerifyGroth16(vk, string(fx.Cmp.ProofJSON), tampered); err == nil {
+		t.Fatal("flipped cmp must be rejected")
 	}
 }
 
-func TestVerifyGroth16RejectsTamperedSettleCoZkRemainder(t *testing.T) {
-	fx := loadCoZkFixture(t)
-	vk, err := LoadVK("settle_cozk", fx.VKPath)
+// The settle_small statement rebuild — including the bind transcript —
+// must match the prover byte-for-byte and verify.
+func TestVerifySettleSmallProof(t *testing.T) {
+	fx := loadSettleFixture(t)
+	vk, err := LoadVK("settle_small", fx.Small.VKPath)
 	if err != nil {
 		t.Fatalf("loading VK: %v", err)
 	}
-	tampered := rebuildCoZkSignals(t, fx)
-	// public[1] is new_order_a_commitment — the surviving order's remainder.
-	tampered[1] = bumpLastDigit(tampered[1])
-	if err := VerifyGroth16(vk, string(fx.ProofJSON), tampered); err == nil {
-		t.Fatalf("verify must reject when the remainder commitment is altered")
+	req := &SettleSmallRequest{
+		OrderID:      OrderID(fx.Small.OrderID),
+		MatchOrderID: OrderID(fx.Small.MatchOrderID),
+		CmNoteOut:    fx.Small.CmNoteOut,
+	}
+	// B is the buyer: side = 0, pays USDT.
+	payAsset, err := AssetID("USDT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bind := settleSmallBind(fx.ChainID, req)
+	signals := []string{
+		mustDec(t, fx.OrderBCommitment),
+		mustDec(t, fx.LockedB[0]), mustDec(t, fx.LockedB[1]),
+		fmt.Sprintf("%d", fx.Price), "0",
+		payAsset.String(),
+		mustDec(t, req.CmNoteOut),
+		bind.String(),
+	}
+	for i := range signals {
+		if signals[i] != fx.Small.PublicJSON[i] {
+			t.Fatalf("small public[%d]: chain %s != prover %s", i, signals[i], fx.Small.PublicJSON[i])
+		}
+	}
+	if err := VerifyGroth16(vk, string(fx.Small.ProofJSON), signals); err != nil {
+		t.Fatalf("valid settle_small proof must verify: %v", err)
+	}
+
+	// A different pair id changes bind — replay against another pair fails.
+	other := &SettleSmallRequest{
+		OrderID:      "order-x",
+		MatchOrderID: req.MatchOrderID,
+		CmNoteOut:    req.CmNoteOut,
+	}
+	tampered := append([]string{}, signals...)
+	tampered[7] = settleSmallBind(fx.ChainID, other).String()
+	if err := VerifyGroth16(vk, string(fx.Small.ProofJSON), tampered); err == nil {
+		t.Fatal("cross-pair replay must be rejected")
+	}
+}
+
+// The settle_large statement rebuild must match and verify; growing the
+// payout note must fail.
+func TestVerifySettleLargeProof(t *testing.T) {
+	fx := loadSettleFixture(t)
+	vk, err := LoadVK("settle_large", fx.Large.VKPath)
+	if err != nil {
+		t.Fatalf("loading VK: %v", err)
+	}
+	req := &SettleLargeRequest{
+		OrderID:          OrderID(fx.Large.OrderID),
+		MatchOrderID:     OrderID(fx.Large.MatchOrderID),
+		CmQResidual:      fx.Large.CmQResidual,
+		CmLockedResidual: fx.Large.CmLockedResidual,
+		CmNoteOut:        fx.Large.CmNoteOut,
+	}
+	// A is the seller: side = 1, pays ETH.
+	payAsset, err := AssetID("ETH")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bind := settleLargeBind(fx.ChainID, req)
+	signals := []string{
+		mustDec(t, fx.OrderACommitment), mustDec(t, fx.OrderBCommitment),
+		mustDec(t, fx.LockedA[0]), mustDec(t, fx.LockedA[1]),
+		fmt.Sprintf("%d", fx.Price), "1",
+		mustDec(t, req.CmQResidual), mustDec(t, req.CmLockedResidual),
+		payAsset.String(),
+		mustDec(t, req.CmNoteOut),
+		bind.String(),
+	}
+	for i := range signals {
+		if signals[i] != fx.Large.PublicJSON[i] {
+			t.Fatalf("large public[%d]: chain %s != prover %s", i, signals[i], fx.Large.PublicJSON[i])
+		}
+	}
+	if err := VerifyGroth16(vk, string(fx.Large.ProofJSON), signals); err != nil {
+		t.Fatalf("valid settle_large proof must verify: %v", err)
+	}
+
+	tampered := append([]string{}, signals...)
+	tampered[9] = bumpLastDigit(tampered[9])
+	if err := VerifyGroth16(vk, string(fx.Large.ProofJSON), tampered); err == nil {
+		t.Fatal("tampered payout note must be rejected")
 	}
 }

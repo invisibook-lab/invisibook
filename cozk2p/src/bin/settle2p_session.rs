@@ -99,17 +99,11 @@ struct StdioSigIo {
 }
 
 impl SigIo for StdioSigIo {
-    /// Request this trader's settlement signature from the host app.
+    /// Request this trader's compare signature from the host app.
     fn request_sig(&mut self, need: &NeedSig) -> Result<String> {
         emit_line(json!({
             "event": "need_sig",
             "cmp": need.cmp,
-            "new_order_a": need.new_order_a,
-            "new_order_b": need.new_order_b,
-            "new_locked_a": need.new_locked_a,
-            "new_locked_b": need.new_locked_b,
-            "recv_a": need.recv_a,
-            "recv_b": need.recv_b,
         }));
 
         let (tx, rx) = mpsc::channel::<std::io::Result<String>>();

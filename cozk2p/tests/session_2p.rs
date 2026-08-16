@@ -6,6 +6,7 @@
 use std::{fs, path::PathBuf};
 
 use anyhow::Result;
+use ark_ff::PrimeField;
 use ark_mpc::{PARTY0, algebra::Scalar, test_helpers::execute_mock_mpc};
 use ark_serialize::CanonicalDeserialize;
 use cozk2p::{
@@ -46,6 +47,7 @@ fn inputs() -> (SessionInput, SessionInput) {
     let locked_a = [fr_to_hex(&commit(80, &[0xA3; 32])), zero.clone()];
     let locked_b = [fr_to_hex(&commit(180, &[0xB3; 32])), zero];
 
+    let npk_hex = |seed: u8| fr_to_hex(&commit(seed as u64, &[seed; 32]));
     let base = |role: &str, my: MyPrivate| SessionInput {
         role: role.to_string(),
         order_a_id: "order-a".into(),
@@ -64,6 +66,7 @@ fn inputs() -> (SessionInput, SessionInput) {
         order_b: order_b.clone(),
         locked_a: locked_a.clone(),
         locked_b: locked_b.clone(),
+        my_recv_npk: npk_hex(if role == "trader-a" { 0x51 } else { 0x52 }),
         my,
     };
     let a = base(
@@ -153,32 +156,63 @@ async fn session_happy_path() {
     assert_eq!(result_b.sig_a, SIG_A);
     assert_eq!(result_b.sig_b, SIG_B);
 
-    // The signed payloads matched the assembled statement on both sides.
-    let need_a = need_a.expect("A must have been asked to sign");
-    let need_b = need_b.expect("B must have been asked to sign");
-    assert_eq!(need_a.cmp, 1);
-    assert_eq!(need_a.new_order_a, need_b.new_order_a);
-    assert_eq!(need_a.recv_b, need_b.recv_b);
+    // The signed payloads matched the comparison on both sides.
+    assert_eq!(need_a.expect("A must have been asked to sign").cmp, 1);
+    assert_eq!(need_b.expect("B must have been asked to sign").cmp, 1);
 
     // The proof round-trips through the on-chain wire format and verifies.
     let proof_bytes = hex::decode(&result_a.proof_hex).unwrap();
     let proof = Proof::deserialize_compressed(proof_bytes.as_slice()).unwrap();
     verify_settle(&vk, &result_a.public, &proof).expect("proof must verify");
 
-    // Plaintext outcomes: amounts per the sample trade, commitments open.
-    let open = |amount: u64, r_hex: &str, expected_hex: &str| {
+    // Plaintext outcomes per the sample trade: A (larger) receives 180
+    // USDT and keeps 20 on the book; B (smaller) receives 60 ETH and got
+    // A's revealed... no — B is smaller, so B REVEALED and A holds B's
+    // opening. Each side's incoming payout is a NOTE commitment under its
+    // own fresh npk.
+    use cozk2p::poseidon::{asset_fr, note_commit};
+    let open_note = |npk_hex: &str, token: &str, amount: u64, r_hex: &str, expected: &str| {
+        let npk = ark_bn254::Fr::from_be_bytes_mod_order(&hex::decode(npk_hex).unwrap());
         let mut r = [0u8; 32];
         r.copy_from_slice(&hex::decode(r_hex).unwrap());
-        assert_eq!(fr_to_hex(&commit(amount, &r)), expected_hex);
+        let cm = note_commit(npk, asset_fr(token).unwrap(), amount, &r);
+        assert_eq!(fr_to_hex(&cm), expected);
     };
+    // A: larger side.
+    assert!(!result_a.my.i_am_smaller);
+    assert_eq!(result_a.my.fill, 60);
     assert_eq!(result_a.my.recv_amount, 180);
     assert_eq!(result_a.my.new_order_amount, 20);
     assert_eq!(result_a.my.new_locked_amount, 20);
-    open(180, &result_a.my.r_recv, &result_a.my.recv_commitment);
+    assert_eq!(
+        result_a.my.ctr_order_amount, 60,
+        "A holds B's revealed opening"
+    );
+    open_note(
+        &result_a.my.recv_npk,
+        "USDT",
+        180,
+        &result_a.my.r_recv,
+        &result_a.my.recv_commitment,
+    );
+    // B: smaller side, fully filled, no residuals.
+    assert!(result_b.my.i_am_smaller);
     assert_eq!(result_b.my.recv_amount, 60);
     assert_eq!(result_b.my.new_order_amount, 0);
-    assert_eq!(result_b.my.new_locked_amount, 0);
-    open(60, &result_b.my.r_recv, &result_b.my.recv_commitment);
+    assert_eq!(result_b.my.ctr_order_amount, 0);
+    open_note(
+        &result_b.my.recv_npk,
+        "ETH",
+        60,
+        &result_b.my.r_recv,
+        &result_b.my.recv_commitment,
+    );
+    // The exchanged payout-note pairs crossed correctly: what A holds as
+    // the counterparty pair is B's own (npk, r) and vice versa.
+    assert_eq!(result_a.my.ctr_recv_npk, result_b.my.recv_npk);
+    assert_eq!(result_a.my.ctr_r_recv, result_b.my.r_recv);
+    assert_eq!(result_b.my.ctr_recv_npk, result_a.my.recv_npk);
+    assert_eq!(result_b.my.ctr_r_recv, result_a.my.r_recv);
 
     // The witness WAL landed on disk for both parties, consistent with the
     // final result.

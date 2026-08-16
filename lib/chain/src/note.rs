@@ -177,6 +177,49 @@ pub fn note_deposit_bind(
     ])
 }
 
+/// Bind for a SettleSmall request (Go: `core.settleSmallBind`). The other
+/// publics (cm_q, collateral, price, side, asset) are rebuilt by the chain
+/// from its own order state; bind welds the proof to the pair and the
+/// payout note.
+pub fn settle_small_bind(
+    chain_id: u64,
+    order_id: &str,
+    match_order_id: &str,
+    cm_note_out_hex: &str,
+) -> Fr {
+    bind_hash(&[
+        BIND_DOMAIN.as_bytes(),
+        &chain_id.to_be_bytes(),
+        b"settle_small",
+        &BIND_VERSION.to_be_bytes(),
+        order_id.as_bytes(),
+        match_order_id.as_bytes(),
+        cm_note_out_hex.as_bytes(),
+    ])
+}
+
+/// Bind for a SettleLarge request (Go: `core.settleLargeBind`).
+pub fn settle_large_bind(
+    chain_id: u64,
+    order_id: &str,
+    match_order_id: &str,
+    cm_q_residual_hex: &str,
+    cm_locked_residual_hex: &str,
+    cm_note_out_hex: &str,
+) -> Fr {
+    bind_hash(&[
+        BIND_DOMAIN.as_bytes(),
+        &chain_id.to_be_bytes(),
+        b"settle_large",
+        &BIND_VERSION.to_be_bytes(),
+        order_id.as_bytes(),
+        match_order_id.as_bytes(),
+        cm_q_residual_hex.as_bytes(),
+        cm_locked_residual_hex.as_bytes(),
+        cm_note_out_hex.as_bytes(),
+    ])
+}
+
 /// Bind for a NoteWithdraw request (Go: `core.noteWithdrawBind`).
 #[allow(clippy::too_many_arguments)]
 pub fn note_withdraw_bind(

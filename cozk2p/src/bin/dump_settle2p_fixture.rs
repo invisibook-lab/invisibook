@@ -72,10 +72,9 @@ async fn main() -> Result<()> {
         return Ok(());
     };
 
-    // Same sample trade as keygen and the 3-party fixture: A (maker) sells 80
-    // token1 at price 3, B buys 60 → cmp = 1, A keeps 20 on the book.
-    let (a, b, price, a_is_seller) = sample_trade();
-    let public = compute_public(&a, &b, price, a_is_seller)?;
+    // Same sample trade as keygen: A (maker) has 80, B 60 → cmp = 1.
+    let (a, b, _price, _a_is_seller) = sample_trade();
+    let public = compute_public(&a, &b);
 
     // Two in-process SPDZ parties, each holding only its own side.
     let (r0, r1) = execute_mock_mpc(|fabric| {
@@ -96,24 +95,13 @@ async fn main() -> Result<()> {
     ensure!(p0 == p1, "the two parties revealed different proofs");
     verify_settle(&vk, &public, &r0).context("locally verifying the collaborative proof")?;
 
-    // The commitment hexes below are exactly what the chain sees on-chain
-    // (order/locked state) or in the settlement request (new/recv), so the
-    // Go test can rebuild the statement the way the writing does and check
-    // it against `public`.
+    // The commitment hexes are what the chain reads from its own order rows,
+    // so the Go test can rebuild the statement the way the writing does and
+    // check it against `public`.
     let fixture = json!({
-        "price": public.price,
-        "a_is_seller": public.a_is_seller,
         "cmp": public.cmp,
         "order_a_commitment_hex": fr_to_hex(&public.order_a),
         "order_b_commitment_hex": fr_to_hex(&public.order_b),
-        "locked_a_hashes_hex": [fr_to_hex(&public.locked_a[0]), fr_to_hex(&public.locked_a[1])],
-        "locked_b_hashes_hex": [fr_to_hex(&public.locked_b[0]), fr_to_hex(&public.locked_b[1])],
-        "new_order_a_commitment_hex": fr_to_hex(&public.new_order_a),
-        "new_order_b_commitment_hex": fr_to_hex(&public.new_order_b),
-        "new_locked_a_commitment_hex": fr_to_hex(&public.new_locked_a),
-        "new_locked_b_commitment_hex": fr_to_hex(&public.new_locked_b),
-        "recv_a_commitment_hex": fr_to_hex(&public.recv_a),
-        "recv_b_commitment_hex": fr_to_hex(&public.recv_b),
         "proof_hex": hex::encode(&p0),
         "public": serde_json::to_value(&public)?,
         "vk_path": vk_path.as_ref().map(|p| p.display().to_string()),

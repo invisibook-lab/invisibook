@@ -15,16 +15,21 @@ use std::{env, fs, path::PathBuf};
 use invisibook_lib::{
     note::{
         asset_id, fr_from_be_bytes, note_commit, note_deposit_bind, note_fr_to_hex,
-        note_withdraw_bind, npk_from_sk,
+        note_withdraw_bind, npk_from_sk, settle_large_bind, settle_small_bind,
     },
     note_prover::{
-        NoteDepositWitness, SpendSlot, SpendWithdrawWitness, prove_note_deposit,
+        NoteDepositWitness, SettleLargeWitness, SettleSmallWitness, SpendSlot,
+        SpendWithdrawWitness, prove_note_deposit, prove_settle_large, prove_settle_small,
         prove_spend_withdraw,
     },
     note_tree::NoteTree,
 };
 use serde_json::json;
-use zk::{setup::dev_setup_snarkjs, test_circuit::TestCircuitHandle};
+use zk::{
+    setup::dev_setup_snarkjs,
+    test_circuit::TestCircuitHandle,
+    wallet::{SettleCmpWitness, prove_settle_cmp},
+};
 
 const CHAIN_ID: u64 = 1926;
 
@@ -156,12 +161,152 @@ fn main() {
     fs::write(&out_path, serde_json::to_string_pretty(&fixture).unwrap()).expect("write fixture");
     println!("wrote {out_path}");
 
+    // ── Settlement fixtures: a matched pair (A sells 80 ETH @3, B buys 60)
+    //    through compare + both settle proofs, with placeholder order ids
+    //    ("order-a"/"order-b") baked into the binds so the Go verify tests
+    //    can rebuild the exact statements without chain state. ──
+    let settle_out = out_path.replace(".json", "_settle.json");
+    let (r_qa, r_qb) = (fr_from_be_bytes(&rep(0x81)), fr_from_be_bytes(&rep(0x82)));
+    let (r_la, r_lb) = (fr_from_be_bytes(&rep(0x83)), fr_from_be_bytes(&rep(0x84)));
+    let zero_r = fr_from_be_bytes(&[0u8; 32]);
+    let price = 3u64;
+
+    let cmp_setup = dev_setup_snarkjs("settle_cozk").expect("setup settle_cozk");
+    let cmp_handle = TestCircuitHandle::from_compiled(&cmp_setup.circuit_dir).expect("handle");
+    let mut r_qa_bytes = [0x81u8; 32];
+    let mut r_qb_bytes = [0x82u8; 32];
+    // Use the raw byte convention prove_settle_cmp expects.
+    let cmp_proof = prove_settle_cmp(
+        &SettleCmpWitness {
+            a: 80,
+            r_a: r_qa_bytes,
+            b: 60,
+            r_b: r_qb_bytes,
+        },
+        &cmp_handle,
+        &cmp_setup.zkey,
+    )
+    .expect("prove settle_cmp");
+    let _ = (&mut r_qa_bytes, &mut r_qb_bytes);
+
+    // B (smaller, buyer, side = 0): pays its whole 180 USDT collateral to
+    // A's fresh npk.
+    let small_setup = dev_setup_snarkjs("settle_small").expect("setup settle_small");
+    let small_handle = TestCircuitHandle::from_compiled(&small_setup.circuit_dir).expect("handle");
+    let npk_a_fresh = npk_from_sk(fr_from_be_bytes(&rep(0x91)));
+    let npk_b_fresh = npk_from_sk(fr_from_be_bytes(&rep(0x92)));
+    let small_w = SettleSmallWitness {
+        q: 60,
+        r_q: r_qb,
+        locked: [(180, r_lb), (0, zero_r)],
+        price,
+        side_sell: false,
+        pay_asset: asset_id("USDT").unwrap(),
+        npk_ctr: npk_a_fresh,
+        r_note: fr_from_be_bytes(&rep(0x93)),
+        bind: fr_from_be_bytes(&[0u8; 32]), // patched below
+    };
+    let small_bind = settle_small_bind(
+        CHAIN_ID,
+        "order-b",
+        "order-a",
+        &note_fr_to_hex(&small_w.cm_note_out()),
+    );
+    let small_w = SettleSmallWitness {
+        bind: small_bind,
+        ..small_w
+    };
+    let small_proof =
+        prove_settle_small(small_w, &small_handle, &small_setup.zkey).expect("prove settle_small");
+
+    // A (larger, seller, side = 1): pays the 60 ETH fill to B's fresh npk,
+    // relists 20 with fresh commitments.
+    let large_setup = dev_setup_snarkjs("settle_large").expect("setup settle_large");
+    let large_handle = TestCircuitHandle::from_compiled(&large_setup.circuit_dir).expect("handle");
+    let large_w = SettleLargeWitness {
+        q: 80,
+        r_q: r_qa,
+        q_ctr: 60,
+        r_q_ctr: r_qb,
+        locked: [(80, r_la), (0, zero_r)],
+        price,
+        side_sell: true,
+        r_q_residual: fr_from_be_bytes(&rep(0x94)),
+        r_locked_residual: fr_from_be_bytes(&rep(0x95)),
+        pay_asset: asset_id("ETH").unwrap(),
+        npk_ctr: npk_b_fresh,
+        r_note: fr_from_be_bytes(&rep(0x96)),
+        bind: fr_from_be_bytes(&[0u8; 32]), // patched below
+    };
+    let (cm_q_res, cm_locked_res, cm_note) = large_w.output_cms();
+    let large_bind = settle_large_bind(
+        CHAIN_ID,
+        "order-a",
+        "order-b",
+        &note_fr_to_hex(&cm_q_res),
+        &note_fr_to_hex(&cm_locked_res),
+        &note_fr_to_hex(&cm_note),
+    );
+    let large_w = SettleLargeWitness {
+        bind: large_bind,
+        ..large_w
+    };
+    let large_proof =
+        prove_settle_large(large_w, &large_handle, &large_setup.zkey).expect("prove settle_large");
+
+    let settle_fixture = json!({
+        "chain_id": CHAIN_ID,
+        "price": price,
+        "order_a_commitment": cmp_proof.order_a_commitment_hex,
+        "order_b_commitment": cmp_proof.order_b_commitment_hex,
+        "locked_a": [note_fr_to_hex(&zk::wallet::poseidon2(ark_bn254::Fr::from(80u64), r_la)),
+                     note_fr_to_hex(&zk::wallet::poseidon2(ark_bn254::Fr::from(0u64), zero_r))],
+        "locked_b": [note_fr_to_hex(&zk::wallet::poseidon2(ark_bn254::Fr::from(180u64), r_lb)),
+                     note_fr_to_hex(&zk::wallet::poseidon2(ark_bn254::Fr::from(0u64), zero_r))],
+        "cmp": {
+            "cmp": cmp_proof.cmp,
+            "proof_json": cmp_proof.proof_json,
+            "public_json": cmp_proof.public_json,
+            "vk_path": cmp_setup.vk_json.to_string_lossy(),
+        },
+        "small": {
+            "order_id": "order-b",
+            "match_order_id": "order-a",
+            "cm_note_out": small_proof.cm_note_out_hex,
+            "proof_json": small_proof.proof_json,
+            "public_json": small_proof.public_json,
+            "vk_path": small_setup.vk_json.to_string_lossy(),
+        },
+        "large": {
+            "order_id": "order-a",
+            "match_order_id": "order-b",
+            "cm_q_residual": large_proof.cm_q_residual_hex,
+            "cm_locked_residual": large_proof.cm_locked_residual_hex,
+            "cm_note_out": large_proof.cm_note_out_hex,
+            "proof_json": large_proof.proof_json,
+            "public_json": large_proof.public_json,
+            "vk_path": large_setup.vk_json.to_string_lossy(),
+        },
+    });
+    fs::write(
+        &settle_out,
+        serde_json::to_string_pretty(&settle_fixture).unwrap(),
+    )
+    .expect("write settle fixture");
+    println!("wrote {settle_out}");
+
     if copy_vk {
         let vk_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../chain/vk");
         fs::copy(&dep_setup.vk_json, vk_dir.join("note_deposit_vk.json"))
             .expect("copy note_deposit vk");
         fs::copy(&wd_setup.vk_json, vk_dir.join("spend_withdraw_vk.json"))
             .expect("copy spend_withdraw vk");
+        fs::copy(&cmp_setup.vk_json, vk_dir.join("settle_cozk_vk.json"))
+            .expect("copy settle_cozk vk");
+        fs::copy(&small_setup.vk_json, vk_dir.join("settle_small_vk.json"))
+            .expect("copy settle_small vk");
+        fs::copy(&large_setup.vk_json, vk_dir.join("settle_large_vk.json"))
+            .expect("copy settle_large vk");
         println!("copied VKs into chain/vk/");
     }
 }

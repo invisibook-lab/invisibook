@@ -1,6 +1,12 @@
-//! The full 2-party settlement session: everything crypto between "QUIC
-//! connected" and "standard PLONK proof + both signatures in hand", over a
-//! single `MpcFabric`.
+//! The 2-party settlement session per the paper (§VI): everything crypto
+//! between "QUIC connected" and "comparison proof + both signatures + each
+//! side's settle witness in hand", over a single `MpcFabric`.
+//!
+//! The MPC's ONLY job is the comparison (π_cmp). Everything after cmp is
+//! public — payouts, residual re-commitments — is each party's OWN work,
+//! proven later with the single-prover settle_small / settle_large
+//! circuits: by then the smaller side has revealed its opening, so each
+//! party holds its complete witness alone.
 //!
 //! Protocol (both parties run the identical program; sender-selection is by
 //! party id, and every fabric operation is enqueued in canonical A-then-B
@@ -11,19 +17,19 @@
 //! 2. Share both order amounts + blindings; verify each opens its ON-CHAIN
 //!    order commitment inside the MPC (Poseidon on shares).
 //! 3. Three-way compare, opening only `cmp`.
-//! 4. The smaller party reveals its plaintext amount (the protocol-
-//!    sanctioned leak); both parties then open `v_smaller - revealed` and
-//!    require zero, so a lying reveal aborts instantly instead of surfacing
-//!    as an unsatisfiable circuit after the expensive prove.
-//! 5. Each side draws fresh blindings, computes its three output
-//!    commitments natively, and the six hexes are exchanged; both assemble
-//!    the byte-identical `SettlePublic`.
-//! 6. `witness.json` is written to disk BEFORE any signature leaves this
-//!    process: the peer cannot submit without my signature, so everything
-//!    the chain can ever land is recoverable from my disk first.
-//! 7. Signatures are ferried from the host app (`SigIo`) and exchanged over
-//!    the fabric; then the collaborative prove runs and the proof is
-//!    locally verified before it is returned.
+//! 4. The smaller party reveals its plaintext (amount, blinding) — the
+//!    paper's sanctioned disclosure, needed by the larger side's π_B; both
+//!    parties then open `share − revealed` and require zero, so a lying
+//!    reveal aborts instantly.
+//! 5. Each side derives its incoming payout note's opening (its own fresh
+//!    blinding, its app-provided npk) and PERSISTS it (witness.json WAL)
+//!    BEFORE the (npk, r) pair is handed to the payer — the payer can only
+//!    mint what my disk already remembers.
+//! 6. The two (npk, r) pairs are exchanged; the WAL is updated with the
+//!    counterparty's pair (my settle proof needs it).
+//! 7. Signatures over (order_a, order_b, cmp) are ferried from the host app
+//!    (`SigIo`) and exchanged; then the collaborative prove of π_cmp runs
+//!    and the proof is locally verified before it is returned.
 
 use std::{fs, path::Path};
 
@@ -41,10 +47,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     mpc_compare::compare_three_way,
     mpc_poseidon::poseidon_hash,
-    poseidon::{commit, fr_to_hex, hash2},
+    poseidon::{asset_fr, commit, fr_to_hex, hash2, note_commit},
     prove::{ProveTimings, prove_collaborative_timed, verify_settle},
-    relation::{MAX_LOCKED, SettlePublic, SidePrivate},
+    relation::{SettlePublic, SidePrivate},
 };
+
+/// Maximum locked collateral cashes per side (2-slot shape on chain).
+pub const MAX_LOCKED: usize = 2;
 
 /// One locked collateral cash of this trader: plaintext amount + blinding.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,9 +76,11 @@ pub struct MyPrivate {
 }
 
 /// Everything the app hands the session binary. Public fields must be
-/// chain-sourced by the app; `my` is this trader's local witness. The id
-/// and token fields are echo-only: they flow untouched into `witness.json`
-/// so crash recovery can rebuild local records without re-deriving them.
+/// chain-sourced by the app; `my` is this trader's local witness;
+/// `my_recv_npk` is a fresh shielded receiving key this wallet derived for
+/// its incoming payout note. The id and token fields are echo-only: they
+/// flow untouched into `witness.json` so crash recovery can rebuild local
+/// records without re-deriving them.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInput {
     /// "trader-a" (maker, PARTY0, dials) or "trader-b" (taker, PARTY1).
@@ -88,30 +99,56 @@ pub struct SessionInput {
     /// On-chain locked cash commitment hexes, zero-commitment padded to 2.
     pub locked_a: [String; 2],
     pub locked_b: [String; 2],
+    /// 64-char hex Fr: this wallet's fresh receiving key for its payout
+    /// note (never reuse across trades — one key, one note).
+    pub my_recv_npk: String,
     pub my: MyPrivate,
 }
 
-/// This trader's plaintext settlement outcome: the amounts and blindings it
-/// must persist to keep its new UTXOs spendable.
+/// This trader's plaintext settlement outcome — everything it needs to
+/// (a) keep its incoming payout note spendable and (b) prove its OWN
+/// settle circuit (settle_small when `i_am_smaller`, else settle_large).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MyOutcome {
     /// True when this trader is the a-side (maker).
     pub is_a: bool,
+    /// True when this side fully fills (cmp == 0 counts as smaller: both
+    /// sides settle via the small path).
+    pub i_am_smaller: bool,
+    pub cmp: i8,
+    /// The executed quantity min(a, b) in token1 units.
+    pub fill: u64,
+
+    // ── My incoming payout note (I chose npk and r; the counterparty's
+    //    settle proof mints it) ──
     pub recv_amount: u64,
-    /// 64-char hex blinding of the receive commitment.
+    pub recv_token: String,
+    pub recv_npk: String,
+    /// 64-char hex blinding I drew for my payout note.
     pub r_recv: String,
+    /// NoteCommit(recv_npk, recv_token, recv_amount, r_recv) — the cm my
+    /// wallet watches for on chain.
     pub recv_commitment: String,
-    /// Remainder order amount (0 when this side fully fills).
+
+    // ── The counterparty's payout note (MY settle proof mints it) ──
+    pub ctr_recv_npk: String,
+    pub ctr_r_recv: String,
+
+    // ── Larger side only (empty/zero when i_am_smaller): the revealed
+    //    counterparty opening + my residual re-commitments ──
+    pub ctr_order_amount: u64,
+    pub ctr_r_order: String,
     pub new_order_amount: u64,
     pub r_order_new: String,
     pub new_order_commitment: String,
-    /// Remainder collateral in this side's locked token.
     pub new_locked_amount: u64,
     pub r_locked_new: String,
     pub new_locked_commitment: String,
 }
 
-/// Crash-recovery record written BEFORE any signature leaves the process.
+/// Crash-recovery record. First written BEFORE this side's (npk, r) pair
+/// leaves the process (my own secrets), rewritten complete after the
+/// exchange (the counterparty's pair, which my settle proof needs).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionWitness {
     pub order_a_id: String,
@@ -121,48 +158,35 @@ pub struct SessionWitness {
     pub my_lock_token: String,
     pub my_recv_token: String,
     pub cmp: i8,
-    pub new_order_a: String,
-    pub new_order_b: String,
-    pub new_locked_a: String,
-    pub new_locked_b: String,
-    pub recv_a: String,
-    pub recv_b: String,
     pub my: MyOutcome,
 }
 
-/// The session's final product: everything the app needs to sign-check,
-/// submit, and persist.
+/// The session's final product: everything the app needs to submit the
+/// comparison, prove its own settle circuit, and persist.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionResult {
     pub cmp: i8,
     pub public: SettlePublic,
-    /// Hex of the ark-compressed PLONK proof (the on-chain wire format).
+    /// Hex of the ark-compressed PLONK π_cmp (the on-chain wire format).
     pub proof_hex: String,
     /// Both traders' 128-char hex ed25519 signatures over the canonical
-    /// settlement message (opaque to this crate; the app verifies them).
+    /// compare message (opaque to this crate; the app verifies them).
     pub sig_a: String,
     pub sig_b: String,
     pub my: MyOutcome,
     pub timings: ProveTimings,
 }
 
-/// The commitment payload the host app must sign, emitted after the output
-/// exchange. Field order matches the canonical settlement message.
+/// The payload the host app must sign: just the comparison result (the
+/// order ids the host already knows complete the canonical message).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NeedSig {
     pub cmp: i8,
-    pub new_order_a: String,
-    pub new_order_b: String,
-    pub new_locked_a: String,
-    pub new_locked_b: String,
-    pub recv_a: String,
-    pub recv_b: String,
 }
 
 /// Host-side signature ferry. `request_sig` is called at most once per
 /// session, from a blocking context, and must return this trader's 128-char
-/// hex ed25519 signature over the canonical settlement message built from
-/// `need` plus the order ids the host already knows.
+/// hex ed25519 signature over the canonical compare message.
 pub trait SigIo: Send {
     fn request_sig(&mut self, need: &NeedSig) -> Result<String>;
 }
@@ -204,6 +228,8 @@ pub fn sanity_check_input(input: &SessionInput) -> Result<()> {
         !input.my.locked.is_empty() && input.my.locked.len() <= MAX_LOCKED,
         "locked cash count must be 1..={MAX_LOCKED}"
     );
+    // The recv npk must be a well-formed field element hex.
+    commitment_fr(&input.my_recv_npk, "my_recv_npk")?;
 
     // The order commitment must open with my witness.
     let my_order_hex = if i_am_a {
@@ -251,63 +277,20 @@ pub fn sanity_check_input(input: &SessionInput) -> Result<()> {
     Ok(())
 }
 
-/// Compute this side's three output commitments and outcome amounts from
-/// its own secrets plus the (revealed or own) fill. Mirrors one side of
-/// `relation::compute_public`: remainder in u128 with a u64 bound so every
-/// minted commitment stays spendable by the 64-bit circuits. `fill` must be
-/// `min(a, b)` and therefore `<= my_amount`.
-pub fn compute_my_outputs(
-    my_amount: u64,
-    fill: u64,
-    price: u64,
-    i_am_seller: bool,
-    is_a: bool,
-) -> Result<(MyOutcome, [u8; 32], [u8; 32], [u8; 32])> {
-    ensure!(fill <= my_amount, "fill exceeds this side's order amount");
-    let remainder = my_amount - fill;
-
-    // Token scaling per side: a seller's collateral and remainder are in
-    // token1 (no scaling); a buyer's are in token2 (scaled by price).
-    // Receives are the opposite leg: seller receives fill*price token2,
-    // buyer receives fill token1.
-    let scale = |amount: u64, by_price: bool, what: &str| -> Result<u64> {
-        let v = if by_price {
-            amount as u128 * price as u128
-        } else {
-            amount as u128
-        };
-        ensure!(
-            v <= u64::MAX as u128,
-            "{what} amount {v} exceeds 64 bits and would be unspendable"
-        );
-        Ok(v as u64)
+/// Scale a token1 quantity into one side's payment leg: sellers move fill
+/// token1, buyers move fill·price token2. Bounds the result to u64 so every
+/// minted note stays spendable by the 64-bit circuits.
+fn scale_leg(amount: u64, by_price: bool, price: u64, what: &str) -> Result<u64> {
+    let v = if by_price {
+        amount as u128 * price as u128
+    } else {
+        amount as u128
     };
-    let new_locked_amount = scale(remainder, !i_am_seller, "new locked")?;
-    let recv_amount = scale(fill, i_am_seller, "receive")?;
-
-    let mut rng = OsRng;
-    let mut draw = || {
-        let mut b = [0u8; 32];
-        rng.fill_bytes(&mut b);
-        b
-    };
-    let r_order_new = draw();
-    let r_locked_new = draw();
-    let r_recv = draw();
-
-    let outcome = MyOutcome {
-        is_a,
-        recv_amount,
-        r_recv: hex::encode(r_recv),
-        recv_commitment: fr_to_hex(&commit(recv_amount, &r_recv)),
-        new_order_amount: remainder,
-        r_order_new: hex::encode(r_order_new),
-        new_order_commitment: fr_to_hex(&commit(remainder, &r_order_new)),
-        new_locked_amount,
-        r_locked_new: hex::encode(r_locked_new),
-        new_locked_commitment: fr_to_hex(&commit(new_locked_amount, &r_locked_new)),
-    };
-    Ok((outcome, r_order_new, r_locked_new, r_recv))
+    ensure!(
+        v <= u64::MAX as u128,
+        "{what} amount {v} exceeds 64 bits and would be unspendable"
+    );
+    Ok(v as u64)
 }
 
 /// Poseidon-fold fingerprint of the chain-sourced public inputs, exchanged
@@ -399,8 +382,8 @@ pub struct SessionConfig<'a> {
 /// Run the full settlement session on an established fabric. `my_party`
 /// must match `input.role` (PARTY0 for trader-a). `sig_io` ferries the
 /// one signature request to the host app. `witness.json` is written into
-/// `out_dir` before the signature leaves this process. `emit` receives
-/// (phase-name, human message) progress pairs.
+/// `out_dir` before any money-critical secret leaves this process. `emit`
+/// receives (phase-name, human message) progress pairs.
 pub async fn run_session<F>(
     fabric: MpcFabric<G1Projective>,
     my_party: u64,
@@ -458,134 +441,161 @@ where
     let cmp = compare_three_way(&fabric, &v_a, &v_b).await?;
     emit("compare", &format!("cmp = {cmp}"));
 
-    // ── The smaller party reveals its amount (protocol-sanctioned) ──
-    let fill: u64 = if cmp == 0 {
-        input.my.order_amount
+    // ── The smaller party reveals its opening (paper's sanctioned leak:
+    //    the larger side's π_B must open the smaller's commitment) ──
+    let i_am_smaller = cmp == 0 || (cmp == 1) != i_am_a;
+    let (fill, ctr_order_amount, ctr_r_order) = if cmp == 0 {
+        (input.my.order_amount, 0u64, String::new())
     } else {
-        emit("reveal", "revealing the smaller side's fill");
+        emit("reveal", "revealing the smaller side's opening");
         let smaller_party = if cmp == 1 { PARTY1 } else { PARTY0 };
-        let i_am_smaller = my_party == smaller_party;
-        let payload = if i_am_smaller {
-            Scalar::from(input.my.order_amount)
+        let reveal_mine = my_party == smaller_party;
+        let payload: Vec<Scalar<G1Projective>> = if reveal_mine {
+            vec![my_amount_scalar, my_r_order]
         } else {
-            zero
+            vec![zero, zero]
         };
-        let revealed: Scalar<G1Projective> = fabric.share_plaintext(payload, smaller_party).await;
-        // Bind the plaintext reveal to the MPC-verified amount: a lying
-        // reveal aborts here, not as an unsatisfiable circuit after the
-        // expensive prove.
-        let v_smaller = if cmp == 1 { &v_b } else { &v_a };
-        let diff = v_smaller - revealed;
-        open_expect_zero(&diff, "fill reveal consistency").await?;
-        if i_am_smaller {
-            input.my.order_amount
+        let revealed: Vec<Scalar<G1Projective>> =
+            fabric.share_plaintext(payload, smaller_party).await;
+        ensure!(revealed.len() == 2, "malformed reveal payload from peer");
+        // Bind the plaintext reveal to the MPC-verified shares: a lying
+        // reveal aborts here, not as a rejected settle proof later.
+        let (v_smaller, r_smaller) = if cmp == 1 { (&v_b, &r_b) } else { (&v_a, &r_a) };
+        let v_diff = v_smaller - revealed[0];
+        let r_diff = r_smaller - revealed[1];
+        open_expect_zero(&v_diff, "reveal amount consistency").await?;
+        open_expect_zero(&r_diff, "reveal blinding consistency").await?;
+
+        if reveal_mine {
+            (input.my.order_amount, 0u64, String::new())
         } else {
-            scalar_to_u64(&revealed, "revealed fill")?
+            let q_ctr = scalar_to_u64(&revealed[0], "revealed amount")?;
+            let mut r = [0u8; 32];
+            let be = revealed[1].to_bytes_be();
+            ensure!(be.len() == 32, "unexpected scalar encoding length");
+            r.copy_from_slice(&be);
+            (q_ctr, q_ctr, hex::encode(r))
         }
     };
 
-    // ── Per-side outputs, exchanged so both hold the identical statement ──
-    emit("outputs", "computing and exchanging output commitments");
-    let (my_outcome, r_order_new, r_locked_new, r_recv) = compute_my_outputs(
-        input.my.order_amount,
+    // ── Derive my incoming payout note's opening + my residuals ──
+    emit("outputs", "deriving payout-note openings");
+    let mut rng = OsRng;
+    // Blindings are drawn AS field elements (raw bytes reduced immediately,
+    // stored in canonical 32-byte BE form): the exchange transports Fr
+    // values, so a non-canonical raw encoding would come back different on
+    // the other side.
+    let mut draw = || {
+        let mut b = [0u8; 32];
+        rng.fill_bytes(&mut b);
+        let mut canonical = [0u8; 32];
+        let be = Scalar::<G1Projective>::new(blinding_fr(&b)).to_bytes_be();
+        canonical.copy_from_slice(&be);
+        canonical
+    };
+    // My payout: what the counterparty pays me, in my recv token.
+    let recv_amount = scale_leg(fill, i_am_seller, input.price, "receive")?;
+    let r_recv = draw();
+    let recv_npk_fr = commitment_fr(&input.my_recv_npk, "my_recv_npk")?;
+    let recv_asset = asset_fr(&input.my_recv_token)?;
+    let recv_commitment = fr_to_hex(&note_commit(recv_npk_fr, recv_asset, recv_amount, &r_recv));
+
+    // My residuals (larger side only; zero commitments are never minted by
+    // the small path so the fields stay empty there).
+    let (new_order_amount, r_order_new, new_order_commitment) = if i_am_smaller {
+        (0u64, String::new(), String::new())
+    } else {
+        let remainder = input.my.order_amount - fill;
+        let r = draw();
+        (remainder, hex::encode(r), fr_to_hex(&commit(remainder, &r)))
+    };
+    let (new_locked_amount, r_locked_new, new_locked_commitment) = if i_am_smaller {
+        (0u64, String::new(), String::new())
+    } else {
+        let residual_locked = scale_leg(new_order_amount, !i_am_seller, input.price, "new locked")?;
+        let r = draw();
+        (
+            residual_locked,
+            hex::encode(r),
+            fr_to_hex(&commit(residual_locked, &r)),
+        )
+    };
+
+    let mut my_outcome = MyOutcome {
+        is_a: i_am_a,
+        i_am_smaller,
+        cmp,
         fill,
-        input.price,
-        i_am_seller,
-        i_am_a,
-    )?;
-    let my_scalars: Vec<Scalar<G1Projective>> = vec![
-        Scalar::new(commitment_fr(
-            &my_outcome.new_order_commitment,
-            "own output",
-        )?),
-        Scalar::new(commitment_fr(
-            &my_outcome.new_locked_commitment,
-            "own output",
-        )?),
-        Scalar::new(commitment_fr(&my_outcome.recv_commitment, "own output")?),
-    ];
-    let dummy: Vec<Scalar<G1Projective>> = vec![zero; 3];
-    let pick_vec = |owner_is_a: bool| {
+        recv_amount,
+        recv_token: input.my_recv_token.clone(),
+        recv_npk: input.my_recv_npk.clone(),
+        r_recv: hex::encode(r_recv),
+        recv_commitment,
+        ctr_recv_npk: String::new(),
+        ctr_r_recv: String::new(),
+        ctr_order_amount,
+        ctr_r_order,
+        new_order_amount,
+        r_order_new,
+        new_order_commitment,
+        new_locked_amount,
+        r_locked_new,
+        new_locked_commitment,
+    };
+
+    // ── WAL v1: MY money-critical secrets on disk BEFORE my (npk, r)
+    //    reaches the payer (they can only mint what my disk remembers) ──
+    let write_wal = |outcome: &MyOutcome| -> Result<()> {
+        let witness = SessionWitness {
+            order_a_id: input.order_a_id.clone(),
+            order_b_id: input.order_b_id.clone(),
+            my_order_id: input.my_order_id.clone(),
+            my_input_cash_ids: input.my_input_cash_ids.clone(),
+            my_lock_token: input.my_lock_token.clone(),
+            my_recv_token: input.my_recv_token.clone(),
+            cmp,
+            my: outcome.clone(),
+        };
+        fs::create_dir_all(config.out_dir).context("creating session out dir")?;
+        let path = config.out_dir.join("witness.json");
+        fs::write(&path, serde_json::to_string_pretty(&witness)?).context("writing witness.json")
+    };
+    write_wal(&my_outcome)?;
+
+    // ── Exchange (npk, r) so each payer can mint the other's note ──
+    emit("outputs", "exchanging payout-note keys");
+    let my_pair: Vec<Scalar<G1Projective>> =
+        vec![Scalar::new(recv_npk_fr), Scalar::new(blinding_fr(&r_recv))];
+    let dummy_pair: Vec<Scalar<G1Projective>> = vec![zero; 2];
+    let pick_pair = |owner_is_a: bool| {
         if owner_is_a == i_am_a {
-            my_scalars.clone()
+            my_pair.clone()
         } else {
-            dummy.clone()
+            dummy_pair.clone()
         }
     };
-    let out_a: Vec<Scalar<G1Projective>> = fabric.share_plaintext(pick_vec(true), PARTY0).await;
-    let out_b: Vec<Scalar<G1Projective>> = fabric.share_plaintext(pick_vec(false), PARTY1).await;
+    let pair_a: Vec<Scalar<G1Projective>> = fabric.share_plaintext(pick_pair(true), PARTY0).await;
+    let pair_b: Vec<Scalar<G1Projective>> = fabric.share_plaintext(pick_pair(false), PARTY1).await;
     ensure!(
-        out_a.len() == 3 && out_b.len() == 3,
-        "malformed output-commitment payload from peer"
+        pair_a.len() == 2 && pair_b.len() == 2,
+        "malformed payout-note payload from peer"
     );
-    // My own exchanged values must round-trip exactly.
-    let mine_echo = if i_am_a { &out_a } else { &out_b };
+    let mine_echo = if i_am_a { &pair_a } else { &pair_b };
     ensure!(
-        mine_echo == &my_scalars,
-        "own output commitments did not round-trip through the fabric"
+        mine_echo == &my_pair,
+        "own payout-note pair did not round-trip through the fabric"
     );
+    let ctr_pair = if i_am_a { &pair_b } else { &pair_a };
+    let scalar_hex = |s: &Scalar<G1Projective>| hex::encode(s.to_bytes_be());
+    my_outcome.ctr_recv_npk = scalar_hex(&ctr_pair[0]);
+    my_outcome.ctr_r_recv = scalar_hex(&ctr_pair[1]);
 
-    let scalar_fr =
-        |s: &Scalar<G1Projective>| -> Fr { Fr::from_be_bytes_mod_order(&s.to_bytes_be()) };
-    let public = SettlePublic {
-        cmp,
-        new_order_a: scalar_fr(&out_a[0]),
-        new_locked_a: scalar_fr(&out_a[1]),
-        recv_a: scalar_fr(&out_a[2]),
-        new_order_b: scalar_fr(&out_b[0]),
-        new_locked_b: scalar_fr(&out_b[1]),
-        recv_b: scalar_fr(&out_b[2]),
-        order_a: commitment_fr(&input.order_a, "order_a")?,
-        order_b: commitment_fr(&input.order_b, "order_b")?,
-        // Execution price: token2 units per one token1 (the seller receives
-        // `fill * price` token2, the buyer pays it). Public and shared by both
-        // sides, so it needs no commitment.
-        price: input.price,
-        a_is_seller: input.a_is_seller,
-        locked_a: [
-            commitment_fr(&input.locked_a[0], "locked_a[0]")?,
-            commitment_fr(&input.locked_a[1], "locked_a[1]")?,
-        ],
-        locked_b: [
-            commitment_fr(&input.locked_b[0], "locked_b[0]")?,
-            commitment_fr(&input.locked_b[1], "locked_b[1]")?,
-        ],
-    };
-
-    // ── Witness WAL: on disk before any signature leaves this process ──
-    let witness = SessionWitness {
-        order_a_id: input.order_a_id.clone(),
-        order_b_id: input.order_b_id.clone(),
-        my_order_id: input.my_order_id.clone(),
-        my_input_cash_ids: input.my_input_cash_ids.clone(),
-        my_lock_token: input.my_lock_token.clone(),
-        my_recv_token: input.my_recv_token.clone(),
-        cmp,
-        new_order_a: fr_to_hex(&public.new_order_a),
-        new_order_b: fr_to_hex(&public.new_order_b),
-        new_locked_a: fr_to_hex(&public.new_locked_a),
-        new_locked_b: fr_to_hex(&public.new_locked_b),
-        recv_a: fr_to_hex(&public.recv_a),
-        recv_b: fr_to_hex(&public.recv_b),
-        my: my_outcome.clone(),
-    };
-    fs::create_dir_all(config.out_dir).context("creating session out dir")?;
-    let witness_path = config.out_dir.join("witness.json");
-    fs::write(&witness_path, serde_json::to_string_pretty(&witness)?)
-        .context("writing witness.json")?;
+    // ── WAL v2: complete (my settle proof needs the counterparty's pair) ──
+    write_wal(&my_outcome)?;
 
     // ── Signature ferry + in-fabric exchange (before the prove) ──
-    emit("sig", "requesting settlement signature from the host");
-    let need = NeedSig {
-        cmp,
-        new_order_a: witness.new_order_a.clone(),
-        new_order_b: witness.new_order_b.clone(),
-        new_locked_a: witness.new_locked_a.clone(),
-        new_locked_b: witness.new_locked_b.clone(),
-        recv_a: witness.recv_a.clone(),
-        recv_b: witness.recv_b.clone(),
-    };
-    let my_sig = tokio::task::block_in_place(|| sig_io.request_sig(&need))?;
+    emit("sig", "requesting compare signature from the host");
+    let my_sig = tokio::task::block_in_place(|| sig_io.request_sig(&NeedSig { cmp }))?;
     let my_limbs = sig_to_scalars(&my_sig)?;
     let dummy_limbs: Vec<Scalar<G1Projective>> = vec![zero; 4];
     let pick_limbs = |owner_is_a: bool| {
@@ -606,20 +616,16 @@ where
         "own signature did not round-trip through the fabric"
     );
 
-    // ── Collaborative prove + verify-before-release ──
-    emit("prove", "collaboratively proving (this takes a while)");
+    // ── Collaborative prove of π_cmp + verify-before-release ──
+    emit("prove", "collaboratively proving the comparison");
+    let public = SettlePublic {
+        cmp,
+        order_a: commitment_fr(&input.order_a, "order_a")?,
+        order_b: commitment_fr(&input.order_b, "order_b")?,
+    };
     let side = SidePrivate {
         order_amount: input.my.order_amount,
         r_order: hex32(&input.my.r_order, "r_order")?,
-        r_order_new,
-        locked: input
-            .my
-            .locked
-            .iter()
-            .map(|l| Ok((l.amount, hex32(&l.random, "locked random")?)))
-            .collect::<Result<Vec<_>>>()?,
-        r_locked_new,
-        r_recv,
     };
     let (proof, timings) =
         prove_collaborative_timed(fabric.clone(), my_party, &side, &public, config.pk).await?;
@@ -643,104 +649,34 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{MyOutcome, compute_my_outputs};
-    use crate::{
-        poseidon::fr_to_hex,
-        relation::{SidePrivate, compute_public},
-    };
+    use super::*;
 
-    /// Build a SidePrivate for the cross-check against `compute_public`.
-    fn side(amount: u64, locked: Vec<(u64, [u8; 32])>) -> SidePrivate {
-        SidePrivate {
-            order_amount: amount,
-            r_order: [0x11; 32],
-            r_order_new: [0x12; 32],
-            locked,
-            r_locked_new: [0x13; 32],
-            r_recv: [0x14; 32],
-        }
-    }
-
-    /// Re-derive one side's commitments from a MyOutcome's plaintext fields
-    /// to confirm internal consistency (amount/blinding open commitment).
-    fn outcome_opens(outcome: &MyOutcome) {
-        use crate::poseidon::commit;
-        let open = |amount: u64, r_hex: &str, expected: &str, what: &str| {
-            let mut r = [0u8; 32];
-            r.copy_from_slice(&hex::decode(r_hex).unwrap());
-            assert_eq!(fr_to_hex(&commit(amount, &r)), expected, "{what}");
-        };
-        open(
-            outcome.recv_amount,
-            &outcome.r_recv,
-            &outcome.recv_commitment,
-            "recv",
-        );
-        open(
-            outcome.new_order_amount,
-            &outcome.r_order_new,
-            &outcome.new_order_commitment,
-            "new_order",
-        );
-        open(
-            outcome.new_locked_amount,
-            &outcome.r_locked_new,
-            &outcome.new_locked_commitment,
-            "new_locked",
-        );
-    }
-
-    /// The union of both sides' `compute_my_outputs` must reproduce the
-    /// plaintext amounts `compute_public` derives, for every cmp branch and
-    /// both role assignments.
+    /// scale_leg mirrors both settle circuits' collateral arithmetic and
+    /// bounds every leg to u64.
     #[test]
-    fn my_outputs_union_matches_compute_public() {
-        for a_is_seller in [true, false] {
-            for (a_amt, b_amt) in [(80u64, 60u64), (60, 80), (60, 60)] {
-                let price = 3u64;
-                let (a_locked, b_locked) = if a_is_seller {
-                    (a_amt, b_amt * price)
-                } else {
-                    (a_amt * price, b_amt)
-                };
-                let a = side(a_amt, vec![(a_locked, [0xA3; 32])]);
-                let b = side(b_amt, vec![(b_locked, [0xB3; 32])]);
-                let reference = compute_public(&a, &b, price, a_is_seller).unwrap();
-
-                let fill = a_amt.min(b_amt);
-                let (out_a, ..) =
-                    compute_my_outputs(a_amt, fill, price, a_is_seller, true).unwrap();
-                let (out_b, ..) =
-                    compute_my_outputs(b_amt, fill, price, !a_is_seller, false).unwrap();
-
-                assert_eq!(
-                    i8::from(reference.cmp),
-                    match a_amt.cmp(&b_amt) {
-                        std::cmp::Ordering::Greater => 1,
-                        std::cmp::Ordering::Equal => 0,
-                        std::cmp::Ordering::Less => -1,
-                    }
-                );
-                // Amounts must match the reference derivation exactly.
-                assert_eq!(out_a.new_order_amount, a_amt - fill);
-                assert_eq!(out_b.new_order_amount, b_amt - fill);
-                let scale = |v: u64, by_price: bool| if by_price { v * price } else { v };
-                assert_eq!(out_a.new_locked_amount, scale(a_amt - fill, !a_is_seller));
-                assert_eq!(out_b.new_locked_amount, scale(b_amt - fill, a_is_seller));
-                assert_eq!(out_a.recv_amount, scale(fill, a_is_seller));
-                assert_eq!(out_b.recv_amount, scale(fill, !a_is_seller));
-                // Fresh blindings: commitments must self-open.
-                outcome_opens(&out_a);
-                outcome_opens(&out_b);
-            }
-        }
+    fn scale_leg_bounds_and_scales() {
+        assert_eq!(scale_leg(60, false, 3, "x").unwrap(), 60);
+        assert_eq!(scale_leg(60, true, 3, "x").unwrap(), 180);
+        assert!(scale_leg(u64::MAX, true, 2, "x").is_err());
     }
 
-    /// Overflowing token2 scaling must be rejected, not wrapped.
+    /// The note commitment helper matches the wallet convention pinned by
+    /// spec/golden.json (leaf1: sk2's USDT note of 1_000_000 under r=0x34).
     #[test]
-    fn my_outputs_rejects_u64_overflow() {
-        // Buyer remainder scaled by price overflows u64.
-        let result = compute_my_outputs(u64::MAX, 1, 2, false, true);
-        assert!(result.is_err());
+    fn note_commit_matches_golden_leaf1() {
+        use crate::poseidon::{TAG_CM, hash2};
+        let _ = TAG_CM; // tag is baked into note_commit
+        // npk = P2(TAG_NPK=2, sk2), sk2 = 0x43 * 32 reduced.
+        let sk2 = Fr::from_be_bytes_mod_order(&[0x43u8; 32]);
+        let npk = hash2(Fr::from(2u64), sk2);
+        let usdt = asset_fr("USDT").unwrap();
+        let cm = note_commit(npk, usdt, 1_000_000, &[0x34u8; 32]);
+        // Golden value from spec/golden.json ("leaf1").
+        let golden: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../spec/golden.json"))
+                .expect("spec/golden.json must exist"),
+        )
+        .unwrap();
+        assert_eq!(fr_to_hex(&cm), golden["leaf1"].as_str().unwrap());
     }
 }
