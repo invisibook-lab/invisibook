@@ -499,9 +499,6 @@ func (ot *OrderBook) relistWithRemainder(
 	if err := ot.UpdateOrderMatchOrder(ord.ID, ""); err != nil {
 		return nil, nil, fmt.Errorf("failed to clear match order: %w", err)
 	}
-	if err := ot.UpdateOrderComparison(ord.ID, false); err != nil {
-		return nil, nil, fmt.Errorf("failed to reset comparison flag: %w", err)
-	}
 	if err := ot.UpdateOrderStatus(ord.ID, Pending); err != nil {
 		return nil, nil, fmt.Errorf("failed to relist order: %w", err)
 	}

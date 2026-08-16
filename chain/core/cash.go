@@ -59,13 +59,6 @@ type AccountRecord struct {
 	Cash   []*Cash `json:"cash"`
 }
 
-// ChangeOutput describes the change Cash that the client wants minted back
-// to themselves after a withdrawal.
-type ChangeOutput struct {
-	Pubkey string     `json:"pubkey" validate:"required"`
-	Amount CipherText `json:"amount" validate:"required"`
-}
-
 // ────────────────────── Helpers ──────────────────────
 
 // computeCashID derives a deterministic Cash ID from its contents: SHA256(pubkey + token + amount).
@@ -75,12 +68,4 @@ func computeCashID(pubkey string, token TokenID, amount CipherText) string {
 	h.Write([]byte(token))
 	h.Write([]byte(amount))
 	return fmt.Sprintf("%x", h.Sum(nil))
-}
-
-// verifyProof checks that the ZK proof stored on the Cash is valid,
-// authorising this output to be consumed.
-// TODO: implement actual ZK proof verification.
-func verifyProof(cash *Cash) error {
-	_ = cash // TODO: verify cash.ZkProof
-	return nil
 }

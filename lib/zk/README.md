@@ -21,8 +21,6 @@ wallet witness  →  gen_witness (node.js)  →  .wtns file
 | `deposit` | Prove bridged amount splits correctly into output cashes | `bridge_commitment`, `output_hashes[M]` |
 | `withdraw` | Prove input cashes cover the withdrawal + change | `bridge_out_commitment`, `input_hashes[N]`, `output_hashes[M]` |
 | `split` | Prove input cashes split into locked + change (SendOrder) | `input_hashes[N]`, `output_hashes[M]` |
-| `settle_larger` | Larger side of settlement (has change) | `my_match`, `other_match`, `price`, `is_token2_sender`, `input_hashes[N]`, `change`, `recv` |
-| `settle_smaller` | Smaller side of settlement (no change, fill == inputs) | `match_commitment`, `input_hashes[N]`, `recv` |
 
 All circuits use N=2 inputs and M=2 outputs (unused slots zero-padded with `Poseidon(0, 0)`).
 
@@ -35,8 +33,6 @@ use zk::wallet::{
     DepositWitness, prove_deposit,
     WithdrawWitness, prove_withdraw,
     SplitWitness, prove_split,
-    SettleLargerWitness, prove_settle_larger,
-    SettleSmallerWitness, prove_settle_smaller,
     poseidon_commit, fr_to_hex,
 };
 use zk::setup::dev_setup_snarkjs;
@@ -122,6 +118,4 @@ Located in `templates/`:
 - `deposit.circom` — deposit conservation + Poseidon binding
 - `withdraw.circom` — withdrawal conservation + bridge-out binding
 - `split.circom` — input/output conservation (SendOrder)
-- `settle_larger.circom` — larger-side settlement with change + cross-leg ratio check
-- `settle_smaller.circom` — smaller-side settlement (fill == inputs.sum)
 - `utils/` — shared components (poseidon, bitify, comparators)

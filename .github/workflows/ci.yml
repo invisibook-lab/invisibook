@@ -21,7 +21,6 @@ jobs:
       chain: ${{ steps.filter.outputs.chain }}
       lib: ${{ steps.filter.outputs.lib }}
       zk: ${{ steps.filter.outputs.zk }}
-      mpc: ${{ steps.filter.outputs.mpc }}
       cozk2p: ${{ steps.filter.outputs.cozk2p }}
       app: ${{ steps.filter.outputs.app }}
     steps:
@@ -36,8 +35,6 @@ jobs:
               - 'lib/chain/**'
             zk:
               - 'lib/zk/**'
-            mpc:
-              - 'lib/mpc/**'
             cozk2p:
               - 'cozk2p/**'
             app:
@@ -71,12 +68,12 @@ jobs:
         working-directory: chain
         run: go vet .
 
-  # ────────────────────── Rust: lib (chain + mpc) ──────────────────────
+  # ────────────────────── Rust: lib (chain + zk) ──────────────────────
   lib:
     name: Lib (Rust)
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.lib == 'true' || needs.changes.outputs.mpc == 'true' || needs.changes.outputs.zk == 'true'
+    if: needs.changes.outputs.lib == 'true' || needs.changes.outputs.zk == 'true'
     steps:
       - uses: actions/checkout@v4
 
