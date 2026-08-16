@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 dioxus = "0.7"
 hex = "0.4"
+sha2 = "0.10"
 invisibook-lib = { path = "../../lib/chain" }
 tokio = { version = "1", features = ["time", "net", "io-util", "process"] }
 serde = { version = "1", features = ["derive"] }

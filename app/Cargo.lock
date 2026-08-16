@@ -2469,6 +2469,7 @@ dependencies = [
 name = "invisibook-lib"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "ark-bn254",
  "ark-ff",
  "base64",
@@ -2510,6 +2511,7 @@ dependencies = [
  "invisibook-lib",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "zk",
 ]
