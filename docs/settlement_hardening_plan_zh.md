@@ -139,6 +139,27 @@ SPDZ 交互**,更简单。
 
 ---
 
+## 六点五、实施状态(2026-08-16)
+
+| 项 | 状态 | commit |
+|---|---|---|
+| **Phase A** cozk2p 重排:π_cmp + `confirm_compare_onchain` 钩子先于 reveal | ✅ 已实现 + `session_2p` 测试通过 | `025bc61` |
+| **Phase B** 链上原子 `SettlePair`(共享 verifySmallLeg/verifyLargeLeg) | ✅ 已实现 + `TestSettlePairAtomic` + 回归测试通过 | `1492a65` |
+| **Phase B** lib/chain `settle_pair` 客户端 + 序列化 lockstep 测试 | ✅ 已实现 + 测试通过 | `f27eb08` |
+| **Phase A** app 两段编排(消费 `compare_ready` → 上链 → 确认) | ⛔ **受阻** | — |
+| Phase B 对称化 settle_small / Phase C VI-D | ⏸ 延后 | — |
+
+**app 两段编排为何受阻:** app 当前**编译不过**——`trade_form` 仍用已删除的
+cash 字段(`input_cash_ids`/`handling_fee`/`is_smaller`)构造 `Order`,`settle.rs`
+的取证逻辑(`gather_locked_commitments`/`build_my_private`)整套建在 cash 模型上,
+且 `cozk2p` 的 `SessionInput`/`MyPrivate` 仍是 cash 形状(`my_input_cash_ids`、
+`locked: Vec<LockedCash>`)。两段编排必须先让 app 编译,而这等于把 **Phase 5 的
+cash→note 迁移**(SessionInput → settle.rs → trade_form → note store 级联)先做掉。
+这是一块独立的大工程,建议单独一轮专门做,不宜在本轮末尾仓促重写。
+
+已落地的 **F1(隐私泄露时序 bug)** 和 **F2(结算原子性)** 是本轮 review 的两个
+安全核心,均已实现并测试;它们在 chain/lib/cozk2p 层完整闭环,不依赖 app。
+
 ## 七、一句话总结
 
 F1 是必须马上修的真 bug(Phase A:reveal 挪到 SubmitCompare 之后,顺带把 settle 阶段
