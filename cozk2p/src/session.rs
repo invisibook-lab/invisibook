@@ -184,11 +184,37 @@ pub struct NeedSig {
     pub cmp: i8,
 }
 
-/// Host-side signature ferry. `request_sig` is called at most once per
-/// session, from a blocking context, and must return this trader's 128-char
-/// hex ed25519 signature over the canonical compare message.
+/// The compare artifacts handed to the host BEFORE any reveal, so the host
+/// can land the comparison on chain first. Carries everything a
+/// `SubmitCompare` writing needs: the proven `cmp`, π_cmp, and both
+/// signatures.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompareReady {
+    pub cmp: i8,
+    pub public: SettlePublic,
+    /// Hex of the ark-compressed PLONK π_cmp.
+    pub proof_hex: String,
+    pub sig_a: String,
+    pub sig_b: String,
+}
+
+/// Host-side ferry between the session and the chain.
+///
+/// `request_sig` is called at most once per session, from a blocking
+/// context, and must return this trader's 128-char hex ed25519 signature
+/// over the canonical compare message.
+///
+/// `confirm_compare_onchain` is called AFTER π_cmp + both signatures are
+/// ready but BEFORE the smaller side reveals its opening. The host MUST
+/// submit the comparison on chain and block until both orders are confirmed
+/// `Settling`; only then does it return `Ok`. Returning `Err` aborts the
+/// session before any secret leaves the process — no reveal, no on-chain
+/// trace, nothing to misattribute. This is the ordering that keeps a
+/// malicious larger side from extracting the smaller's quantity by aborting
+/// after the reveal (the reveal now never precedes the on-chain anchor).
 pub trait SigIo: Send {
     fn request_sig(&mut self, need: &NeedSig) -> Result<String>;
+    fn confirm_compare_onchain(&mut self, ready: &CompareReady) -> Result<()>;
 }
 
 /// Parse a 64-char hex string into 32 bytes. Rejects other lengths.
@@ -441,7 +467,70 @@ where
     let cmp = compare_three_way(&fabric, &v_a, &v_b).await?;
     emit("compare", &format!("cmp = {cmp}"));
 
-    // ── The smaller party reveals its opening (paper's sanctioned leak:
+    // ── Signature ferry + in-fabric exchange (over the compared result;
+    //    both run BEFORE the reveal so the compare can land on chain first) ──
+    emit("sig", "requesting compare signature from the host");
+    let my_sig = tokio::task::block_in_place(|| sig_io.request_sig(&NeedSig { cmp }))?;
+    let my_limbs = sig_to_scalars(&my_sig)?;
+    let dummy_limbs: Vec<Scalar<G1Projective>> = vec![zero; 4];
+    let pick_limbs = |owner_is_a: bool| {
+        if owner_is_a == i_am_a {
+            my_limbs.clone()
+        } else {
+            dummy_limbs.clone()
+        }
+    };
+    let limbs_a: Vec<Scalar<G1Projective>> = fabric.share_plaintext(pick_limbs(true), PARTY0).await;
+    let limbs_b: Vec<Scalar<G1Projective>> =
+        fabric.share_plaintext(pick_limbs(false), PARTY1).await;
+    let sig_a = scalars_to_sig(&limbs_a)?;
+    let sig_b = scalars_to_sig(&limbs_b)?;
+    let mine_sig = if i_am_a { &sig_a } else { &sig_b };
+    ensure!(
+        mine_sig == &my_sig,
+        "own signature did not round-trip through the fabric"
+    );
+
+    // ── Collaborative prove of π_cmp + verify-before-release ──
+    emit("prove", "collaboratively proving the comparison");
+    let public = SettlePublic {
+        cmp,
+        order_a: commitment_fr(&input.order_a, "order_a")?,
+        order_b: commitment_fr(&input.order_b, "order_b")?,
+    };
+    let side = SidePrivate {
+        order_amount: input.my.order_amount,
+        r_order: hex32(&input.my.r_order, "r_order")?,
+    };
+    let (proof, timings) =
+        prove_collaborative_timed(fabric.clone(), my_party, &side, &public, config.pk).await?;
+
+    emit("verify", "verifying the proof locally before release");
+    verify_settle(config.vk, &public, &proof)?;
+    let mut proof_bytes = Vec::new();
+    ark_serialize::CanonicalSerialize::serialize_compressed(&proof, &mut proof_bytes)
+        .context("serializing proof")?;
+    let proof_hex = hex::encode(proof_bytes);
+
+    // ── F1 gate: the reveal must NOT precede the compare landing ON-CHAIN.
+    //    The host submits SubmitCompare (π_cmp + both signatures) and BLOCKS
+    //    until both orders are confirmed Settling; only then may the smaller
+    //    side reveal. Nothing secret has left this process yet, so aborting
+    //    here leaks nothing and leaves no trace to misattribute. ──
+    let ready = CompareReady {
+        cmp,
+        public: public.clone(),
+        proof_hex: proof_hex.clone(),
+        sig_a: sig_a.clone(),
+        sig_b: sig_b.clone(),
+    };
+    emit(
+        "compare-onchain",
+        "landing the comparison on chain before any reveal",
+    );
+    tokio::task::block_in_place(|| sig_io.confirm_compare_onchain(&ready))?;
+
+    // ── The smaller party reveals its opening (compare is now ON-CHAIN;
     //    the larger side's π_B must open the smaller's commitment) ──
     let i_am_smaller = cmp == 0 || (cmp == 1) != i_am_a;
     let (fill, ctr_order_amount, ctr_r_order) = if cmp == 0 {
@@ -593,53 +682,10 @@ where
     // ── WAL v2: complete (my settle proof needs the counterparty's pair) ──
     write_wal(&my_outcome)?;
 
-    // ── Signature ferry + in-fabric exchange (before the prove) ──
-    emit("sig", "requesting compare signature from the host");
-    let my_sig = tokio::task::block_in_place(|| sig_io.request_sig(&NeedSig { cmp }))?;
-    let my_limbs = sig_to_scalars(&my_sig)?;
-    let dummy_limbs: Vec<Scalar<G1Projective>> = vec![zero; 4];
-    let pick_limbs = |owner_is_a: bool| {
-        if owner_is_a == i_am_a {
-            my_limbs.clone()
-        } else {
-            dummy_limbs.clone()
-        }
-    };
-    let limbs_a: Vec<Scalar<G1Projective>> = fabric.share_plaintext(pick_limbs(true), PARTY0).await;
-    let limbs_b: Vec<Scalar<G1Projective>> =
-        fabric.share_plaintext(pick_limbs(false), PARTY1).await;
-    let sig_a = scalars_to_sig(&limbs_a)?;
-    let sig_b = scalars_to_sig(&limbs_b)?;
-    let mine_sig = if i_am_a { &sig_a } else { &sig_b };
-    ensure!(
-        mine_sig == &my_sig,
-        "own signature did not round-trip through the fabric"
-    );
-
-    // ── Collaborative prove of π_cmp + verify-before-release ──
-    emit("prove", "collaboratively proving the comparison");
-    let public = SettlePublic {
-        cmp,
-        order_a: commitment_fr(&input.order_a, "order_a")?,
-        order_b: commitment_fr(&input.order_b, "order_b")?,
-    };
-    let side = SidePrivate {
-        order_amount: input.my.order_amount,
-        r_order: hex32(&input.my.r_order, "r_order")?,
-    };
-    let (proof, timings) =
-        prove_collaborative_timed(fabric.clone(), my_party, &side, &public, config.pk).await?;
-
-    emit("verify", "verifying the proof locally before release");
-    verify_settle(config.vk, &public, &proof)?;
-    let mut proof_bytes = Vec::new();
-    ark_serialize::CanonicalSerialize::serialize_compressed(&proof, &mut proof_bytes)
-        .context("serializing proof")?;
-
     Ok(SessionResult {
         cmp,
         public,
-        proof_hex: hex::encode(proof_bytes),
+        proof_hex,
         sig_a,
         sig_b,
         my: my_outcome,

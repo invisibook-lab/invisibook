@@ -3,9 +3,13 @@
 //! prove, local verify — everything crypto over one QUIC connection.
 //!
 //! The host app drives this binary over piped stdio:
-//! - stdout: JSON lines — `{"event":"phase","name":...,"msg":...}` progress,
-//!   one `{"event":"need_sig",...}` request, and a final `{"event":"done"}`.
-//! - stdin: exactly one line `{"sig":"<128-hex>"}` answering `need_sig`.
+//! - stdout: JSON lines — `{"event":"phase",...}` progress, one
+//!   `{"event":"need_sig",...}` request, one `{"event":"compare_ready",...}`
+//!   request (carries π_cmp + both sigs), and a final `{"event":"done"}`.
+//! - stdin: one line `{"sig":"<128-hex>"}` answering `need_sig`, then one
+//!   line `{"compare_confirmed":true}` after the host lands the compare on
+//!   chain. The reveal happens ONLY after that confirmation, so no secret
+//!   precedes the on-chain anchor.
 //!
 //! Files written to --out-dir: `witness.json` (crash-recovery record,
 //! written BEFORE the signature leaves this process), `result.json` (the
@@ -27,13 +31,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use ark_mpc::{MpcFabric, PARTY0, PARTY1, offline_prep::PartyIDBeaverSource};
 use clap::{Parser, ValueEnum};
 use cozk2p::{
     default_cache_dir, dev_keys,
     net::connect_retry,
-    session::{NeedSig, SessionConfig, SessionInput, SigIo, run_session, sanity_check_input},
+    session::{
+        CompareReady, NeedSig, SessionConfig, SessionInput, SigIo, run_session, sanity_check_input,
+    },
     stats::peak_rss_bytes,
 };
 use serde_json::json;
@@ -96,6 +102,24 @@ fn emit_phase(name: &str, msg: &str) {
 /// blocked reader thread is acceptable.
 struct StdioSigIo {
     timeout: Duration,
+    /// Window for the host to land the compare on chain and confirm — longer
+    /// than the signature window, since block confirmation can be slow.
+    compare_timeout: Duration,
+}
+
+/// Read one line from stdin with a timeout on a helper thread. The process
+/// exits soon after, so a lingering blocked reader is acceptable.
+fn read_stdin_line(timeout: Duration, what: &str) -> Result<String> {
+    let (tx, rx) = mpsc::channel::<std::io::Result<String>>();
+    thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        let result = stdin.lock().read_line(&mut line).map(|_| line);
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(timeout)
+        .map_err(|_| anyhow!("timed out waiting for the host: {what}"))?
+        .with_context(|| format!("reading {what} from stdin"))
 }
 
 impl SigIo for StdioSigIo {
@@ -105,19 +129,7 @@ impl SigIo for StdioSigIo {
             "event": "need_sig",
             "cmp": need.cmp,
         }));
-
-        let (tx, rx) = mpsc::channel::<std::io::Result<String>>();
-        thread::spawn(move || {
-            let stdin = std::io::stdin();
-            let mut line = String::new();
-            let result = stdin.lock().read_line(&mut line).map(|_| line);
-            let _ = tx.send(result);
-        });
-        let line = rx
-            .recv_timeout(self.timeout)
-            .map_err(|_| anyhow!("timed out waiting for the host to provide a signature"))?
-            .context("reading signature from stdin")?;
-
+        let line = read_stdin_line(self.timeout, "a signature")?;
         #[derive(serde::Deserialize)]
         struct SigLine {
             sig: String,
@@ -125,6 +137,29 @@ impl SigIo for StdioSigIo {
         let parsed: SigLine =
             serde_json::from_str(line.trim()).context("parsing signature line from host")?;
         Ok(parsed.sig)
+    }
+
+    /// Hand the compare artifacts to the host and BLOCK until it confirms the
+    /// comparison landed on chain (both orders Settling). Only then does the
+    /// session proceed to the reveal, so no secret precedes the on-chain
+    /// anchor.
+    fn confirm_compare_onchain(&mut self, ready: &CompareReady) -> Result<()> {
+        emit_line(json!({
+            "event": "compare_ready",
+            "ready": ready,
+        }));
+        let line = read_stdin_line(self.compare_timeout, "the compare on-chain confirmation")?;
+        #[derive(serde::Deserialize)]
+        struct ConfirmLine {
+            compare_confirmed: bool,
+        }
+        let parsed: ConfirmLine = serde_json::from_str(line.trim())
+            .context("parsing compare confirmation line from host")?;
+        ensure!(
+            parsed.compare_confirmed,
+            "host reported the compare did not land on chain — aborting before any reveal"
+        );
+        Ok(())
     }
 }
 
@@ -175,6 +210,7 @@ async fn main() -> Result<()> {
 
     let mut sig_io = StdioSigIo {
         timeout: Duration::from_secs(120),
+        compare_timeout: Duration::from_secs(300),
     };
     let result = run_session(
         fabric,
