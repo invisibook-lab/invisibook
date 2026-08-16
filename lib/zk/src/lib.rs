@@ -632,4 +632,72 @@ mod tests {
         let params = cached_params("settle_cozk");
         assert!(generate_proof::<Bn254>("settle_cozk", &input, params).is_err());
     }
+
+    // ────────────────────── Note golden vectors ──────────────────────
+
+    /// The circom leg of the three-language golden-vector gate
+    /// (`spec/golden.json`): witness generation for `note_golden.circom`
+    /// succeeds iff every note derivation — keys, commitment chain, Merkle
+    /// root/index, position-bound nullifier, dummy nullifier — matches the
+    /// values Go and Rust pin.
+    #[test]
+    fn note_golden_vectors_hold_in_circom() {
+        use crate::{test_circuit::TestCircuitHandle, wallet::hex_to_fr};
+
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../spec/golden.json"
+        ))
+        .expect("spec/golden.json must exist");
+        let g: serde_json::Value = serde_json::from_str(&raw).expect("golden.json must parse");
+
+        let dec_of_hex =
+            |hex: &str| fr_to_decimal_string(&hex_to_fr(hex).expect("golden hex must parse"));
+        let dec_of_key = |key: &str| dec_of_hex(g[key].as_str().expect(key));
+        let dec_of_rep = |b: u8| fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&[b; 32]));
+
+        let path: Vec<String> = g["path_leaf1"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| dec_of_hex(v.as_str().unwrap()))
+            .collect();
+        let bits: Vec<String> = g["bits_leaf1"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i64().unwrap().to_string())
+            .collect();
+
+        let input = serde_json::json!({
+            "sk1": dec_of_rep(0x42),
+            "sk2": dec_of_rep(0x43),
+            "asset_usdt": dec_of_key("asset_usdt"),
+            "r1": dec_of_rep(0x34),
+            "path": path,
+            "path_bits": bits,
+            "sk_dummy": dec_of_rep(0x66),
+            "rho_dummy": dec_of_rep(0x77),
+            "want_nk1": dec_of_key("nk1"),
+            "want_npk1": dec_of_key("npk1"),
+            "want_leaf1": dec_of_key("leaf1"),
+            "want_root": dec_of_key("root_after_3"),
+            "want_nf1": dec_of_key("nf_leaf1"),
+            "want_nf_dummy": dec_of_key("nf_dummy"),
+        });
+
+        let dir = compile_circuit("note_golden").expect("note_golden must compile");
+        let handle = TestCircuitHandle::from_compiled(&dir).expect("circuit handle");
+        handle
+            .gen_witness(&input)
+            .expect("golden values must satisfy every note constraint");
+
+        // A tampered expectation must be rejected by the constraints.
+        let mut bad = input.clone();
+        bad["want_nf1"] = serde_json::json!("1");
+        assert!(
+            handle.gen_witness(&bad).is_err(),
+            "a wrong nullifier expectation must fail witness generation"
+        );
+    }
 }
