@@ -170,6 +170,68 @@ pub struct SettleLargeParams {
     pub zk_proof: String,
 }
 
+/// One leg of a `SettlePair` — mirror of Go `SettlePairLeg`. The residual
+/// fields are set ONLY for the larger side (π_B); a fully filled leg (π_A,
+/// and both legs when cmp == 0) leaves them empty, and they are omitted from
+/// the wire JSON to match the Go `omitempty` tags. Each leg carries its own
+/// owner signature (over the SettleSmall/SettleLarge message), so a pair
+/// needs no new signed message.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlePairLegParams {
+    pub cm_note_out: String,
+    pub signature: String,
+    pub zk_proof: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub cm_q_residual: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub cm_locked_residual: String,
+}
+
+impl SettlePairLegParams {
+    /// A fully filled leg (π_A): the whole collateral transfers as one note;
+    /// no residual. `signature` is over the SettleSmall message.
+    pub fn small(cm_note_out: String, signature: String, zk_proof: String) -> Self {
+        Self {
+            cm_note_out,
+            signature,
+            zk_proof,
+            cm_q_residual: String::new(),
+            cm_locked_residual: String::new(),
+        }
+    }
+
+    /// A larger leg (π_B): pays the fill as a note and relists the residual.
+    /// `signature` is over the SettleLarge message.
+    pub fn large(
+        cm_note_out: String,
+        cm_q_residual: String,
+        cm_locked_residual: String,
+        signature: String,
+        zk_proof: String,
+    ) -> Self {
+        Self {
+            cm_note_out,
+            signature,
+            zk_proof,
+            cm_q_residual,
+            cm_locked_residual,
+        }
+    }
+}
+
+/// Mirror of chain Go `SettlePairRequest` — settles BOTH sides of a matched
+/// pair in one atomic writing (both proofs verified, both payout notes minted
+/// together, so neither side is paid without the other). A/B are the
+/// canonical maker/taker order ids; the recorded cmp decides which leg is
+/// the larger one.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlePairParams {
+    pub order_a_id: OrderID,
+    pub order_b_id: OrderID,
+    pub a: SettlePairLegParams,
+    pub b: SettlePairLegParams,
+}
+
 /// Length-prefixed settle signing message, lockstep with Go
 /// `core.settleSigMessage`.
 fn settle_sig_message(domain: &str, fields: &[&str]) -> Vec<u8> {
@@ -563,6 +625,20 @@ impl ChainClient {
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.client
             .write_chain("orderbook", "SettleLarge", params, self.chain_id, 100, 0)
+            .await
+    }
+
+    /// Submits BOTH sides' settlements as one atomic `SettlePair` writing —
+    /// either the whole pair settles or nothing does. The two legs' proofs
+    /// and per-leg signatures are exchanged over the settlement channel, then
+    /// either party submits the pair. Use in place of the separate
+    /// settle_small / settle_large writings to close the fair-exchange gap.
+    pub async fn settle_pair(
+        &self,
+        params: &SettlePairParams,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.client
+            .write_chain("orderbook", "SettlePair", params, self.chain_id, 100, 0)
             .await
     }
 
@@ -1160,6 +1236,43 @@ mod tests {
             zk_proof: String::new(),
         };
         assert_ne!(settle_large_message(&large), settle_small_message(&small));
+    }
+
+    /// SettlePair wire JSON must match the Go request: a fully filled leg
+    /// omits the residual fields (Go `omitempty`), a larger leg includes
+    /// them, and the field names line up with the Go json tags.
+    #[test]
+    fn settle_pair_leg_json_lockstep() {
+        let small = SettlePairLegParams::small("11".repeat(32), "sig-b".into(), "pf".into());
+        let sj = serde_json::to_value(&small).unwrap();
+        assert!(sj.get("cm_q_residual").is_none(), "small leg must omit residual q");
+        assert!(
+            sj.get("cm_locked_residual").is_none(),
+            "small leg must omit residual collateral"
+        );
+        assert_eq!(sj["cm_note_out"], "11".repeat(32));
+
+        let large = SettlePairLegParams::large(
+            "22".repeat(32),
+            "33".repeat(32),
+            "44".repeat(32),
+            "sig-a".into(),
+            "pf".into(),
+        );
+        let lj = serde_json::to_value(&large).unwrap();
+        assert_eq!(lj["cm_q_residual"], "33".repeat(32));
+        assert_eq!(lj["cm_locked_residual"], "44".repeat(32));
+
+        let pair = SettlePairParams {
+            order_a_id: "order-a".into(),
+            order_b_id: "order-b".into(),
+            a: large,
+            b: small,
+        };
+        let pj = serde_json::to_value(&pair).unwrap();
+        assert_eq!(pj["order_a_id"], "order-a");
+        assert_eq!(pj["order_b_id"], "order-b");
+        assert!(pj.get("a").is_some() && pj.get("b").is_some());
     }
 
     /// sign_compare_cozk2p output must verify under verify_compare_cozk2p_sig,
