@@ -208,9 +208,9 @@ async fn settle_e2e_relist() {
 
     // ── Genesis collateral commitments (opened by the local CashRecords) ──
     // Alice sells 2 ETH: BOTH her locked ETH cash and her sell order commit to
-    // (amount = 2, r_eth). The co-zk seller witness (build_my_private) opens
-    // the order commitment with the LOCKED CASH's own random — so the order
-    // amount must equal the locked-cash commitment here, not a fresh one.
+    // (amount = 2, r_eth) — the genesis-sale convention where order.amount
+    // reuses the cash's own commitment. The order witness is still carried
+    // explicitly on the CashRecord (build_my_private requires it).
     let (alice_eth_commitment, _, r_eth) = orderbook::encrypt_amount_with_info("2");
     let alice_eth_cash_id =
         orderbook::compute_cash_id(&alice_pubkey, TOKEN1, &alice_eth_commitment);
@@ -327,12 +327,12 @@ async fn settle_e2e_relist() {
         cash_id: alice_eth_cash_id.clone(),
         token: TOKEN1.into(),
         amount: 2,
-        random: r_eth,
+        random: r_eth.clone(),
         status: CASH_LOCKED,
-        // Sell: the order commitment is opened with the cash's own random, so
-        // no separate order witness is carried.
-        order_amount: None,
-        order_random: None,
+        // Sell: order.amount reuses the cash's own (amount, random) here, but
+        // the witness must still be carried explicitly.
+        order_amount: Some(2),
+        order_random: Some(r_eth),
     }];
     let bob_records = vec![CashRecord {
         cash_id: bob_usdt_cash_id.clone(),

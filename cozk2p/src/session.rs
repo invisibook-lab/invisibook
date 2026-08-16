@@ -389,6 +389,13 @@ async fn open_expect_zero(v: &AuthenticatedScalarResult<G1Projective>, what: &st
     Ok(())
 }
 
+/// Session configuration bundled to reduce function argument count.
+pub struct SessionConfig<'a> {
+    pub pk: &'a ProvingKey<Bn254>,
+    pub vk: &'a VerifyingKey<Bn254>,
+    pub out_dir: &'a Path,
+}
+
 /// Run the full settlement session on an established fabric. `my_party`
 /// must match `input.role` (PARTY0 for trader-a). `sig_io` ferries the
 /// one signature request to the host app. `witness.json` is written into
@@ -399,9 +406,7 @@ pub async fn run_session<F>(
     my_party: u64,
     input: &SessionInput,
     sig_io: &mut dyn SigIo,
-    pk: &ProvingKey<Bn254>,
-    vk: &VerifyingKey<Bn254>,
-    out_dir: &Path,
+    config: SessionConfig<'_>,
     mut emit: F,
 ) -> Result<SessionResult>
 where
@@ -444,8 +449,8 @@ where
 
     let order_a_pub = Scalar::new(commitment_fr(&input.order_a, "order_a")?);
     let order_b_pub = Scalar::new(commitment_fr(&input.order_b, "order_b")?);
-    let bind_a = &poseidon_hash(&fabric, &v_a, &r_a) - &order_a_pub;
-    let bind_b = &poseidon_hash(&fabric, &v_b, &r_b) - &order_b_pub;
+    let bind_a = &poseidon_hash(&fabric, &v_a, &r_a) - order_a_pub;
+    let bind_b = &poseidon_hash(&fabric, &v_b, &r_b) - order_b_pub;
     open_expect_zero(&bind_a, "order A commitment binding").await?;
     open_expect_zero(&bind_b, "order B commitment binding").await?;
 
@@ -470,7 +475,7 @@ where
         // reveal aborts here, not as an unsatisfiable circuit after the
         // expensive prove.
         let v_smaller = if cmp == 1 { &v_b } else { &v_a };
-        let diff = v_smaller - &revealed;
+        let diff = v_smaller - revealed;
         open_expect_zero(&diff, "fill reveal consistency").await?;
         if i_am_smaller {
             input.my.order_amount
@@ -564,8 +569,8 @@ where
         recv_b: fr_to_hex(&public.recv_b),
         my: my_outcome.clone(),
     };
-    fs::create_dir_all(out_dir).context("creating session out dir")?;
-    let witness_path = out_dir.join("witness.json");
+    fs::create_dir_all(config.out_dir).context("creating session out dir")?;
+    let witness_path = config.out_dir.join("witness.json");
     fs::write(&witness_path, serde_json::to_string_pretty(&witness)?)
         .context("writing witness.json")?;
 
@@ -617,10 +622,10 @@ where
         r_recv,
     };
     let (proof, timings) =
-        prove_collaborative_timed(fabric.clone(), my_party, &side, &public, pk).await?;
+        prove_collaborative_timed(fabric.clone(), my_party, &side, &public, config.pk).await?;
 
     emit("verify", "verifying the proof locally before release");
-    verify_settle(vk, &public, &proof)?;
+    verify_settle(config.vk, &public, &proof)?;
     let mut proof_bytes = Vec::new();
     ark_serialize::CanonicalSerialize::serialize_compressed(&proof, &mut proof_bytes)
         .context("serializing proof")?;

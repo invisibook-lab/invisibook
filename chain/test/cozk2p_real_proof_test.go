@@ -115,34 +115,18 @@ amount = %q
 
 	// --- Send both orders at the fixture's execution price; alice first so
 	// her sell is the maker (order A / circuit a-side, the seller) ---
-	sellOrderID := core.ComputeOrderID([]string{aliceCashID})
-	if err := wrCall("orderbook", "SendOrder", map[string]any{
-		"id":             sellOrderID,
-		"type":           1, // Sell
-		"subject":        map[string]string{"token1": "ETH", "token2": "USDT"},
-		"price":          fx.Price,
-		"amount":         fx.OrderACommitmentHex,
-		"pubkey":         alicePubkey,
-		"signature":      signOrderID(alicePriv, string(sellOrderID)),
-		"input_cash_ids": []string{aliceCashID},
-		"handling_fee":   []string{"0"},
-	}); err != nil {
+	sellReq := signedSendOrder(alicePriv, core.Sell, "ETH", "USDT",
+		fx.Price, fx.OrderACommitmentHex, alicePubkey, []string{aliceCashID})
+	sellOrderID := sellReq.ID
+	if err := wrCall("orderbook", "SendOrder", sellReq); err != nil {
 		t.Fatalf("SendOrder (sell) failed: %v", err)
 	}
 	waitBlock()
 
-	buyOrderID := core.ComputeOrderID([]string{bobCashID})
-	if err := wrCall("orderbook", "SendOrder", map[string]any{
-		"id":             buyOrderID,
-		"type":           0, // Buy
-		"subject":        map[string]string{"token1": "ETH", "token2": "USDT"},
-		"price":          fx.Price,
-		"amount":         fx.OrderBCommitmentHex,
-		"pubkey":         bobPubkey,
-		"signature":      signOrderID(bobPriv, string(buyOrderID)),
-		"input_cash_ids": []string{bobCashID},
-		"handling_fee":   []string{"0"},
-	}); err != nil {
+	buyReq := signedSendOrder(bobPriv, core.Buy, "ETH", "USDT",
+		fx.Price, fx.OrderBCommitmentHex, bobPubkey, []string{bobCashID})
+	buyOrderID := buyReq.ID
+	if err := wrCall("orderbook", "SendOrder", buyReq); err != nil {
 		t.Fatalf("SendOrder (buy) failed: %v", err)
 	}
 	waitBlock()

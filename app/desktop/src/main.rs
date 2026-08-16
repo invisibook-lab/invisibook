@@ -241,6 +241,10 @@ fn App() -> Element {
                                 true,
                             )));
                         }
+                        Err(settle::SettleError::Unrecoverable(m)) => {
+                            unsettleable_ids.write().insert(order_id.clone());
+                            message.set(Some((format!("⚠ {short}: {m}"), true)));
+                        }
                         Err(e) => {
                             retry_after.write().insert(
                                 order_id.clone(),

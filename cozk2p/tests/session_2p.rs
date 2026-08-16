@@ -11,7 +11,7 @@ use ark_serialize::CanonicalDeserialize;
 use cozk2p::{
     dev_keys,
     poseidon::{commit, fr_to_hex},
-    session::{LockedCash, MyPrivate, NeedSig, SessionInput, SigIo, run_session},
+    session::{LockedCash, MyPrivate, NeedSig, SessionConfig, SessionInput, SigIo, run_session},
     verify_settle,
 };
 use mpc_plonk::proof_system::structs::Proof;
@@ -124,9 +124,11 @@ async fn session_happy_path() {
                 party,
                 &input,
                 &mut sig_io,
-                &pk,
-                &vk,
-                &dir,
+                SessionConfig {
+                    pk: &pk,
+                    vk: &vk,
+                    out_dir: &dir,
+                },
                 |_, _| {},
             )
             .await
@@ -221,9 +223,11 @@ async fn session_aborts_on_divergent_statement() {
                 party,
                 &input,
                 &mut sig_io,
-                &pk,
-                &vk,
-                &dir,
+                SessionConfig {
+                    pk: &pk,
+                    vk: &vk,
+                    out_dir: &dir,
+                },
                 |_, _| {},
             )
             .await;

@@ -106,8 +106,9 @@ type CashChangeOutput struct {
 }
 
 // SendOrderRequest is the JSON payload accepted by SendOrder. The client
-// pre-computes the order ID (SHA-256 over input cash IDs), signs it with their
-// ed25519 key, and lists the input Cash they want to lock or split.
+// pre-computes the order ID (SHA-256 over input cash IDs), ed25519-signs the
+// canonical signing message covering every field (see SendOrderSigningMessage),
+// and lists the input Cash they want to lock or split.
 //
 // `ZkProof` is required only in split mode (when `Change != nil`): it proves
 // `sum(input_commitments) == sum(output_commitments)` where outputs are
@@ -120,8 +121,8 @@ type SendOrderRequest struct {
 	Price        *big.Int          `json:"price,omitempty"`
 	Amount       CipherText        `json:"amount"         validate:"required"`
 	Pubkey       string            `json:"pubkey"         validate:"required"` // sender's ed25519 pubkey (64-char hex)
-	Signature    string            `json:"signature"      validate:"required"` // ed25519 sig over order ID bytes (128-char hex)
-	InputCashIDs []string          `json:"input_cash_ids" validate:"required,min=1,max=2"`
+	Signature    string            `json:"signature"      validate:"required"` // ed25519 sig over SendOrderSigningMessage (128-char hex)
+	InputCashIDs []string          `json:"input_cash_ids" validate:"required,min=1,max=2,unique"`
 	HandlingFee  []string          `json:"handling_fee"   validate:"required,min=1"` // must be plaintext.
 	Change       *CashChangeOutput `json:"change,omitempty"`
 	ZkProof      string            `json:"zk_proof,omitempty"` // required when Change != nil
@@ -179,7 +180,11 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 		return fmt.Errorf("order ID mismatch: got %s, expected %s", req.ID, expectedID)
 	}
 
-	// Verify the sender's ed25519 signature over the order ID bytes.
+	// Verify the sender's ed25519 signature over the canonical signing message.
+	// The message covers every request field (price, pair, amount, fees, change,
+	// ...), not just the order ID — otherwise any observer could resubmit the
+	// signed ID with altered fields and open an attacker-priced order backed by
+	// the victim's cash.
 	pubkeyBytes, err := hex.DecodeString(req.Pubkey)
 	if err != nil || len(pubkeyBytes) != ed25519.PublicKeySize {
 		return fmt.Errorf("invalid pubkey: must be %d-byte ed25519 key as 64-char hex", ed25519.PublicKeySize)
@@ -188,7 +193,7 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	if err != nil || len(sigBytes) != ed25519.SignatureSize {
 		return fmt.Errorf("invalid signature: must be %d-byte ed25519 sig as 128-char hex", ed25519.SignatureSize)
 	}
-	if !ed25519.Verify(pubkeyBytes, []byte(req.ID), sigBytes) {
+	if !ed25519.Verify(pubkeyBytes, SendOrderSigningMessage(req), sigBytes) {
 		return fmt.Errorf("signature verification failed for order %s", req.ID)
 	}
 

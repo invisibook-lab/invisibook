@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"os"
 	"os/exec"
@@ -42,10 +43,25 @@ func deriveKeypair(t *testing.T, seedHex string) (ed25519.PrivateKey, string) {
 	return priv, pubHex
 }
 
-// signOrderID signs the order ID string with the given private key and returns a hex signature.
-func signOrderID(priv ed25519.PrivateKey, orderID string) string {
-	sig := ed25519.Sign(priv, []byte(orderID))
-	return hex.EncodeToString(sig)
+// signedSendOrder builds a SendOrderRequest whose ID derives from
+// `inputCashIDs`, then signs the canonical signing message (which covers
+// every field, see core.SendOrderSigningMessage) with `priv`. The returned
+// request serializes to the exact JSON payload SendOrder expects.
+// `price` must be non-zero (all tests trade at an explicit price).
+func signedSendOrder(priv ed25519.PrivateKey, tradeType core.TradeType, token1, token2 string,
+	price uint64, amount, pubkey string, inputCashIDs []string) *core.SendOrderRequest {
+	req := &core.SendOrderRequest{
+		ID:           core.ComputeOrderID(inputCashIDs),
+		Type:         tradeType,
+		Subject:      core.TradePair{Token1: core.TokenID(token1), Token2: core.TokenID(token2)},
+		Price:        new(big.Int).SetUint64(price),
+		Amount:       core.CipherText(amount),
+		Pubkey:       pubkey,
+		InputCashIDs: inputCashIDs,
+		HandlingFee:  []string{"0"},
+	}
+	req.Signature = hex.EncodeToString(ed25519.Sign(priv, core.SendOrderSigningMessage(req)))
+	return req
 }
 
 // ────────────────────── yu HTTP helpers ──────────────────────
@@ -217,21 +233,12 @@ func TestFullOrderLifecycle(t *testing.T) {
 	// ═══════════════════ Step 2: Alice sells 1 ETH at price 3500 ═══════════════════
 	t.Log("=== Step 2: Alice sells ETH/USDT at price 3500 ===")
 
-	sellOrderID := core.ComputeOrderID([]string{aliceETHCashID})
+	sellReq := signedSendOrder(alicePriv, core.Sell, "ETH", "USDT",
+		3500, "1000", alicePubkey, []string{aliceETHCashID})
+	sellOrderID := sellReq.ID
 	t.Logf("  sell order ID: %s", sellOrderID)
-	sellSig := signOrderID(alicePriv, string(sellOrderID))
 
-	err = wrCall("orderbook", "SendOrder", map[string]any{
-		"id":             sellOrderID,
-		"type":           1, // Sell
-		"subject":        map[string]string{"token1": "ETH", "token2": "USDT"},
-		"price":          3500,
-		"amount":         "1000",
-		"pubkey":         alicePubkey,
-		"signature":      sellSig,
-		"input_cash_ids": []string{aliceETHCashID},
-		"handling_fee":   []string{"0"},
-	})
+	err = wrCall("orderbook", "SendOrder", sellReq)
 	if err != nil {
 		t.Fatalf("SendOrder (sell) failed: %v", err)
 	}
@@ -261,21 +268,12 @@ func TestFullOrderLifecycle(t *testing.T) {
 	// ═══════════════════ Step 3: Bob buys ETH/USDT at price 3500 → match! ═══════════════════
 	t.Log("=== Step 3: Bob buys ETH/USDT at price 3500 (should match) ===")
 
-	buyOrderID := core.ComputeOrderID([]string{bobUSDTCashID})
+	buyReq := signedSendOrder(bobPriv, core.Buy, "ETH", "USDT",
+		3500, "500000", bobPubkey, []string{bobUSDTCashID})
+	buyOrderID := buyReq.ID
 	t.Logf("  buy order ID: %s", buyOrderID)
-	buySig := signOrderID(bobPriv, string(buyOrderID))
 
-	err = wrCall("orderbook", "SendOrder", map[string]any{
-		"id":             buyOrderID,
-		"type":           0, // Buy
-		"subject":        map[string]string{"token1": "ETH", "token2": "USDT"},
-		"price":          3500,
-		"amount":         "500000",
-		"pubkey":         bobPubkey,
-		"signature":      buySig,
-		"input_cash_ids": []string{bobUSDTCashID},
-		"handling_fee":   []string{"0"},
-	})
+	err = wrCall("orderbook", "SendOrder", buyReq)
 	if err != nil {
 		t.Fatalf("SendOrder (buy) failed: %v", err)
 	}
@@ -633,18 +631,18 @@ func buildTestMpcShares(t *testing.T) (map[string]string, map[string]string) {
 	// r_smaller_mac_A + r_smaller_mac_B = delta * r_smaller = 18 * 42 = 756
 	// Let r_smaller_mac_A = 356, r_smaller_mac_B = 400
 	alice := map[string]string{
-		"cmp_share":        "0",
-		"cmp_mac":          "8",
-		"r_smaller_share":  "42",
-		"r_smaller_mac":    "356",
-		"mac_key_share":    "7",
+		"cmp_share":       "0",
+		"cmp_mac":         "8",
+		"r_smaller_share": "42",
+		"r_smaller_mac":   "356",
+		"mac_key_share":   "7",
 	}
 	bob := map[string]string{
-		"cmp_share":        "1",
-		"cmp_mac":          "10",
-		"r_smaller_share":  "0",
-		"r_smaller_mac":    "400",
-		"mac_key_share":    "11",
+		"cmp_share":       "1",
+		"cmp_mac":         "10",
+		"r_smaller_share": "0",
+		"r_smaller_mac":   "400",
+		"mac_key_share":   "11",
 	}
 	return alice, bob
 }

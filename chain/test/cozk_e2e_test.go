@@ -85,34 +85,18 @@ func runCoZkSettleLifecycle(
 	}
 	bobUSDTCashID := bobUSDT[0].ID
 
-	sellOrderID := core.ComputeOrderID([]string{aliceETHCashID})
-	if err := wrCall("orderbook", "SendOrder", map[string]any{
-		"id":             sellOrderID,
-		"type":           1, // Sell
-		"subject":        map[string]string{"token1": "ETH", "token2": "USDT"},
-		"price":          3500,
-		"amount":         hexCommit(0xAA),
-		"pubkey":         alicePubkey,
-		"signature":      signOrderID(alicePriv, string(sellOrderID)),
-		"input_cash_ids": []string{aliceETHCashID},
-		"handling_fee":   []string{"0"},
-	}); err != nil {
+	sellReq := signedSendOrder(alicePriv, core.Sell, "ETH", "USDT",
+		3500, hexCommit(0xAA), alicePubkey, []string{aliceETHCashID})
+	sellOrderID := sellReq.ID
+	if err := wrCall("orderbook", "SendOrder", sellReq); err != nil {
 		t.Fatalf("SendOrder (sell) failed: %v", err)
 	}
 	waitBlock()
 
-	buyOrderID := core.ComputeOrderID([]string{bobUSDTCashID})
-	if err := wrCall("orderbook", "SendOrder", map[string]any{
-		"id":             buyOrderID,
-		"type":           0, // Buy
-		"subject":        map[string]string{"token1": "ETH", "token2": "USDT"},
-		"price":          3500,
-		"amount":         hexCommit(0xBB),
-		"pubkey":         bobPubkey,
-		"signature":      signOrderID(bobPriv, string(buyOrderID)),
-		"input_cash_ids": []string{bobUSDTCashID},
-		"handling_fee":   []string{"0"},
-	}); err != nil {
+	buyReq := signedSendOrder(bobPriv, core.Buy, "ETH", "USDT",
+		3500, hexCommit(0xBB), bobPubkey, []string{bobUSDTCashID})
+	buyOrderID := buyReq.ID
+	if err := wrCall("orderbook", "SendOrder", buyReq); err != nil {
 		t.Fatalf("SendOrder (buy) failed: %v", err)
 	}
 	waitBlock()

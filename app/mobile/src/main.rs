@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use dioxus::prelude::*;
 
@@ -45,6 +48,8 @@ fn App() -> Element {
 
     let mut orders = use_signal(Vec::<Order>::new);
     let own_order_ids = use_signal(HashMap::<OrderID, String>::new);
+    // Mobile has no settlement flow yet, so no order is ever marked settling.
+    let settling_ids = use_signal(HashSet::<OrderID>::new);
     let selected = use_signal(|| None::<usize>);
     let expanded = use_signal(|| None::<usize>);
     let message = use_signal(|| None::<(String, bool)>);
@@ -96,7 +101,15 @@ fn App() -> Element {
 
             div { class: "main",
                 if *active_tab.read() == Tab::OrderBook {
-                    OrderBook { orders, own_order_ids, selected, expanded }
+                    OrderBook {
+                        orders,
+                        own_order_ids,
+                        selected,
+                        expanded,
+                        settling_ids,
+                        // Mobile has no settlement flow yet: the settle button is inert.
+                        on_settle: move |_order_id: OrderID| {},
+                    }
                 } else {
                     TradeForm { orders, own_order_ids, expanded, message, chain_client: client, my_address, cash_store }
                 }
