@@ -19,3 +19,4 @@ invisibook
 
 # Dev dual-instance test data
 .dev/
+chain/cfg/tests/pool_e2e_test.toml

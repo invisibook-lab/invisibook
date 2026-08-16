@@ -338,6 +338,52 @@ struct WithdrawParams {
     zk_proof: String,
 }
 
+/// Mirror of chain Go `NoteDepositRequest` (shielded pool).
+#[derive(Debug, Serialize)]
+struct NoteDepositParams {
+    token: String,
+    bridge_commitment: String,
+    output_commitment: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    bridge_sig: String,
+    zk_proof: String,
+}
+
+/// Mirror of chain Go `NoteWithdrawRequest` (shielded pool).
+#[derive(Debug, Serialize)]
+struct NoteWithdrawParams {
+    token: String,
+    anchor: String,
+    nullifiers: Vec<String>,
+    bridge_out_commitment: String,
+    change_commitment: String,
+    zk_proof: String,
+}
+
+/// One leaf in a GetNotes response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NoteLeaf {
+    pub leaf_index: u64,
+    pub cm: String,
+    pub height: u64,
+}
+
+/// GetNotes response: leaves plus the pool head for cross-checking the
+/// client-side tree root after syncing.
+#[derive(Debug, Deserialize)]
+pub struct NotesResponse {
+    pub leaf_count: u64,
+    pub latest_root: String,
+    pub notes: Vec<NoteLeaf>,
+}
+
+/// GetPoolInfo response.
+#[derive(Debug, Deserialize)]
+pub struct PoolInfoResponse {
+    pub leaf_count: u64,
+    pub latest_root: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct AccountResponse {
     pubkey: String,
@@ -824,6 +870,118 @@ impl ChainClient {
             );
             Ok(Some((change_cash_id, hex::encode(change_random))))
         }
+    }
+
+    // ────────────────────── Shielded pool ──────────────────────
+
+    /// Submits a NoteDeposit writing: mint one shielded note from a bridged
+    /// value. The caller pre-computes the commitments and proof (see
+    /// `note_prover::prove_note_deposit`) and MUST have durably persisted
+    /// the note's opening before calling (persist-before-publish).
+    pub async fn note_deposit(
+        &self,
+        token: &str,
+        bridge_commitment_hex: &str,
+        output_commitment_hex: &str,
+        bridge_sig_hex: &str,
+        zk_proof_json: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let params = NoteDepositParams {
+            token: token.to_string(),
+            bridge_commitment: bridge_commitment_hex.to_string(),
+            output_commitment: output_commitment_hex.to_string(),
+            bridge_sig: bridge_sig_hex.to_string(),
+            zk_proof: zk_proof_json.to_string(),
+        };
+        self.client
+            .write_chain("account", "NoteDeposit", &params, self.chain_id, 100, 0)
+            .await
+    }
+
+    /// Submits a NoteWithdraw writing: spend two note slots, withdraw
+    /// through the bridge, mint the change note. Same persist-before-publish
+    /// obligation for the change note's opening.
+    pub async fn note_withdraw(
+        &self,
+        token: &str,
+        anchor_hex: &str,
+        nullifiers_hex: [String; 2],
+        bridge_out_commitment_hex: &str,
+        change_commitment_hex: &str,
+        zk_proof_json: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let params = NoteWithdrawParams {
+            token: token.to_string(),
+            anchor: anchor_hex.to_string(),
+            nullifiers: nullifiers_hex.to_vec(),
+            bridge_out_commitment: bridge_out_commitment_hex.to_string(),
+            change_commitment: change_commitment_hex.to_string(),
+            zk_proof: zk_proof_json.to_string(),
+        };
+        self.client
+            .write_chain("account", "NoteWithdraw", &params, self.chain_id, 100, 0)
+            .await
+    }
+
+    /// Reads a range of pool leaves (limit 0 = all from `start_index`).
+    pub async fn get_notes(
+        &self,
+        start_index: u64,
+        limit: i64,
+    ) -> Result<NotesResponse, Box<dyn std::error::Error>> {
+        let value: Value = self
+            .client
+            .read_chain(
+                "account",
+                "GetNotes",
+                &serde_json::json!({"start_index": start_index, "limit": limit}),
+            )
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Reads the pool's current leaf count and root.
+    pub async fn get_pool_info(&self) -> Result<PoolInfoResponse, Box<dyn std::error::Error>> {
+        let value: Value = self
+            .client
+            .read_chain("account", "GetPoolInfo", &serde_json::json!({}))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Reads spent-ness for each queried nullifier.
+    pub async fn get_nullifiers(
+        &self,
+        nullifiers: &[String],
+    ) -> Result<Vec<bool>, Box<dyn std::error::Error>> {
+        let value: Value = self
+            .client
+            .read_chain(
+                "account",
+                "GetNullifiers",
+                &serde_json::json!({"nullifiers": nullifiers}),
+            )
+            .await?;
+        #[derive(Deserialize)]
+        struct Resp {
+            spent: Vec<bool>,
+        }
+        let resp: Resp = serde_json::from_value(value)?;
+        Ok(resp.spent)
+    }
+
+    /// Looks up a commitment's leaf index (recovery flows; -1 = absent).
+    pub async fn get_note_by_cm(&self, cm_hex: &str) -> Result<i64, Box<dyn std::error::Error>> {
+        let value: Value = self
+            .client
+            .read_chain("account", "GetNoteByCm", &serde_json::json!({"cm": cm_hex}))
+            .await?;
+        #[derive(Deserialize)]
+        struct Resp {
+            leaf_index: i64,
+        }
+        let resp: Resp = serde_json::from_value(value)?;
+        Ok(resp.leaf_index)
     }
 
     /// Subscribe to on-chain order events via WebSocket.

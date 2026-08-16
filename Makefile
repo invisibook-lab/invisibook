@@ -1,4 +1,4 @@
-.PHONY: build build-desktop build-chain build-cozk2p-lib build-settle2p build-chain-cozk2p dump-cozk2p-fixture test-e2e-cozk2p run-chain run-test clean reset reset-chain reset-test
+.PHONY: build build-desktop build-chain build-cozk2p-lib build-settle2p build-chain-cozk2p dump-cozk2p-fixture dump-pool-fixture test-e2e-pool test-e2e-cozk2p run-chain run-test clean reset reset-chain reset-test
 
 # The settle2p_session prover ships alongside the desktop app.
 COZK2P_SETTLE2P_BIN := $(PWD)/cozk2p/target/release/settle2p_session
@@ -35,6 +35,15 @@ dump-cozk2p-fixture:
 	cd cozk2p && cargo run --release --bin dump_settle2p_fixture -- \
 		--vk-out ../chain/vk/settle_cozk2p_vk.bin \
 		--fixture-out /tmp/settle_cozk2p_fixture.json
+
+# Shielded-pool fixture + VKs (note_deposit / spend_withdraw), consumed by
+# chain/core pool tests and chain/test/pool_e2e_test.go.
+dump-pool-fixture:
+	cd lib && cargo run -p invisibook-lib --example dump_pool_fixture -- \
+		/tmp/pool_fixture.json --copy-vk
+
+test-e2e-pool: build-chain dump-pool-fixture
+	cd chain && go test ./test/ -run TestShieldedPoolLifecycle -timeout 600s -v
 
 # Full-depth 2-party e2e: real collaborative proof verified on a running
 # chain (plus the core-level accept/reject fixture tests).

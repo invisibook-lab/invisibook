@@ -43,7 +43,8 @@ func InitAccountDB(dsn string, logLevel logger.LogLevel) *gorm.DB {
 	if err != nil {
 		panic(fmt.Sprintf("failed to open accounts database: %v", err))
 	}
-	if err := db.AutoMigrate(&CashScheme{}); err != nil {
+	if err := db.AutoMigrate(&CashScheme{}, &NoteScheme{}, &NullifierScheme{},
+		&AnchorScheme{}, &TreeStateScheme{}, &BridgeSeenScheme{}); err != nil {
 		panic(fmt.Sprintf("failed to migrate cash table: %v", err))
 	}
 	return db

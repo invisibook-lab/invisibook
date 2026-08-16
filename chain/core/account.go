@@ -13,21 +13,23 @@ import (
 
 // ────────────────────── Tripod ──────────────────────
 
-// Account is the tripod that owns the cash table: balances are tracked as
-// individual Cash UTXO-style records rather than aggregate balances, since
-// amounts are encrypted ciphertext and cannot be summed on-chain.
+// Account is the tripod that owns the legacy cash table and the shielded
+// pool (notes, nullifiers, anchors). Cash amounts are commitments and
+// cannot be summed on-chain; pool notes hide owner, asset, and amount.
 type Account struct {
 	*tripod.Tripod
-	db         *gorm.DB
-	cfg        *AccountConfig
-	depositVK  *CircuitVK
-	withdrawVK *CircuitVK
+	db              *gorm.DB
+	cfg             *AccountConfig
+	depositVK       *CircuitVK
+	withdrawVK      *CircuitVK
+	noteDepositVK   *CircuitVK
+	spendWithdrawVK *CircuitVK
+	pool            pool
 }
 
-// NewAccount constructs the Account tripod and registers its writings and readings.
-// `cfg` must carry a valid SQLite DSN and readable `DepositVKPath` /
-// `WithdrawVKPath`. DB init and VK loading panic on failure — the chain will
-// not start without all wallet circuits' verifying keys in memory.
+// NewAccount constructs the Account tripod and registers its writings and
+// readings. `cfg` must carry a valid SQLite DSN and readable VK paths.
+// DB init and VK loading panic on failure.
 func NewAccount(cfg *AccountConfig) *Account {
 	tri := tripod.NewTripodWithName("account")
 	depositVK, err := LoadVK("deposit", cfg.DepositVKPath)
@@ -38,22 +40,50 @@ func NewAccount(cfg *AccountConfig) *Account {
 	if err != nil {
 		panic(fmt.Sprintf("loading withdraw VK: %v", err))
 	}
-	a := &Account{
-		Tripod:     tri,
-		db:         InitAccountDB(cfg.DBPath, ParseGormLogLevel(cfg.DBLogLevel)),
-		cfg:        cfg,
-		depositVK:  depositVK,
-		withdrawVK: withdrawVK,
+	noteDepositVK, err := LoadVK("note_deposit", cfg.NoteDepositVKPath)
+	if err != nil {
+		panic(fmt.Sprintf("loading note_deposit VK: %v", err))
 	}
-	a.SetWritings(a.Deposit, a.Withdraw)
-	a.SetReadings(a.GetAccount)
+	spendWithdrawVK, err := LoadVK("spend_withdraw", cfg.SpendWithdrawVKPath)
+	if err != nil {
+		panic(fmt.Sprintf("loading spend_withdraw VK: %v", err))
+	}
+	// Fail-closed in production (mirrors the OrderBook flag): a nil VK
+	// means an empty path and silently skipped verification.
+	if cfg.RequireProofs {
+		for name, missing := range map[string]bool{
+			"deposit":        depositVK == nil,
+			"withdraw":       withdrawVK == nil,
+			"note_deposit":   noteDepositVK == nil,
+			"spend_withdraw": spendWithdrawVK == nil,
+		} {
+			if missing {
+				panic(fmt.Sprintf("require_proofs is set but %s VK path is empty; refusing to start with proof verification disabled", name))
+			}
+		}
+	}
+	a := &Account{
+		Tripod:          tri,
+		db:              InitAccountDB(cfg.DBPath, ParseGormLogLevel(cfg.DBLogLevel)),
+		cfg:             cfg,
+		depositVK:       depositVK,
+		withdrawVK:      withdrawVK,
+		noteDepositVK:   noteDepositVK,
+		spendWithdrawVK: spendWithdrawVK,
+	}
+	if err := a.InitPool(); err != nil {
+		panic(fmt.Sprintf("initializing note pool: %v", err))
+	}
+	a.SetWritings(a.Deposit, a.Withdraw, a.NoteDeposit, a.NoteWithdraw)
+	a.SetReadings(a.GetAccount, a.GetNotes, a.GetPoolInfo, a.GetNullifiers, a.GetNoteByCm)
 	return a
 }
 
-// InitChain inserts genesis Cash records at chain startup.
-// Cash IDs are taken directly from the config — no derivation happens on-chain.
-// Idempotent: skips records that already exist so the chain can restart safely.
+// InitChain inserts genesis Cash records and seeds the genesis pool notes
+// at chain startup. Both paths are idempotent — InitChain runs on EVERY
+// boot, so re-seeding must never duplicate or shift state.
 func (a *Account) InitChain(block *types.Block) {
+	a.seedGenesisNotes(uint64(block.Height))
 	for _, gc := range a.cfg.GenesisCash {
 		if a.CashExists(gc.ID) {
 			continue

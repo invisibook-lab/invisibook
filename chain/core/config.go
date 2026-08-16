@@ -9,7 +9,10 @@ import (
 )
 
 // Config holds all configurable parameters for the core tripods.
+// `ChainID` enters every bind transcript so proofs cannot replay across
+// chains; it must equal the yu kernel's chain id.
 type Config struct {
+	ChainID   uint64          `toml:"chain_id"`
 	OrderBook OrderBookConfig `toml:"orderbook"`
 	Account   AccountConfig   `toml:"account"`
 }
@@ -39,17 +42,29 @@ type OrderBookConfig struct {
 
 // AccountConfig holds configuration for the Account tripod.
 //
-// `DepositVKPath` and `WithdrawVKPath` point at the snarkjs `vk.json` files
-// produced by `snarkjs zkey export verificationkey <circuit>.zkey vk.json`.
-// Both are required at startup — chain refuses to boot if any path is unset
-// or the file is missing/malformed.
+// `DepositVKPath`/`WithdrawVKPath` are the legacy cash circuits;
+// `NoteDepositVKPath`/`SpendWithdrawVKPath` are the shielded-pool circuits.
+// All point at snarkjs `vk.json` files.
+// `BridgeOperatorPubkey` (64-char ed25519 hex) gates NoteDeposit until the
+// real bridge inclusion proof lands: when set, every deposit must carry the
+// operator's signature; when empty, the check is skipped (dev only — a
+// public network MUST set it).
+// `RequireProofs` mirrors the OrderBook flag: an empty VK path becomes a
+// startup error instead of silently skipping verification.
 // `DBLogLevel` controls GORM SQL logging: "silent", "error", "warn", "info".
+// `ChainID` is copied from the top-level config by LoadConfig.
 type AccountConfig struct {
-	DBPath         string        `toml:"db_path"`
-	DepositVKPath  string        `toml:"deposit_vk_path"`
-	WithdrawVKPath string        `toml:"withdraw_vk_path"`
-	DBLogLevel     string        `toml:"db_log_level"`
-	GenesisCash    []GenesisCash `toml:"genesis_cash"`
+	DBPath               string        `toml:"db_path"`
+	DepositVKPath        string        `toml:"deposit_vk_path"`
+	WithdrawVKPath       string        `toml:"withdraw_vk_path"`
+	NoteDepositVKPath    string        `toml:"note_deposit_vk_path"`
+	SpendWithdrawVKPath  string        `toml:"spend_withdraw_vk_path"`
+	BridgeOperatorPubkey string        `toml:"bridge_operator_pubkey"`
+	RequireProofs        bool          `toml:"require_proofs"`
+	DBLogLevel           string        `toml:"db_log_level"`
+	GenesisCash          []GenesisCash `toml:"genesis_cash"`
+	GenesisNote          []GenesisNote `toml:"genesis_note"`
+	ChainID              uint64        `toml:"-"`
 }
 
 // GenesisCash defines a Cash record to be inserted at chain initialization.
@@ -61,10 +76,20 @@ type GenesisCash struct {
 	Amount string `toml:"amount"`
 }
 
+// GenesisNote defines one shielded-pool leaf seeded at chain init. Leaves
+// are appended in listing order as leaves 0..len-1; the seeding is
+// prefix-verified so a restart never duplicates or shifts them. `Memo` is
+// documentation only (e.g. "alice 2000 ETH") — the chain never parses it.
+type GenesisNote struct {
+	Cm   string `toml:"cm"`
+	Memo string `toml:"memo"`
+}
+
 // DefaultConfig returns a Config with sensible defaults.
 // DBLogLevel defaults to "warn" to suppress expected "record not found" noise.
 func DefaultConfig() *Config {
 	return &Config{
+		ChainID: 1926,
 		OrderBook: OrderBookConfig{
 			DBPath:     "orders.db",
 			DBLogLevel: "warn",
@@ -98,5 +123,7 @@ func LoadConfig(path string) (*Config, error) {
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
 		return nil, fmt.Errorf("failed to load core config from %s: %w", path, err)
 	}
+	// Propagate the chain id into the per-tripod configs (bind transcripts).
+	cfg.Account.ChainID = cfg.ChainID
 	return cfg, nil
 }
