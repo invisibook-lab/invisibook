@@ -83,21 +83,6 @@ func (a *Account) GetCash(id string) (*Cash, error) {
 	return schemeToCash(&row), nil
 }
 
-// FindActiveCash returns all Active Cash for the given pubkey and token.
-func (a *Account) FindActiveCash(pubkey string, token TokenID) ([]*Cash, error) {
-	var rows []CashScheme
-	err := a.db.Where("pubkey = ? AND token = ? AND status = ?", pubkey, string(token), int(Active)).
-		Find(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-	result := make([]*Cash, 0, len(rows))
-	for i := range rows {
-		result = append(result, schemeToCash(&rows[i]))
-	}
-	return result, nil
-}
-
 // FindNonSpentCash returns all Active and Locked Cash for the given pubkey and token.
 func (a *Account) FindNonSpentCash(pubkey string, token TokenID) ([]*Cash, error) {
 	var rows []CashScheme
@@ -124,9 +109,6 @@ func (a *Account) LockCash(cashIDs []string, orderID string) error {
 		if cash.Status != Active {
 			return fmt.Errorf("cash %s is not Active (current: %s)", id, cash.Status.String())
 		}
-		if err := verifyProof(cash); err != nil {
-			return fmt.Errorf("invalid proof for cash %s: %w", id, err)
-		}
 	}
 	return a.db.Model(&CashScheme{}).
 		Where("cash_id IN ? AND status = ?", cashIDs, int(Active)).
@@ -148,13 +130,6 @@ func (a *Account) SpendCash(cashIDs []string, spentBy string) error {
 	return a.db.Model(&CashScheme{}).
 		Where("cash_id IN ? AND status IN ?", cashIDs, []int{int(Active), int(Locked)}).
 		Updates(map[string]any{"status": int(Spent), "by": spentBy}).Error
-}
-
-// UnlockCash transitions Locked Cash back to Active state (e.g. order cancellation).
-func (a *Account) UnlockCash(cashIDs []string) error {
-	return a.db.Model(&CashScheme{}).
-		Where("cash_id IN ? AND status = ?", cashIDs, int(Locked)).
-		Updates(map[string]any{"status": int(Active), "by": ""}).Error
 }
 
 // ────────────────────── Cash ↔ Scheme Conversion ──────────────────────

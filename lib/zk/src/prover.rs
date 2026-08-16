@@ -72,10 +72,9 @@ mod tests {
         setup::dev_setup_snarkjs,
         test_circuit::TestCircuitHandle,
         wallet::{
-            DepositWitness, SettleCoZkSide, SettleCoZkWitness, SettleLargerWitness,
-            SettleSmallerWitness, SplitWitness, WithdrawWitness, fr_to_hex, poseidon_commit,
-            prove_deposit, prove_settle_cozk, prove_settle_larger, prove_settle_smaller,
-            prove_split, prove_withdraw,
+            DepositWitness, SettleCoZkSide, SettleCoZkWitness, SplitWitness, WithdrawWitness,
+            fr_to_hex, poseidon_commit, prove_deposit, prove_settle_cozk, prove_split,
+            prove_withdraw,
         },
     };
 
@@ -219,82 +218,6 @@ mod tests {
         assert_eq!(
             sp.change_commitment_hex,
             fr_to_hex(&poseidon_commit(0, &[0u8; 32]))
-        );
-    }
-
-    #[test]
-    fn settle_larger_proof_round_trips_through_rapidsnark() {
-        // Alice locked 80 ETH (Token1 sender), trade fills 60, change=20.
-        // Counterparty (bob) sends 60 USDT back (other_fill, price=1).
-        let setup = dev_setup_snarkjs("settle_larger").expect("snarkjs setup");
-        let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir).expect("circuit handle");
-        let in_random = [0xA1u8; 32];
-        let r_my = [0x01u8; 32];
-        let r_other = [0x02u8; 32];
-        let change_random = [0xC3u8; 32];
-        // Counterparty's recv commitment hex — bob computes Poseidon(60_USDT, his_random)
-        // and gives it to alice. We just synthesize one for the round-trip.
-        let bob_recv_random = [0xB0u8; 32];
-        let bob_recv_commit_hex = fr_to_hex(&poseidon_commit(60, &bob_recv_random));
-        let witness = SettleLargerWitness {
-            r_my,
-            other_fill: 60,
-            r_other,
-            price: 1,
-            is_token2_sender: false,
-            inputs: vec![(80, in_random)],
-            change_amount: 20,
-            change_random,
-            counterparty_recv_commitment_hex: bob_recv_commit_hex.clone(),
-        };
-        let sp = prove_settle_larger(witness, &handle, &setup.zkey)
-            .expect("rapidsnark prove settle_larger");
-
-        assert_eq!(sp.proof_json["protocol"], "groth16");
-        // public.json layout: [my_match, other_match, price, is_token2_sender,
-        //                      input_hashes[0], input_hashes[1], change, recv]
-        let public = sp.public_json.as_array().expect("public is array");
-        assert_eq!(public.len(), 8);
-
-        // commitments echoed match recomputing them off-circuit
-        assert_eq!(
-            sp.my_match_commitment_hex,
-            fr_to_hex(&poseidon_commit(60, &r_my))
-        );
-        assert_eq!(
-            sp.other_match_commitment_hex,
-            fr_to_hex(&poseidon_commit(60, &r_other))
-        );
-        assert_eq!(
-            sp.change_commitment_hex,
-            fr_to_hex(&poseidon_commit(20, &change_random))
-        );
-    }
-
-    #[test]
-    fn settle_smaller_proof_round_trips_through_rapidsnark() {
-        // Bob locked exactly 60 USDT (Token2 sender), no change. fill = inputs.sum.
-        let setup = dev_setup_snarkjs("settle_smaller").expect("snarkjs setup");
-        let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir).expect("circuit handle");
-        let in_random = [0xB2u8; 32];
-        let r_match = [0x02u8; 32];
-        // alice's recv commitment hex — she computes Poseidon(60_ETH, her_random) and gives it.
-        let alice_recv_random = [0xA0u8; 32];
-        let alice_recv_commit_hex = fr_to_hex(&poseidon_commit(60, &alice_recv_random));
-        let witness = SettleSmallerWitness {
-            r_match,
-            inputs: vec![(60, in_random)],
-            counterparty_recv_commitment_hex: alice_recv_commit_hex.clone(),
-        };
-        let sp = prove_settle_smaller(witness, &handle, &setup.zkey)
-            .expect("rapidsnark prove settle_smaller");
-
-        // public.json: [match_commitment, input_hashes[0], input_hashes[1], recv]
-        let public = sp.public_json.as_array().expect("public is array");
-        assert_eq!(public.len(), 4);
-        assert_eq!(
-            sp.match_commitment_hex,
-            fr_to_hex(&poseidon_commit(60, &r_match))
         );
     }
 

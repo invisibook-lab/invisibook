@@ -100,63 +100,6 @@ fn send_order_signing_message(params: &SendOrderParams) -> Vec<u8> {
     buf
 }
 
-/// Per-party MPC share submission for the comparison phase.
-#[derive(Debug, Serialize)]
-struct CompareOrderParams {
-    order_id: OrderID,
-    match_order_id: OrderID,
-    mpc_share: MpcShareParamJson,
-}
-
-/// Per-party settle submission sent to chain after comparison.
-/// `leg` is required for the larger party, omitted for the smaller party.
-#[derive(Debug, Serialize)]
-struct SettleOrderParams {
-    order_id: OrderID,
-    match_order_id: OrderID,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    leg: Option<SettleTokenLegParam>,
-}
-
-/// Serializable form of MpcShareParam for the chain JSON API.
-#[derive(Debug, Serialize)]
-struct MpcShareParamJson {
-    cmp_share: String,
-    cmp_mac: String,
-    r_smaller_share: String,
-    r_smaller_mac: String,
-    mac_key_share: String,
-}
-
-/// Mirror of chain Go `SettleTokenLeg`. `side` is `"larger"` or `"smaller"`;
-/// only the fields applicable to that side need to be populated (the rest are
-/// `None` and skipped from the JSON via `serde`).
-#[derive(Debug, Serialize)]
-pub struct SettleTokenLegParam {
-    pub side: String,
-    pub token: TokenID,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub my_match_commitment: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub other_match_commitment: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub price: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_token2_sender: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub change_commitment: Option<String>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub change_pubkey: String,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub match_commitment: Option<String>,
-
-    pub recv_commitment: String,
-    pub recv_pubkey: String,
-    pub zk_proof: String,
-}
-
 /// Mirror of chain Go `CoZkSettleRequest` — the single-submission co-zk
 /// settlement message, serving both variants (`SettleOrdersCoZk` and
 /// `SettleOrdersCoZk2p`). The six `*_commitment` fields are the settlement
@@ -543,56 +486,6 @@ impl ChainClient {
         params.signature = self.sign(&send_order_signing_message(&params));
         self.client
             .write_chain("orderbook", "SendOrder", &params, self.chain_id, 100, 0)
-            .await
-    }
-
-    /// Submits this party's MPC shares for order comparison.
-    /// The chain collects both parties' shares and verifies the MAC,
-    /// then sets both orders to Compared status.
-    #[deprecated(
-        note = "legacy settlement path; use the 2-party collaborative settle_orders_cozk2p flow"
-    )]
-    pub async fn compare_orders(
-        &self,
-        order_id: OrderID,
-        match_order_id: OrderID,
-        mpc_share: MpcShareParam,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let params = CompareOrderParams {
-            order_id,
-            match_order_id,
-            mpc_share: MpcShareParamJson {
-                cmp_share: mpc_share.cmp_share,
-                cmp_mac: mpc_share.cmp_mac,
-                r_smaller_share: mpc_share.r_smaller_share,
-                r_smaller_mac: mpc_share.r_smaller_mac,
-                mac_key_share: mpc_share.mac_key_share,
-            },
-        };
-        self.client
-            .write_chain("orderbook", "CompareOrders", &params, self.chain_id, 100, 0)
-            .await
-    }
-
-    /// Submits this party's settlement confirmation (after comparison).
-    /// The larger party (IsSmaller=false) must provide a ZK `leg`; the smaller
-    /// party (IsSmaller=true) confirms without proof (`leg` is `None`).
-    #[deprecated(
-        note = "legacy settlement path; use the 2-party collaborative settle_orders_cozk2p flow"
-    )]
-    pub async fn settle_orders(
-        &self,
-        order_id: OrderID,
-        match_order_id: OrderID,
-        leg: Option<SettleTokenLegParam>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let params = SettleOrderParams {
-            order_id,
-            match_order_id,
-            leg,
-        };
-        self.client
-            .write_chain("orderbook", "SettleOrders", &params, self.chain_id, 100, 0)
             .await
     }
 

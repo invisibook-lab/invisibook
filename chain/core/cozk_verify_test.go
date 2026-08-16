@@ -11,22 +11,22 @@ import (
 // The proof inside was generated COLLABORATIVELY by three in-process REP3
 // nodes, so these tests cover exactly what production settlement submits.
 type cozkFixture struct {
-	Price                    uint64          `json:"price"`
-	AIsSeller                bool            `json:"a_is_seller"`
-	Cmp                      int             `json:"cmp"`
-	OrderACommitmentHex      string          `json:"order_a_commitment_hex"`
-	OrderBCommitmentHex      string          `json:"order_b_commitment_hex"`
-	LockedAHashesHex         []string        `json:"locked_a_hashes_hex"`
-	LockedBHashesHex         []string        `json:"locked_b_hashes_hex"`
-	NewOrderACommitmentHex   string          `json:"new_order_a_commitment_hex"`
-	NewOrderBCommitmentHex   string          `json:"new_order_b_commitment_hex"`
-	NewLockedACommitmentHex  string          `json:"new_locked_a_commitment_hex"`
-	NewLockedBCommitmentHex  string          `json:"new_locked_b_commitment_hex"`
-	RecvACommitmentHex       string          `json:"recv_a_commitment_hex"`
-	RecvBCommitmentHex       string          `json:"recv_b_commitment_hex"`
-	ProofJSON                json.RawMessage `json:"proof_json"`
-	PublicJSON               []string        `json:"public_json"`
-	VKPath                   string          `json:"vk_path"`
+	Price                   uint64          `json:"price"`
+	AIsSeller               bool            `json:"a_is_seller"`
+	Cmp                     int             `json:"cmp"`
+	OrderACommitmentHex     string          `json:"order_a_commitment_hex"`
+	OrderBCommitmentHex     string          `json:"order_b_commitment_hex"`
+	LockedAHashesHex        []string        `json:"locked_a_hashes_hex"`
+	LockedBHashesHex        []string        `json:"locked_b_hashes_hex"`
+	NewOrderACommitmentHex  string          `json:"new_order_a_commitment_hex"`
+	NewOrderBCommitmentHex  string          `json:"new_order_b_commitment_hex"`
+	NewLockedACommitmentHex string          `json:"new_locked_a_commitment_hex"`
+	NewLockedBCommitmentHex string          `json:"new_locked_b_commitment_hex"`
+	RecvACommitmentHex      string          `json:"recv_a_commitment_hex"`
+	RecvBCommitmentHex      string          `json:"recv_b_commitment_hex"`
+	ProofJSON               json.RawMessage `json:"proof_json"`
+	PublicJSON              []string        `json:"public_json"`
+	VKPath                  string          `json:"vk_path"`
 }
 
 func loadCoZkFixture(t *testing.T) cozkFixture {
