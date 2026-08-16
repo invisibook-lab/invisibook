@@ -188,13 +188,11 @@ func runCompareSettleLifecycle(
 	}
 	waitBlock()
 
-	// Bob's order is Done; his collateral spent; the payout note is a new
-	// pool leaf.
+	// Bob's order is Done; the payout note is a new pool leaf. (Collateral
+	// is order-bound in v2, not a cash row, so it leaves the book with the
+	// order — there is nothing to check on the cash side.)
 	if st := queryOrders(t, buyOrderID)[0].Status; st != 2 {
 		t.Fatalf("expected buy order Done(2), got %d", st)
-	}
-	if n := len(getAccount(t, bobPubkey, "USDT")); n != 0 {
-		t.Fatalf("expected bob USDT fully spent, got %d non-spent items", n)
 	}
 	afterSmall := getPoolInfo(t)
 	if afterSmall.LeafCount != poolBefore.LeafCount+1 {
@@ -232,26 +230,12 @@ func runCompareSettleLifecycle(
 	if sellAfter.MatchOrder != "" {
 		t.Fatalf("relisted order must have match_order cleared, got %s", sellAfter.MatchOrder)
 	}
-	wantLockedID := cashID(alicePubkey, "ETH", largeReq.CmLockedResidual)
-	if len(sellAfter.InputCashIDs) != 1 || sellAfter.InputCashIDs[0] != wantLockedID {
-		t.Fatalf("relisted order input cash = %v, want [%s]", sellAfter.InputCashIDs, wantLockedID)
+	if sellAfter.LockedCommitment != largeReq.CmLockedResidual {
+		t.Fatalf("relisted order collateral = %s, want %s",
+			sellAfter.LockedCommitment, largeReq.CmLockedResidual)
 	}
 
-	// Alice's old collateral spent; residual locked cash exists; bob's fill
-	// note is a pool leaf.
-	aliceETHAfter := getAccount(t, alicePubkey, "ETH")
-	var lockedRemainder *CashItem
-	for i := range aliceETHAfter {
-		if aliceETHAfter[i].ID == wantLockedID {
-			lockedRemainder = &aliceETHAfter[i]
-		}
-		if aliceETHAfter[i].ID == aliceETHCashID {
-			t.Fatalf("alice's original locked ETH cash must be Spent")
-		}
-	}
-	if lockedRemainder == nil || lockedRemainder.Status != 1 { // Locked
-		t.Fatalf("expected alice's remainder collateral %s to exist and be Locked", wantLockedID)
-	}
+	// Bob's fill note is a new pool leaf.
 	afterLarge := getPoolInfo(t)
 	if afterLarge.LeafCount != afterSmall.LeafCount+1 {
 		t.Fatalf("SettleLarge must append exactly one pool note")

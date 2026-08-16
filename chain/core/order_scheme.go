@@ -1,7 +1,6 @@
 package core
 
 import (
-	"encoding/json"
 	"fmt"
 	"math/big"
 
@@ -18,18 +17,19 @@ import (
 
 // OrderScheme is the flat SQL model for the orders table.
 type OrderScheme struct {
-	ID           string `gorm:"primaryKey;column:id"`
-	Type         int    `gorm:"column:type;index:idx_pair_type"`
-	Token1       string `gorm:"column:token1;index:idx_pair_type"`
-	Token2       string `gorm:"column:token2;index:idx_pair_type"`
-	Price        string `gorm:"column:price"`
-	Amount       string `gorm:"column:amount"`
-	Pubkey       string `gorm:"column:pubkey;index"`   // owner's ed25519 pubkey (64-char hex)
-	InputCashIDs string `gorm:"column:input_cash_ids"` // JSON array of cash IDs
-	HandlingFee  string `gorm:"column:handling_fee"`   // JSON array of fee strings
-	BlockHeight  uint32 `gorm:"column:block_height"`
-	Status       int    `gorm:"column:status;index"`
-	MatchOrder   string `gorm:"column:match_order"`
+	ID               string `gorm:"primaryKey;column:id"`
+	Type             int    `gorm:"column:type;index:idx_pair_type"`
+	Token1           string `gorm:"column:token1;index:idx_pair_type"`
+	Token2           string `gorm:"column:token2;index:idx_pair_type"`
+	Price            string `gorm:"column:price"`
+	Amount           string `gorm:"column:amount"` // cm_q
+	Pubkey           string `gorm:"column:pubkey;index"`
+	LockedCommitment string `gorm:"column:locked_commitment"`
+	Fee              uint64 `gorm:"column:fee"`
+	BlockHeight      uint32 `gorm:"column:block_height"`
+	IntraBlockIndex  uint32 `gorm:"column:intra_block_index"`
+	Status           int    `gorm:"column:status;index"`
+	MatchOrder       string `gorm:"column:match_order"`
 }
 
 // TableName returns the SQL table name used by GORM for OrderScheme rows.
@@ -88,7 +88,7 @@ func InitOrderDB(dsn string, logLevel logger.LogLevel) *gorm.DB {
 	if err != nil {
 		panic(fmt.Sprintf("failed to open orders database: %v", err))
 	}
-	if err := db.AutoMigrate(&OrderScheme{}, &SettleAddrScheme{}, &CompareResultScheme{}); err != nil {
+	if err := db.AutoMigrate(&OrderScheme{}, &SettleAddrScheme{}, &CompareResultScheme{}, &FeeCounterScheme{}); err != nil {
 		panic(fmt.Sprintf("failed to migrate orders table: %v", err))
 	}
 	return db
@@ -202,31 +202,20 @@ func orderToScheme(o *Order) *OrderScheme {
 	if o.Price != nil {
 		priceStr = o.Price.String()
 	}
-	cashIDsJSON := "[]"
-	if len(o.InputCashIDs) > 0 {
-		if b, err := json.Marshal(o.InputCashIDs); err == nil {
-			cashIDsJSON = string(b)
-		}
-	}
-	feeJSON := "[]"
-	if len(o.HandlingFee) > 0 {
-		if b, err := json.Marshal(o.HandlingFee); err == nil {
-			feeJSON = string(b)
-		}
-	}
 	return &OrderScheme{
-		ID:           string(o.ID),
-		Type:         int(o.Type),
-		Token1:       string(o.Subject.Token1),
-		Token2:       string(o.Subject.Token2),
-		Price:        priceStr,
-		Amount:       string(o.Amount),
-		Pubkey:       o.Pubkey,
-		InputCashIDs: cashIDsJSON,
-		HandlingFee:  feeJSON,
-		BlockHeight:  o.BlockHeight,
-		Status:       int(o.Status),
-		MatchOrder:   string(o.MatchOrder),
+		ID:               string(o.ID),
+		Type:             int(o.Type),
+		Token1:           string(o.Subject.Token1),
+		Token2:           string(o.Subject.Token2),
+		Price:            priceStr,
+		Amount:           string(o.Amount),
+		Pubkey:           o.Pubkey,
+		LockedCommitment: o.LockedCommitment,
+		Fee:              o.Fee,
+		BlockHeight:      o.BlockHeight,
+		IntraBlockIndex:  o.IntraBlockIndex,
+		Status:           int(o.Status),
+		MatchOrder:       string(o.MatchOrder),
 	}
 }
 
@@ -240,14 +229,6 @@ func schemeToOrder(s *OrderScheme) *Order {
 		price = new(big.Int)
 		price.SetString(s.Price, 10)
 	}
-	var cashIDs []string
-	if s.InputCashIDs != "" {
-		_ = json.Unmarshal([]byte(s.InputCashIDs), &cashIDs)
-	}
-	var fees []string
-	if s.HandlingFee != "" {
-		_ = json.Unmarshal([]byte(s.HandlingFee), &fees)
-	}
 	return &Order{
 		ID:   OrderID(s.ID),
 		Type: TradeType(s.Type),
@@ -255,14 +236,15 @@ func schemeToOrder(s *OrderScheme) *Order {
 			Token1: TokenID(s.Token1),
 			Token2: TokenID(s.Token2),
 		},
-		Price:        price,
-		Amount:       CipherText(s.Amount),
-		Pubkey:       s.Pubkey,
-		InputCashIDs: cashIDs,
-		HandlingFee:  fees,
-		BlockHeight:  s.BlockHeight,
-		MatchOrder:   OrderID(s.MatchOrder),
-		Status:       OrderStat(s.Status),
+		Price:            price,
+		Amount:           CipherText(s.Amount),
+		Pubkey:           s.Pubkey,
+		LockedCommitment: s.LockedCommitment,
+		Fee:              s.Fee,
+		BlockHeight:      s.BlockHeight,
+		IntraBlockIndex:  s.IntraBlockIndex,
+		MatchOrder:       OrderID(s.MatchOrder),
+		Status:           OrderStat(s.Status),
 	}
 }
 
@@ -283,15 +265,11 @@ func (ot *OrderBook) UpdateOrderAmount(id OrderID, amount CipherText) error {
 		Update("amount", string(amount)).Error
 }
 
-// UpdateOrderInputCashIDs replaces an order's locked input cash IDs.
-// `cashIDs` must be non-empty for an order that stays on the book.
-func (ot *OrderBook) UpdateOrderInputCashIDs(id OrderID, cashIDs []string) error {
-	b, err := json.Marshal(cashIDs)
-	if err != nil {
-		return err
-	}
+// UpdateOrderLockedCommitment replaces an order's collateral commitment
+// (used by settlement when the surviving larger order relists its residual).
+func (ot *OrderBook) UpdateOrderLockedCommitment(id OrderID, locked string) error {
 	return ot.db.Model(&OrderScheme{}).Where("id = ?", string(id)).
-		Update("input_cash_ids", string(b)).Error
+		Update("locked_commitment", locked).Error
 }
 
 // ────────────────────── Settle Address CRUD ──────────────────────

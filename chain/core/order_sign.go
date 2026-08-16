@@ -5,9 +5,9 @@ import (
 	"strconv"
 )
 
-// SendOrderSigningDomain domain-separates the SendOrder signing message from
-// every other ed25519 message in the system (e.g. the co-zk settle messages).
-const SendOrderSigningDomain = "invisibook-send-order-v1"
+// SendOrderSigningDomain domain-separates the SendOrder v2 signing message
+// from every other ed25519 message in the system.
+const SendOrderSigningDomain = "invisibook-send-order-v2"
 
 // appendSigningField appends `s` to `buf` prefixed with its u32 big-endian
 // byte length, so consecutive fields of arbitrary content concatenate
@@ -19,38 +19,18 @@ func appendSigningField(buf []byte, s string) []byte {
 	return append(buf, s...)
 }
 
-// appendSigningList appends a u32 big-endian element count followed by each
-// element as a length-prefixed field, so list boundaries are unambiguous.
-func appendSigningList(buf []byte, list []string) []byte {
-	var c [4]byte
-	binary.BigEndian.PutUint32(c[:], uint32(len(list)))
-	buf = append(buf, c[:]...)
-	for _, s := range list {
-		buf = appendSigningField(buf, s)
-	}
-	return buf
-}
-
 // SendOrderSigningMessage builds the canonical byte string the order owner
-// must ed25519-sign to authorize a SendOrder request. It covers every request
-// field except the signature itself and the zk proof (the proof is already
-// bound to its commitments through public-input verification), so no observer
-// can alter price, pair, amount, fees, or change destination between signing
-// and on-chain inclusion. Must stay in lockstep with Rust
-// `send_order_signing_message` in invisibook-lib.
+// ed25519-signs to authorize a SendOrder v2 request. It covers every field
+// except the signature and the zk proof (the proof is already bound to its
+// commitments and to these fields via `bind`). Must stay in lockstep with
+// Rust `send_order_signing_message` in invisibook-lib.
 func SendOrderSigningMessage(req *SendOrderRequest) []byte {
 	priceStr := ""
 	if req.Price != nil {
 		priceStr = req.Price.String()
 	}
-	changeFlag := "0"
-	changeCashID := ""
-	changeAmount := ""
-	if req.Change != nil {
-		changeFlag = "1"
-		changeCashID = req.Change.CashID
-		changeAmount = string(req.Change.Amount)
-	}
+	var feeBytes [8]byte
+	binary.BigEndian.PutUint64(feeBytes[:], req.Fee)
 
 	buf := make([]byte, 0, 256)
 	buf = appendSigningField(buf, SendOrderSigningDomain)
@@ -61,11 +41,11 @@ func SendOrderSigningMessage(req *SendOrderRequest) []byte {
 	buf = appendSigningField(buf, priceStr)
 	buf = appendSigningField(buf, string(req.Amount))
 	buf = appendSigningField(buf, req.Pubkey)
-	buf = appendSigningList(buf, req.InputCashIDs)
-	buf = appendSigningList(buf, req.HandlingFee)
-	buf = appendSigningField(buf, changeFlag)
-	buf = appendSigningField(buf, changeCashID)
-	buf = appendSigningField(buf, changeAmount)
-	buf = appendSigningField(buf, string(req.LockedCommitment))
+	buf = appendSigningField(buf, req.Anchor)
+	buf = appendSigningField(buf, req.InputNullifiers[0])
+	buf = appendSigningField(buf, req.InputNullifiers[1])
+	buf = appendSigningField(buf, req.LockedCommitment)
+	buf = appendSigningField(buf, string(feeBytes[:]))
+	buf = appendSigningField(buf, req.ChangeCommitment)
 	return buf
 }

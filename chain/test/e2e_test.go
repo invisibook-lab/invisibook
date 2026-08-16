@@ -3,6 +3,7 @@ package test
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -48,17 +49,42 @@ func deriveKeypair(t *testing.T, seedHex string) (ed25519.PrivateKey, string) {
 // every field, see core.SendOrderSigningMessage) with `priv`. The returned
 // request serializes to the exact JSON payload SendOrder expects.
 // `price` must be non-zero (all tests trade at an explicit price).
+// canonicalHex renders a 32-byte seed as a canonical field-element hex
+// (leading zero byte keeps it below the modulus) for test placeholders.
+func canonicalHex(seed string) string {
+	h := sha256.Sum256([]byte(seed))
+	h[0] = 0
+	return hex.EncodeToString(h[:])
+}
+
+// signedSendOrder builds a v2 SendOrder request for test mode (proof
+// verification skipped). `seed` distinguishes the two nullifiers; the anchor
+// is the always-valid empty-tree root, and the locked/change commitments are
+// canonical placeholders.
 func signedSendOrder(priv ed25519.PrivateKey, tradeType core.TradeType, token1, token2 string,
-	price uint64, amount, pubkey string, inputCashIDs []string) *core.SendOrderRequest {
+	price uint64, amount, pubkey string, seed []string) *core.SendOrderRequest {
+	tag := pubkey
+	if len(seed) > 0 {
+		tag = seed[0]
+	}
+	nfs := []string{canonicalHex("nf0:" + tag), canonicalHex("nf1:" + tag)}
+	// `amount` is the plaintext quantity in the legacy call shape; v2 carries
+	// it as a 64-char commitment (cm_q), so derive a canonical placeholder
+	// keyed by the quantity so distinct quantities give distinct commitments.
+	cmQ := canonicalHex("cmq:" + tag + ":" + amount)
 	req := &core.SendOrderRequest{
-		ID:           core.ComputeOrderID(inputCashIDs),
-		Type:         tradeType,
-		Subject:      core.TradePair{Token1: core.TokenID(token1), Token2: core.TokenID(token2)},
-		Price:        new(big.Int).SetUint64(price),
-		Amount:       core.CipherText(amount),
-		Pubkey:       pubkey,
-		InputCashIDs: inputCashIDs,
-		HandlingFee:  []string{"0"},
+		ID:               core.ComputeOrderID(nfs),
+		Type:             tradeType,
+		Subject:          core.TradePair{Token1: core.TokenID(token1), Token2: core.TokenID(token2)},
+		Price:            new(big.Int).SetUint64(price),
+		Amount:           core.CipherText(cmQ),
+		Pubkey:           pubkey,
+		Anchor:           core.FrToHex(core.EmptyRoot(core.TreeDepth)),
+		InputNullifiers:  nfs,
+		LockedCommitment: canonicalHex("locked:" + tag),
+		Fee:              0,
+		ChangeCommitment: canonicalHex("change:" + tag),
+		ZkProof:          "test-proof-skip",
 	}
 	req.Signature = hex.EncodeToString(ed25519.Sign(priv, core.SendOrderSigningMessage(req)))
 	return req
@@ -244,18 +270,12 @@ func TestFullOrderLifecycle(t *testing.T) {
 	}
 	waitBlock()
 
-	// Verify alice's ETH cash is now Locked (GetAccount returns Active+Locked, not Spent)
-	aliceETHAfterSell := getAccount(t, alicePubkey, "ETH")
-	t.Logf("Alice ETH after sell order: %d non-spent cash", len(aliceETHAfterSell))
-	activeCount := 0
-	for _, c := range aliceETHAfterSell {
-		t.Logf("  cash id=%s status=%d", c.ID, c.Status)
-		if c.Status == 0 { // Active
-			activeCount++
-		}
-	}
-	if activeCount != 0 {
-		t.Fatalf("expected 0 active ETH cash for alice (should be locked), got %d active", activeCount)
+	// In v2 an order spends pool notes and carries its collateral as a
+	// commitment on the order row — the genesis cash is untouched. Verify the
+	// order landed with its collateral commitment.
+	sellStored := queryOrders(t, sellOrderID)[0]
+	if sellStored.LockedCommitment == "" {
+		t.Fatalf("sell order must carry a locked collateral commitment")
 	}
 
 	// Verify sell order is Pending (no counter yet)
@@ -381,12 +401,12 @@ func getAccount(t *testing.T, pubkey, token string) []CashItem {
 }
 
 type OrderItem struct {
-	ID           string   `json:"id"`
-	Status       int      `json:"status"`
-	Amount       string   `json:"amount"`
-	MatchOrder   string   `json:"match_order"`
-	Pubkey       string   `json:"pubkey"`
-	InputCashIDs []string `json:"input_cash_ids"`
+	ID               string `json:"id"`
+	Status           int    `json:"status"`
+	Amount           string `json:"amount"`
+	MatchOrder       string `json:"match_order"`
+	Pubkey           string `json:"pubkey"`
+	LockedCommitment string `json:"locked_commitment"`
 }
 
 type QueryOrdersResp struct {

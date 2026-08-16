@@ -15,6 +15,10 @@ db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
 # its verification additionally needs a chain built with `-tags cozk2p`.
 split_vk_path         = "vk/split_vk.json"
 settle_cozk_vk_path   = "vk/settle_cozk_vk.json"
+settle_small_vk_path  = "vk/settle_small_vk.json"
+settle_large_vk_path  = "vk/settle_large_vk.json"
+send_order_vk_path    = "vk/send_order_vk.json"
+claim_fees_vk_path    = "vk/claim_fees_vk.json"
 settle_cozk2p_vk_path = "vk/settle_cozk2p_vk.bin"
 
 [account]

@@ -38,6 +38,8 @@ type OrderBookConfig struct {
 	SettleCoZk2pVKPath string `toml:"settle_cozk2p_vk_path"`
 	SettleSmallVKPath  string `toml:"settle_small_vk_path"`
 	SettleLargeVKPath  string `toml:"settle_large_vk_path"`
+	SendOrderVKPath    string `toml:"send_order_vk_path"`
+	ClaimFeesVKPath    string `toml:"claim_fees_vk_path"`
 	RequireProofs      bool   `toml:"require_proofs"`
 	DBLogLevel         string `toml:"db_log_level"`
 	ChainID            uint64 `toml:"-"`

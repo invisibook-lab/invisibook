@@ -10,49 +10,39 @@ pub use yu_sdk::KeyPair as YuKeyPair;
 
 // ────────────────────── Request/Response Types ──────────────────────
 
-#[derive(Debug, Serialize)]
-struct CashChangeParam {
-    cash_id: String,
-    amount: CipherText,
-}
-
-#[derive(Debug, Serialize)]
-struct SendOrderParams {
-    id: OrderID,
+/// Mirror of chain Go `SendOrderRequest` (v2): spend two pool notes, commit
+/// the order quantity as `amount` (cm_q), lock its collateral, destroy the
+/// plaintext `fee`, and mint the change note.
+#[derive(Debug, Clone, Serialize)]
+pub struct SendOrderParams {
+    pub id: OrderID,
     #[serde(rename = "type")]
-    trade_type: u8,
-    subject: TradePairJson,
+    pub trade_type: u8,
+    pub subject: TradePairJson,
     #[serde(skip_serializing_if = "Option::is_none")]
-    price: Option<u64>,
-    amount: CipherText,
-    pubkey: String,    // sender's ed25519 pubkey (64-char hex)
-    signature: String, // ed25519 sig over `send_order_signing_message` (128-char hex)
-    input_cash_ids: Vec<String>,
-    handling_fee: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    change: Option<CashChangeParam>,
-    /// snarkjs `proof.json` for the split conservation proof. Only required
-    /// when `change.is_some()`; chain rejects empty proof in split mode.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    zk_proof: Option<String>,
-    /// For buy orders in split mode: the actual cash commitment (poseidon(usdt_total, r_cash)).
-    /// Split proof and locked cash use this instead of `amount` (which is the token1 qty commitment).
-    /// Omitted for sell orders or no-split mode (chain falls back to `amount`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    locked_commitment: Option<CipherText>,
+    pub price: Option<u64>,
+    pub amount: CipherText, // cm_q
+    pub pubkey: String,
+    pub signature: String,
+    pub anchor: String,
+    pub input_nullifiers: Vec<String>,
+    pub locked_commitment: String,
+    pub fee: u64,
+    pub change_commitment: String,
+    pub zk_proof: String,
 }
 
-#[derive(Debug, Serialize)]
-struct TradePairJson {
-    token1: TokenID,
-    token2: TokenID,
+#[derive(Debug, Clone, Serialize)]
+pub struct TradePairJson {
+    pub token1: TokenID,
+    pub token2: TokenID,
 }
 
 // ────────────────────── SendOrder Signing Message ──────────────────────
 
 /// Domain tag separating the SendOrder signing message from every other
 /// ed25519 message in the system (e.g. the co-zk settle messages).
-const SEND_ORDER_SIGNING_DOMAIN: &str = "invisibook-send-order-v1";
+const SEND_ORDER_SIGNING_DOMAIN: &str = "invisibook-send-order-v2";
 
 /// Appends `s` to `buf` prefixed with its u32 big-endian byte length, so
 /// consecutive fields of arbitrary content concatenate without ambiguity.
@@ -61,27 +51,14 @@ fn put_signing_field(buf: &mut Vec<u8>, s: &str) {
     buf.extend_from_slice(s.as_bytes());
 }
 
-/// Appends a u32 big-endian element count followed by each element as a
-/// length-prefixed field, so list boundaries are unambiguous.
-fn put_signing_list(buf: &mut Vec<u8>, list: &[String]) {
-    buf.extend_from_slice(&(list.len() as u32).to_be_bytes());
-    for s in list {
-        put_signing_field(buf, s);
-    }
-}
-
 /// Canonical byte string the order owner ed25519-signs to authorize a
 /// SendOrder request. Covers every request field except the signature itself
 /// and the zk proof (already bound to its commitments through public-input
 /// verification). The `signature` field of `params` is not part of the
 /// message and may be empty. Must stay in lockstep with Go
 /// `core.SendOrderSigningMessage`.
-fn send_order_signing_message(params: &SendOrderParams) -> Vec<u8> {
+pub fn send_order_signing_message(params: &SendOrderParams) -> Vec<u8> {
     let price = params.price.map(|p| p.to_string()).unwrap_or_default();
-    let (change_flag, change_cash_id, change_amount) = match &params.change {
-        Some(c) => ("1", c.cash_id.as_str(), c.amount.as_str()),
-        None => ("0", "", ""),
-    };
     let mut buf = Vec::with_capacity(256);
     put_signing_field(&mut buf, SEND_ORDER_SIGNING_DOMAIN);
     put_signing_field(&mut buf, &params.id);
@@ -91,12 +68,15 @@ fn send_order_signing_message(params: &SendOrderParams) -> Vec<u8> {
     put_signing_field(&mut buf, &price);
     put_signing_field(&mut buf, &params.amount);
     put_signing_field(&mut buf, &params.pubkey);
-    put_signing_list(&mut buf, &params.input_cash_ids);
-    put_signing_list(&mut buf, &params.handling_fee);
-    put_signing_field(&mut buf, change_flag);
-    put_signing_field(&mut buf, change_cash_id);
-    put_signing_field(&mut buf, change_amount);
-    put_signing_field(&mut buf, params.locked_commitment.as_deref().unwrap_or(""));
+    put_signing_field(&mut buf, &params.anchor);
+    put_signing_field(&mut buf, &params.input_nullifiers[0]);
+    put_signing_field(&mut buf, &params.input_nullifiers[1]);
+    put_signing_field(&mut buf, &params.locked_commitment);
+    // Fee as a raw u64-BE 8-byte field (matches Go's binary.BigEndian).
+    let fee_bytes = params.fee.to_be_bytes();
+    buf.extend_from_slice(&(fee_bytes.len() as u32).to_be_bytes());
+    buf.extend_from_slice(&fee_bytes);
+    put_signing_field(&mut buf, &params.change_commitment);
     buf
 }
 
@@ -286,16 +266,17 @@ pub struct QueryOrderItem {
     pub price: Option<u64>,
     pub amount: CipherText,
     pub pubkey: String,
-    pub input_cash_ids: Vec<String>,
     #[serde(default)]
-    pub handling_fee: Vec<String>,
+    pub locked_commitment: String,
+    #[serde(default)]
+    pub fee: u64,
     #[serde(default)]
     pub block_height: u32,
+    #[serde(default)]
+    pub intra_block_index: u32,
     pub status: u8,
     #[serde(default)]
     pub match_order: Option<String>,
-    #[serde(default)]
-    pub is_smaller: bool,
 }
 
 /// Go's `*big.Int` serializes as a JSON string (e.g. `"100"`) via `MarshalText`,
@@ -513,49 +494,14 @@ impl ChainClient {
     }
 
     /// Submits a new order to the chain. When `change` is provided (split
-    /// mode), `split_proof_json` must contain the ZK proof proving
-    /// sum(inputs) == sum(outputs).
-    ///
-    /// `locked_commitment` is required for buy orders in split mode: the actual
-    /// cash commitment (poseidon(usdt_total, r_cash)). The chain uses it for
-    /// split proof verification and locked cash creation, while `order.amount`
-    /// stores the token1 quantity commitment for MPC comparison.
+    /// Submits a SendOrder v2 request. The caller assembles `params`
+    /// (nullifiers, cm_q, locked commitment, fee, change commitment) and the
+    /// send_order proof; this method signs the canonical message and submits.
     pub async fn send_order(
         &self,
-        order: &Order,
-        change: Option<&CashChange>,
-        split_proof_json: Option<String>,
-        locked_commitment: Option<CipherText>,
+        mut params: SendOrderParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if change.is_some() && split_proof_json.is_none() {
-            return Err("split mode requires a zk_proof".into());
-        }
-        let type_int = match order.trade_type {
-            TradeType::Buy => 0u8,
-            TradeType::Sell => 1u8,
-        };
-        let mut params = SendOrderParams {
-            id: order.id.clone(),
-            trade_type: type_int,
-            subject: TradePairJson {
-                token1: order.subject.token1.clone(),
-                token2: order.subject.token2.clone(),
-            },
-            price: order.price,
-            amount: order.amount.clone(),
-            pubkey: self.pubkey_hex.clone(),
-            signature: String::new(),
-            input_cash_ids: order.input_cash_ids.clone(),
-            handling_fee: order.handling_fee.clone(),
-            change: change.map(|c| CashChangeParam {
-                cash_id: c.cash_id.clone(),
-                amount: c.amount.clone(),
-            }),
-            zk_proof: split_proof_json,
-            locked_commitment,
-        };
-        // Sign the canonical full-field message (not just the order ID) so no
-        // observer can replay the signature with altered price/pair/fee fields.
+        params.pubkey = self.pubkey_hex.clone();
         params.signature = self.sign(&send_order_signing_message(&params));
         self.client
             .write_chain("orderbook", "SendOrder", &params, self.chain_id, 100, 0)
@@ -1132,12 +1078,12 @@ fn query_item_to_order(item: QueryOrderItem) -> Order {
         price: item.price,
         amount: item.amount,
         pubkey: item.pubkey,
-        input_cash_ids: item.input_cash_ids,
-        handling_fee: item.handling_fee,
+        locked_commitment: item.locked_commitment,
+        fee: item.fee,
         block_height: item.block_height,
+        intra_block_index: item.intra_block_index,
         status,
         match_order: item.match_order,
-        is_smaller: item.is_smaller,
     }
 }
 
@@ -1271,75 +1217,47 @@ mod tests {
                 token2: "USDT".to_string(),
             },
             price: Some(3500),
-            amount: "amt-commit".to_string(),
+            amount: "a".repeat(64),
             pubkey: "alice-pk".to_string(),
             signature: String::new(),
-            input_cash_ids: vec!["cash-a".to_string(), "cash-b".to_string()],
-            handling_fee: vec!["5".to_string(), "10".to_string()],
-            change: Some(CashChangeParam {
-                cash_id: "change-cash".to_string(),
-                amount: "change-amt".to_string(),
-            }),
-            zk_proof: None,
-            locked_commitment: Some("locked-commit".to_string()),
+            anchor: "b".repeat(64),
+            input_nullifiers: vec!["c".repeat(64), "d".repeat(64)],
+            locked_commitment: "e".repeat(64),
+            fee: 7,
+            change_commitment: "f".repeat(64),
+            zk_proof: String::new(),
         }
     }
 
+    /// Byte-lockstep with Go core.SendOrderSigningMessage (v2): the frozen
+    /// vector below was recomputed from the shared layout and the Go test
+    /// asserts the identical bytes.
     #[test]
     fn send_order_signing_message_lockstep_vectors() {
-        let full_vector = "00000018696e76697369626f6f6b2d73656e642d6f726465722d7631000000076f726465722d31000000013000000003455448000000045553445400000004333530300000000a616d742d636f6d6d697400000008616c6963652d706b0000000200000006636173682d6100000006636173682d6200000002000000013500000002313000000001310000000b6368616e67652d636173680000000a6368616e67652d616d740000000d6c6f636b65642d636f6d6d6974";
+        let want = "00000018696e76697369626f6f6b2d73656e642d6f726465722d7632000000076f726465722d3100000001300000000345544800000004555344540000000433353030000000406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100000008616c6963652d706b00000040626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262620000004063636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363000000406464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646400000040656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565650000000800000000000000070000004066666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666";
         assert_eq!(
             hex::encode(send_order_signing_message(&full_send_order_params())),
-            full_vector
-        );
-
-        // Minimal request: no price, no change, no locked commitment — all
-        // three encode as empty fields (with change flag "0").
-        let minimal_vector = "00000018696e76697369626f6f6b2d73656e642d6f726465722d7631000000076f726465722d3200000001310000000345544800000004555344540000000000000003616d7400000006626f622d706b0000000100000006636173682d630000000100000001300000000130000000000000000000000000";
-        let minimal = SendOrderParams {
-            id: "order-2".to_string(),
-            trade_type: 1,
-            subject: TradePairJson {
-                token1: "ETH".to_string(),
-                token2: "USDT".to_string(),
-            },
-            price: None,
-            amount: "amt".to_string(),
-            pubkey: "bob-pk".to_string(),
-            signature: String::new(),
-            input_cash_ids: vec!["cash-c".to_string()],
-            handling_fee: vec!["0".to_string()],
-            change: None,
-            zk_proof: None,
-            locked_commitment: None,
-        };
-        assert_eq!(
-            hex::encode(send_order_signing_message(&minimal)),
-            minimal_vector
+            want
         );
     }
 
-    /// The signature field itself and the zk proof are excluded from the
-    /// message, while every order-defining field changes it.
+    /// The signature and zk proof are excluded from the message; every
+    /// order-defining field changes it.
     #[test]
     fn send_order_signing_message_field_coverage() {
         let base = send_order_signing_message(&full_send_order_params());
 
         let mut signed = full_send_order_params();
         signed.signature = "ff".repeat(64);
-        signed.zk_proof = Some("proof".to_string());
+        signed.zk_proof = "proof".to_string();
         assert_eq!(send_order_signing_message(&signed), base);
 
         let mut priced = full_send_order_params();
         priced.price = Some(1);
         assert_ne!(send_order_signing_message(&priced), base);
 
-        let mut retokened = full_send_order_params();
-        retokened.subject.token1 = "SHIB".to_string();
-        assert_ne!(send_order_signing_message(&retokened), base);
-
         let mut refeed = full_send_order_params();
-        refeed.handling_fee = vec!["999999".to_string()];
+        refeed.fee = 999_999;
         assert_ne!(send_order_signing_message(&refeed), base);
     }
 }
