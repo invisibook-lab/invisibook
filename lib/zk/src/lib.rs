@@ -179,10 +179,14 @@ pub fn verify_proof<E: Pairing>(
 /// snarkjs zkey has to be generated from the O2 R1CS for the witness layout
 /// to match.
 fn circuit_opt_flag(name: &str) -> &'static str {
-    if name == "settle_cozk" {
-        "--O2"
-    } else {
-        "--O0"
+    match name {
+        // settle_cozk must match the co-snarks witness layout; the
+        // shielded-pool circuits need full linear elimination to fit the
+        // dev ptau (spend circuits are ~16k non-linear + ~18k linear at O1).
+        "settle_cozk" | "note_deposit" | "spend_withdraw" | "send_order" | "settle_small"
+        | "settle_large" | "claim_fees" => "--O2",
+        // Legacy circuits keep O0: their committed VKs were built at O0.
+        _ => "--O0",
     }
 }
 

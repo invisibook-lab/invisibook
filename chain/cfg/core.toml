@@ -1,5 +1,9 @@
 # Core Tripod Configuration
 
+# Enters every bind transcript (cross-chain replay protection); must equal
+# the yu kernel's chain id in chain.toml.
+chain_id = 1926
+
 [orderbook]
 db_path      = "data/orders.db"
 db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
@@ -21,6 +25,14 @@ db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
 # relative to wherever you launch the chain from.
 deposit_vk_path  = "vk/deposit_vk.json"
 withdraw_vk_path = "vk/withdraw_vk.json"
+# Shielded-pool circuits (note model).
+note_deposit_vk_path   = "vk/note_deposit_vk.json"
+spend_withdraw_vk_path = "vk/spend_withdraw_vk.json"
+# Bridge operator ed25519 pubkey (64-char hex). Interim NoteDeposit gate
+# until the real bridge inclusion proof lands: when set, deposits must be
+# operator-signed; when empty the check is SKIPPED — dev only, a public
+# network must set it.
+bridge_operator_pubkey = ""
 
 # Genesis cash: explicit Cash records inserted at chain startup.
 # IDs and ciphertexts must match cfg/tests/alice_cash.json and bob_cash.json.

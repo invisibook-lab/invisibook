@@ -152,6 +152,56 @@ pub fn note_fr_to_hex(f: &Fr) -> String {
     fr_to_hex(f)
 }
 
+/// ASCII domain every bind transcript starts with (Go: `bindDomain`).
+pub const BIND_DOMAIN: &str = "invisibook.bind.v1";
+
+/// Circuit-family version in every bind transcript (Go: `bindVersion`).
+pub const BIND_VERSION: u32 = 1;
+
+/// Bind for a NoteDeposit request. Field layout mirrors Go
+/// `core.noteDepositBind` exactly; hex strings enter as ASCII bytes.
+pub fn note_deposit_bind(
+    chain_id: u64,
+    token: &str,
+    bridge_commitment_hex: &str,
+    cm_out_hex: &str,
+) -> Fr {
+    bind_hash(&[
+        BIND_DOMAIN.as_bytes(),
+        &chain_id.to_be_bytes(),
+        b"note_deposit",
+        &BIND_VERSION.to_be_bytes(),
+        token.as_bytes(),
+        bridge_commitment_hex.as_bytes(),
+        cm_out_hex.as_bytes(),
+    ])
+}
+
+/// Bind for a NoteWithdraw request (Go: `core.noteWithdrawBind`).
+#[allow(clippy::too_many_arguments)]
+pub fn note_withdraw_bind(
+    chain_id: u64,
+    token: &str,
+    anchor_hex: &str,
+    nf0_hex: &str,
+    nf1_hex: &str,
+    bridge_out_hex: &str,
+    cm_change_hex: &str,
+) -> Fr {
+    bind_hash(&[
+        BIND_DOMAIN.as_bytes(),
+        &chain_id.to_be_bytes(),
+        b"spend_withdraw",
+        &BIND_VERSION.to_be_bytes(),
+        token.as_bytes(),
+        anchor_hex.as_bytes(),
+        nf0_hex.as_bytes(),
+        nf1_hex.as_bytes(),
+        bridge_out_hex.as_bytes(),
+        cm_change_hex.as_bytes(),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

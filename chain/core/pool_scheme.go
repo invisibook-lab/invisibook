@@ -1,0 +1,285 @@
+package core
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/big"
+	"sync"
+
+	"gorm.io/gorm"
+)
+
+// ────────────────────── SQL models ──────────────────────
+
+// NoteScheme is one leaf of the note commitment tree. `cm` is deliberately
+// a NON-unique index: duplicate commitments are legal (Faerie Gold is
+// prevented by the position-bound rho, not by leaf uniqueness).
+type NoteScheme struct {
+	LeafIndex uint64 `gorm:"primaryKey;autoIncrement:false;column:leaf_index"`
+	Cm        string `gorm:"column:cm;index;not null"` // 64-char hex
+	Height    uint64 `gorm:"column:height"`
+	Source    string `gorm:"column:source"` // "genesis" | "deposit" | "withdraw-change" | ...
+}
+
+func (NoteScheme) TableName() string { return "notes" }
+
+// NullifierScheme is the presence-keyed spent set: a row exists iff the
+// nullifier was published. No undo data — the row IS the bit.
+type NullifierScheme struct {
+	Nf     string `gorm:"primaryKey;column:nf"` // 64-char hex
+	Height uint64 `gorm:"column:height"`
+	By     string `gorm:"column:by"` // request kind for debugging, no identity
+}
+
+func (NullifierScheme) TableName() string { return "nullifiers" }
+
+// AnchorScheme records every historical tree root. All anchors stay valid
+// forever; spends may reference any of them.
+type AnchorScheme struct {
+	Root      string `gorm:"primaryKey;column:root"` // 64-char hex
+	LeafCount uint64 `gorm:"column:leaf_count"`
+	Height    uint64 `gorm:"column:height"`
+}
+
+func (AnchorScheme) TableName() string { return "anchors" }
+
+// TreeStateScheme is the singleton frontier snapshot (id = 1). If it ever
+// disagrees with the notes table, the frontier is rebuilt by replaying the
+// notes in leaf order (self-healing).
+type TreeStateScheme struct {
+	ID           uint   `gorm:"primaryKey;column:id"`
+	LeafCount    uint64 `gorm:"column:leaf_count"`
+	FrontierJSON string `gorm:"column:frontier_json"`
+}
+
+func (TreeStateScheme) TableName() string { return "tree_state" }
+
+// BridgeSeenScheme deduplicates bridge commitments: replaying the same
+// deposit event cannot mint twice. (Forgery is separately gated by the
+// bridge operator signature until the real inclusion proof lands.)
+type BridgeSeenScheme struct {
+	BridgeCommitment string `gorm:"primaryKey;column:bridge_commitment"`
+	Height           uint64 `gorm:"column:height"`
+}
+
+func (BridgeSeenScheme) TableName() string { return "bridge_seen" }
+
+// ────────────────────── Pool store ──────────────────────
+
+// pool holds the in-memory frontier mirror of the notes table, guarded for
+// concurrent writings. The DB rows are the source of truth; the mirror is
+// rebuilt from them whenever they disagree.
+type pool struct {
+	mu       sync.Mutex
+	frontier *Frontier
+}
+
+// InitPool loads or rebuilds the frontier from the database. Call once at
+// tripod construction, after AutoMigrate.
+func (a *Account) InitPool() error {
+	a.pool.mu.Lock()
+	defer a.pool.mu.Unlock()
+	f, err := loadFrontier(a.db)
+	if err != nil {
+		return err
+	}
+	a.pool.frontier = f
+	return nil
+}
+
+// loadFrontier restores the frontier from tree_state, falling back to a
+// full replay of the notes table when the snapshot is missing or stale.
+func loadFrontier(db *gorm.DB) (*Frontier, error) {
+	var noteCount int64
+	if err := db.Model(&NoteScheme{}).Count(&noteCount).Error; err != nil {
+		return nil, fmt.Errorf("counting notes: %w", err)
+	}
+
+	var st TreeStateScheme
+	err := db.First(&st, "id = ?", 1).Error
+	if err == nil && st.LeafCount == uint64(noteCount) {
+		var fs FrontierState
+		if jerr := json.Unmarshal([]byte(st.FrontierJSON), &fs); jerr == nil {
+			if f, ferr := FrontierFromState(fs); ferr == nil {
+				return f, nil
+			}
+		}
+		// Fall through to replay on any decode failure.
+	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("loading tree state: %w", err)
+	}
+
+	// Replay all notes in leaf order.
+	f := NewFrontier()
+	var rows []NoteScheme
+	if err := db.Order("leaf_index asc").Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("replaying notes: %w", err)
+	}
+	for i, row := range rows {
+		if row.LeafIndex != uint64(i) {
+			return nil, fmt.Errorf("notes table has a gap: row %d has leaf_index %d", i, row.LeafIndex)
+		}
+		cm, ok := new(big.Int).SetString(row.Cm, 16)
+		if !ok {
+			return nil, fmt.Errorf("note %d cm is not hex: %q", row.LeafIndex, row.Cm)
+		}
+		if _, err := f.Append(cm); err != nil {
+			return nil, err
+		}
+	}
+	return f, nil
+}
+
+// PoolMutation is one atomic pool update: publish nullifiers, append
+// notes, refresh the frontier snapshot, and record the new anchor — all in
+// ONE SQLite transaction. `extra` (optional) runs inside the same
+// transaction for request-specific rows (e.g. bridge_seen).
+type PoolMutation struct {
+	Nullifiers []string // 64-char hex, pre-checked unused
+	NoteCms    []*big.Int
+	Height     uint64
+	Source     string
+	By         string
+	Extra      func(tx *gorm.DB) error
+}
+
+// ApplyPoolMutation executes the mutation atomically. On success it returns
+// the leaf indices of the appended notes. On any error the transaction is
+// rolled back and the in-memory frontier is restored from the database, so
+// chain state and mirror can never diverge. The nullifier rows are written
+// before the notes as defense-in-depth (never mint without having spent).
+func (a *Account) ApplyPoolMutation(m PoolMutation) ([]uint64, error) {
+	a.pool.mu.Lock()
+	defer a.pool.mu.Unlock()
+
+	// Trial-append on a copy so a full tree (or any frontier error) rejects
+	// the request before any DB write.
+	work := *a.pool.frontier
+	indices := make([]uint64, 0, len(m.NoteCms))
+	for _, cm := range m.NoteCms {
+		idx, err := work.Append(cm)
+		if err != nil {
+			return nil, err
+		}
+		indices = append(indices, idx)
+	}
+
+	err := a.db.Transaction(func(tx *gorm.DB) error {
+		for _, nf := range m.Nullifiers {
+			if err := tx.Create(&NullifierScheme{Nf: nf, Height: m.Height, By: m.By}).Error; err != nil {
+				return fmt.Errorf("inserting nullifier %s: %w", nf, err)
+			}
+		}
+		for i, cm := range m.NoteCms {
+			row := &NoteScheme{
+				LeafIndex: indices[i],
+				Cm:        FrToHex(cm),
+				Height:    m.Height,
+				Source:    m.Source,
+			}
+			if err := tx.Create(row).Error; err != nil {
+				return fmt.Errorf("appending note %d: %w", indices[i], err)
+			}
+		}
+		if len(m.NoteCms) > 0 {
+			fs, err := json.Marshal(work.State())
+			if err != nil {
+				return err
+			}
+			st := TreeStateScheme{ID: 1, LeafCount: work.Size(), FrontierJSON: string(fs)}
+			if err := tx.Save(&st).Error; err != nil {
+				return fmt.Errorf("saving tree state: %w", err)
+			}
+			anchor := AnchorScheme{Root: FrToHex(work.Root()), LeafCount: work.Size(), Height: m.Height}
+			if err := tx.Where(AnchorScheme{Root: anchor.Root}).
+				FirstOrCreate(&anchor).Error; err != nil {
+				return fmt.Errorf("recording anchor: %w", err)
+			}
+		}
+		if m.Extra != nil {
+			if err := m.Extra(tx); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	a.pool.frontier = &work
+	return indices, nil
+}
+
+// NullifierSpent reports whether a nullifier is already in the spent set.
+func (a *Account) NullifierSpent(nf string) (bool, error) {
+	var count int64
+	if err := a.db.Model(&NullifierScheme{}).Where("nf = ?", nf).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// AnchorKnown reports whether a root was ever a tree root on this chain.
+// The empty-tree root is always valid.
+func (a *Account) AnchorKnown(root string) (bool, error) {
+	if root == FrToHex(EmptyRoot(TreeDepth)) {
+		return true, nil
+	}
+	var count int64
+	if err := a.db.Model(&AnchorScheme{}).Where("root = ?", root).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// BridgeSeen reports whether a bridge commitment was already consumed.
+func (a *Account) BridgeSeen(bridgeCommitment string) (bool, error) {
+	var count int64
+	if err := a.db.Model(&BridgeSeenScheme{}).
+		Where("bridge_commitment = ?", bridgeCommitment).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// PoolSize returns the current leaf count.
+func (a *Account) PoolSize() uint64 {
+	a.pool.mu.Lock()
+	defer a.pool.mu.Unlock()
+	return a.pool.frontier.Size()
+}
+
+// PoolRoot returns the current tree root as 64-char hex.
+func (a *Account) PoolRoot() string {
+	a.pool.mu.Lock()
+	defer a.pool.mu.Unlock()
+	return FrToHex(a.pool.frontier.Root())
+}
+
+// FindNotes returns up to `limit` notes starting at `startIndex` in leaf
+// order (limit <= 0 means no limit).
+func (a *Account) FindNotes(startIndex uint64, limit int) ([]NoteScheme, error) {
+	q := a.db.Where("leaf_index >= ?", startIndex).Order("leaf_index asc")
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	var rows []NoteScheme
+	if err := q.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// FindNoteByCm returns the smallest leaf index holding `cm`, or -1.
+func (a *Account) FindNoteByCm(cm string) (int64, error) {
+	var row NoteScheme
+	err := a.db.Where("cm = ?", cm).Order("leaf_index asc").First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return -1, nil
+	}
+	if err != nil {
+		return -1, err
+	}
+	return int64(row.LeafIndex), nil
+}
