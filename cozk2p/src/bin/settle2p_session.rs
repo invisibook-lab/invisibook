@@ -33,7 +33,7 @@ use clap::{Parser, ValueEnum};
 use cozk2p::{
     default_cache_dir, dev_keys,
     net::connect_retry,
-    session::{NeedSig, SessionInput, SigIo, run_session, sanity_check_input},
+    session::{NeedSig, SessionConfig, SessionInput, SigIo, run_session, sanity_check_input},
     stats::peak_rss_bytes,
 };
 use serde_json::json;
@@ -187,9 +187,11 @@ async fn main() -> Result<()> {
         party,
         &input,
         &mut sig_io,
-        &pk,
-        &vk,
-        &out_dir,
+        SessionConfig {
+            pk: &pk,
+            vk: &vk,
+            out_dir: &out_dir,
+        },
         |name, msg| emit_phase(name, msg),
     )
     .await?;

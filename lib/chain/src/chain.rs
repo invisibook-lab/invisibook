@@ -26,7 +26,7 @@ struct SendOrderParams {
     price: Option<u64>,
     amount: CipherText,
     pubkey: String,    // sender's ed25519 pubkey (64-char hex)
-    signature: String, // ed25519 sig over order ID bytes (128-char hex)
+    signature: String, // ed25519 sig over `send_order_signing_message` (128-char hex)
     input_cash_ids: Vec<String>,
     handling_fee: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,6 +46,58 @@ struct SendOrderParams {
 struct TradePairJson {
     token1: TokenID,
     token2: TokenID,
+}
+
+// ────────────────────── SendOrder Signing Message ──────────────────────
+
+/// Domain tag separating the SendOrder signing message from every other
+/// ed25519 message in the system (e.g. the co-zk settle messages).
+const SEND_ORDER_SIGNING_DOMAIN: &str = "invisibook-send-order-v1";
+
+/// Appends `s` to `buf` prefixed with its u32 big-endian byte length, so
+/// consecutive fields of arbitrary content concatenate without ambiguity.
+fn put_signing_field(buf: &mut Vec<u8>, s: &str) {
+    buf.extend_from_slice(&(s.len() as u32).to_be_bytes());
+    buf.extend_from_slice(s.as_bytes());
+}
+
+/// Appends a u32 big-endian element count followed by each element as a
+/// length-prefixed field, so list boundaries are unambiguous.
+fn put_signing_list(buf: &mut Vec<u8>, list: &[String]) {
+    buf.extend_from_slice(&(list.len() as u32).to_be_bytes());
+    for s in list {
+        put_signing_field(buf, s);
+    }
+}
+
+/// Canonical byte string the order owner ed25519-signs to authorize a
+/// SendOrder request. Covers every request field except the signature itself
+/// and the zk proof (already bound to its commitments through public-input
+/// verification). The `signature` field of `params` is not part of the
+/// message and may be empty. Must stay in lockstep with Go
+/// `core.SendOrderSigningMessage`.
+fn send_order_signing_message(params: &SendOrderParams) -> Vec<u8> {
+    let price = params.price.map(|p| p.to_string()).unwrap_or_default();
+    let (change_flag, change_cash_id, change_amount) = match &params.change {
+        Some(c) => ("1", c.cash_id.as_str(), c.amount.as_str()),
+        None => ("0", "", ""),
+    };
+    let mut buf = Vec::with_capacity(256);
+    put_signing_field(&mut buf, SEND_ORDER_SIGNING_DOMAIN);
+    put_signing_field(&mut buf, &params.id);
+    put_signing_field(&mut buf, &params.trade_type.to_string());
+    put_signing_field(&mut buf, &params.subject.token1);
+    put_signing_field(&mut buf, &params.subject.token2);
+    put_signing_field(&mut buf, &price);
+    put_signing_field(&mut buf, &params.amount);
+    put_signing_field(&mut buf, &params.pubkey);
+    put_signing_list(&mut buf, &params.input_cash_ids);
+    put_signing_list(&mut buf, &params.handling_fee);
+    put_signing_field(&mut buf, change_flag);
+    put_signing_field(&mut buf, change_cash_id);
+    put_signing_field(&mut buf, change_amount);
+    put_signing_field(&mut buf, params.locked_commitment.as_deref().unwrap_or(""));
+    buf
 }
 
 /// Per-party MPC share submission for the comparison phase.
@@ -106,24 +158,46 @@ pub struct SettleTokenLegParam {
 }
 
 /// Mirror of chain Go `CoZkSettleRequest` — the single-submission co-zk
-/// settlement message. `order_a_id` must be the maker's order (earlier block
-/// height; ties broken by the smaller order ID), `cmp` the public three-way
-/// comparison sign(a - b), and the six commitments the circuit's public
-/// outputs. `sig_a`/`sig_b` are ed25519 signatures over
-/// `settle_cozk_message` by each order's key.
+/// settlement message, serving both variants (`SettleOrdersCoZk` and
+/// `SettleOrdersCoZk2p`). The six `*_commitment` fields are the settlement
+/// circuit's public outputs: 64-char big-endian hex of
+/// `Poseidon(amount, blinding)` over BN254, with fresh blindings drawn by
+/// the owning side during the settle session.
 #[derive(Debug, Clone, Serialize)]
 pub struct SettleCoZkParams {
+    /// The maker's order ID (lower block height; ties broken by the
+    /// lexicographically smaller ID) — always the circuit's a-side.
     pub order_a_id: OrderID,
+    /// The taker's order ID — the circuit's b-side.
     pub order_b_id: OrderID,
+    /// Public three-way comparison of the hidden order amounts,
+    /// `sign(a - b)`: `1` → B fully fills and A survives with a remainder,
+    /// `-1` → the reverse, `0` → both fill exactly.
     pub cmp: i8,
+    /// A's remainder order amount, `a - fill` (commits 0 when A fully
+    /// fills). The chain relists order A under it when `cmp == 1`.
     pub new_order_a_commitment: String,
+    /// B's remainder order amount — the relist analogue for `cmp == -1`.
     pub new_order_b_commitment: String,
+    /// A's remainder collateral in A's locked token (the remainder itself
+    /// for a seller, remainder × price for a buyer); minted as A's fresh
+    /// Locked cash when `cmp == 1`.
     pub new_locked_a_commitment: String,
+    /// B's remainder collateral — minted when `cmp == -1`.
     pub new_locked_b_commitment: String,
+    /// What A receives: `fill` token1 when A buys, `fill × price` token2
+    /// when A sells. Minted as an Active cash owned by order A's pubkey.
     pub recv_a_commitment: String,
+    /// What B receives — the opposite leg of `recv_a_commitment`.
     pub recv_b_commitment: String,
+    /// Trader A's ed25519 signature (128-char hex) over the canonical
+    /// settlement message (`settle_cozk_message` / `settle_cozk2p_message`
+    /// by variant), verified on-chain against order A's pubkey.
     pub sig_a: String,
+    /// Trader B's signature over the same message, by order B's key.
     pub sig_b: String,
+    /// The jointly generated proof: snarkjs Groth16 JSON for the 3-party
+    /// variant, hex-encoded ark-compressed PLONK bytes for the 2-party one.
     pub zk_proof: String,
 }
 
@@ -444,8 +518,7 @@ impl ChainClient {
             TradeType::Buy => 0u8,
             TradeType::Sell => 1u8,
         };
-        let signature = self.sign(order.id.as_bytes());
-        let params = SendOrderParams {
+        let mut params = SendOrderParams {
             id: order.id.clone(),
             trade_type: type_int,
             subject: TradePairJson {
@@ -455,7 +528,7 @@ impl ChainClient {
             price: order.price,
             amount: order.amount.clone(),
             pubkey: self.pubkey_hex.clone(),
-            signature,
+            signature: String::new(),
             input_cash_ids: order.input_cash_ids.clone(),
             handling_fee: order.handling_fee.clone(),
             change: change.map(|c| CashChangeParam {
@@ -465,6 +538,9 @@ impl ChainClient {
             zk_proof: split_proof_json,
             locked_commitment,
         };
+        // Sign the canonical full-field message (not just the order ID) so no
+        // observer can replay the signature with altered price/pair/fee fields.
+        params.signature = self.sign(&send_order_signing_message(&params));
         self.client
             .write_chain("orderbook", "SendOrder", &params, self.chain_id, 100, 0)
             .await
@@ -1032,6 +1108,94 @@ mod tests {
                 + &p.recv_b_commitment;
             assert_eq!(settle_cozk2p_message(&p), expected.into_bytes());
         }
+    }
+
+    /// Builds a SendOrderParams exercising every field of the signing
+    /// message: split mode with change output and locked commitment.
+    fn full_send_order_params() -> SendOrderParams {
+        SendOrderParams {
+            id: "order-1".to_string(),
+            trade_type: 0,
+            subject: TradePairJson {
+                token1: "ETH".to_string(),
+                token2: "USDT".to_string(),
+            },
+            price: Some(3500),
+            amount: "amt-commit".to_string(),
+            pubkey: "alice-pk".to_string(),
+            signature: String::new(),
+            input_cash_ids: vec!["cash-a".to_string(), "cash-b".to_string()],
+            handling_fee: vec!["5".to_string(), "10".to_string()],
+            change: Some(CashChangeParam {
+                cash_id: "change-cash".to_string(),
+                amount: "change-amt".to_string(),
+            }),
+            zk_proof: None,
+            locked_commitment: Some("locked-commit".to_string()),
+        }
+    }
+
+    /// The signing message must match the byte layout shared with the Go
+    /// chain (`core.SendOrderSigningMessage`): each field u32-BE
+    /// length-prefixed, lists prefixed with a u32-BE element count. The
+    /// expected hex was computed independently from the layout spec; the Go
+    /// side asserts the identical vectors.
+    #[test]
+    fn send_order_signing_message_lockstep_vectors() {
+        let full_vector = "00000018696e76697369626f6f6b2d73656e642d6f726465722d7631000000076f726465722d31000000013000000003455448000000045553445400000004333530300000000a616d742d636f6d6d697400000008616c6963652d706b0000000200000006636173682d6100000006636173682d6200000002000000013500000002313000000001310000000b6368616e67652d636173680000000a6368616e67652d616d740000000d6c6f636b65642d636f6d6d6974";
+        assert_eq!(
+            hex::encode(send_order_signing_message(&full_send_order_params())),
+            full_vector
+        );
+
+        // Minimal request: no price, no change, no locked commitment — all
+        // three encode as empty fields (with change flag "0").
+        let minimal_vector = "00000018696e76697369626f6f6b2d73656e642d6f726465722d7631000000076f726465722d3200000001310000000345544800000004555344540000000000000003616d7400000006626f622d706b0000000100000006636173682d630000000100000001300000000130000000000000000000000000";
+        let minimal = SendOrderParams {
+            id: "order-2".to_string(),
+            trade_type: 1,
+            subject: TradePairJson {
+                token1: "ETH".to_string(),
+                token2: "USDT".to_string(),
+            },
+            price: None,
+            amount: "amt".to_string(),
+            pubkey: "bob-pk".to_string(),
+            signature: String::new(),
+            input_cash_ids: vec!["cash-c".to_string()],
+            handling_fee: vec!["0".to_string()],
+            change: None,
+            zk_proof: None,
+            locked_commitment: None,
+        };
+        assert_eq!(
+            hex::encode(send_order_signing_message(&minimal)),
+            minimal_vector
+        );
+    }
+
+    /// The signature field itself and the zk proof are excluded from the
+    /// message, while every order-defining field changes it.
+    #[test]
+    fn send_order_signing_message_field_coverage() {
+        let base = send_order_signing_message(&full_send_order_params());
+
+        let mut signed = full_send_order_params();
+        signed.signature = "ff".repeat(64);
+        signed.zk_proof = Some("proof".to_string());
+        assert_eq!(send_order_signing_message(&signed), base);
+
+        let mut priced = full_send_order_params();
+        priced.price = Some(1);
+        assert_ne!(send_order_signing_message(&priced), base);
+
+        let mut retokened = full_send_order_params();
+        retokened.subject.token1 = "SHIB".to_string();
+        assert_ne!(send_order_signing_message(&retokened), base);
+
+        let mut refeed = full_send_order_params();
+        refeed.handling_fee = vec!["999999".to_string()];
+        assert_ne!(send_order_signing_message(&refeed), base);
     }
 
     /// The 3-party builder must keep its original prefix (domain separation).

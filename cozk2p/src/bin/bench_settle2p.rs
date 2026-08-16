@@ -26,11 +26,14 @@ use anyhow::{Context, Result, ensure};
 use ark_mpc::{PARTY0, test_helpers::execute_mock_mpc};
 use ark_serialize::CanonicalSerialize;
 use clap::Parser;
-use cozk2p::poseidon::{commit, fr_to_hex};
-use cozk2p::session::{LockedCash, MyPrivate, NeedSig, SessionInput, SigIo, run_session};
 use cozk2p::{
-    SidePrivate, compute_public, default_cache_dir, dev_keys, prove_single, sample_trade,
-    setup::circuit_size, stats::peak_rss_bytes, verify_settle,
+    SidePrivate, compute_public, default_cache_dir, dev_keys,
+    poseidon::{commit, fr_to_hex},
+    prove_single, sample_trade,
+    session::{LockedCash, MyPrivate, NeedSig, SessionConfig, SessionInput, SigIo, run_session},
+    setup::circuit_size,
+    stats::peak_rss_bytes,
+    verify_settle,
 };
 use serde_json::{Value, json};
 
@@ -94,8 +97,8 @@ fn build_session_inputs(
     } else {
         ("USDT", "ETH")
     };
-    let common = |role: &str, my_id: &str, cash: &str, lock: &str, recv: &str, my: MyPrivate| {
-        SessionInput {
+    let common =
+        |role: &str, my_id: &str, cash: &str, lock: &str, recv: &str, my: MyPrivate| SessionInput {
             role: role.to_string(),
             order_a_id: "order-a".into(),
             order_b_id: "order-b".into(),
@@ -110,8 +113,7 @@ fn build_session_inputs(
             locked_a: locked_a.clone(),
             locked_b: locked_b.clone(),
             my,
-        }
-    };
+        };
     (
         common("trader-a", "order-a", "a-cash", a_lock, a_recv, my_priv(a)),
         common("trader-b", "order-b", "b-cash", a_recv, a_lock, my_priv(b)),
@@ -214,9 +216,11 @@ async fn main() -> Result<()> {
                     party,
                     &input,
                     &mut sig_io,
-                    &pk,
-                    &vk,
-                    &dir,
+                    SessionConfig {
+                        pk: &pk,
+                        vk: &vk,
+                        out_dir: &dir,
+                    },
                     |_, _| {},
                 )
                 .await
@@ -256,8 +260,14 @@ async fn main() -> Result<()> {
                 "settle2p_session binary not found — build with `cargo build --release --bins`",
             )?;
         let keys_dir = default_cache_dir();
-        fs::write(session_tmp.join("a_input.json"), serde_json::to_string(&input_a)?)?;
-        fs::write(session_tmp.join("b_input.json"), serde_json::to_string(&input_b)?)?;
+        fs::write(
+            session_tmp.join("a_input.json"),
+            serde_json::to_string(&input_a)?,
+        )?;
+        fs::write(
+            session_tmp.join("b_input.json"),
+            serde_json::to_string(&input_b)?,
+        )?;
 
         for run in 0..args.runs {
             // Fresh port pair per run to avoid rebind races.
@@ -314,7 +324,9 @@ async fn main() -> Result<()> {
             }
             ensure!(proofs[0] == proofs[1], "parties revealed different proofs");
 
-            println!("  run: total {total_ms:.0} ms (incl. process startup + key load + full session)");
+            println!(
+                "  run: total {total_ms:.0} ms (incl. process startup + key load + full session)"
+            );
             quic_runs.push(json!({ "total_ms": total_ms, "per_party": per_party }));
         }
     }

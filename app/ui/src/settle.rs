@@ -68,13 +68,17 @@ mod inner {
         pub session_dir: PathBuf,
     }
 
-    /// Why a settlement did not complete. `CrossPrice`/`SelfMatch` are
-    /// permanent (the caller should stop retrying the pair); `Transient`
-    /// and `OnChainRejected` are retryable after a backoff.
+    /// Why a settlement did not complete. `CrossPrice`, `SelfMatch`, and
+    /// `Unrecoverable` are permanent (the caller should stop retrying the
+    /// pair); `Transient` and `OnChainRejected` are retryable after a
+    /// backoff.
     #[derive(Clone, Debug)]
     pub enum SettleError {
         CrossPrice(String),
         SelfMatch,
+        /// Local state is missing something no retry can restore (e.g. the
+        /// order-commitment witness whose blinding exists only locally).
+        Unrecoverable(String),
         Transient(String),
         OnChainRejected(String),
     }
@@ -84,6 +88,7 @@ mod inner {
             match self {
                 SettleError::CrossPrice(m) => write!(f, "cross-price match unsupported: {m}"),
                 SettleError::SelfMatch => write!(f, "self-matched pair cannot settle"),
+                SettleError::Unrecoverable(m) => write!(f, "unrecoverable local state: {m}"),
                 SettleError::Transient(m) => write!(f, "{m}"),
                 SettleError::OnChainRejected(m) => write!(f, "settlement rejected on chain: {m}"),
             }
@@ -232,9 +237,12 @@ mod inner {
     }
 
     /// Build this trader's private witness from its local cash records.
-    /// Sells commit the token1 quantity with the locked cash's own random;
-    /// buys (and every co-zk survivor) carry an explicit `order_amount` /
-    /// `order_random` distinct from the locked-cash commitment.
+    /// The first locked input's record must carry the explicit
+    /// `order_amount` / `order_random` witness that opens the on-chain
+    /// `order.amount` commitment — every writer persists it (trade_form on
+    /// lock, settlement on relist, recovery on materialize), and its
+    /// blinding exists nowhere else, so a record without it can never
+    /// settle.
     fn build_my_private(
         order: &Order,
         records: &[CashRecord],
@@ -260,8 +268,11 @@ mod inner {
         let (order_amount, r_order) = match (first.order_amount, first.order_random.clone()) {
             (Some(amount), Some(random)) => (amount, random),
             _ => {
-                let sum: u64 = locked.iter().map(|l| l.amount).sum();
-                (sum, first.random.clone())
+                return Err(SettleError::Unrecoverable(format!(
+                    "locked input {} carries no order-commitment witness \
+                     (order_amount/order_random); order.amount cannot be opened",
+                    first.cash_id
+                )));
             }
         };
         Ok(MyPrivateWire {

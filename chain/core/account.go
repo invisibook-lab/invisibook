@@ -187,7 +187,7 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 type WithdrawRequest struct {
 	Pubkey              string   `json:"pubkey"                validate:"required"`
 	Token               TokenID  `json:"token"                 validate:"required"`
-	Inputs              []string `json:"inputs"                validate:"required,min=1,max=2"`
+	Inputs              []string `json:"inputs"                validate:"required,min=1,max=2,unique"`
 	BridgeOutCommitment string   `json:"bridge_out_commitment" validate:"required,len=64"`
 	OutputCommitments   []string `json:"output_commitments"    validate:"required,len=2,dive,len=64"`
 	// ChangePubkey is the recipient of the change Cash. Defaults to `Pubkey`
