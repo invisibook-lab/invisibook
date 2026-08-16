@@ -177,6 +177,57 @@ pub fn note_deposit_bind(
     ])
 }
 
+/// Bind for a SendOrder v2 request (Go: `core.sendOrderV2Bind`). The order
+/// id, nullifiers, and the three output commitments weld the proof to the
+/// exact signed request.
+#[allow(clippy::too_many_arguments)]
+pub fn send_order_bind(
+    chain_id: u64,
+    order_id: &str,
+    lock_token: &str,
+    nf0_hex: &str,
+    nf1_hex: &str,
+    cm_q_hex: &str,
+    locked_commitment_hex: &str,
+    fee: u64,
+    cm_change_hex: &str,
+) -> Fr {
+    bind_hash(&[
+        BIND_DOMAIN.as_bytes(),
+        &chain_id.to_be_bytes(),
+        b"send_order",
+        &BIND_VERSION.to_be_bytes(),
+        order_id.as_bytes(),
+        lock_token.as_bytes(),
+        nf0_hex.as_bytes(),
+        nf1_hex.as_bytes(),
+        cm_q_hex.as_bytes(),
+        locked_commitment_hex.as_bytes(),
+        &fee.to_be_bytes(),
+        cm_change_hex.as_bytes(),
+    ])
+}
+
+/// Bind for a ClaimFees request (Go: `core.claimFeesBind`).
+pub fn claim_fees_bind(
+    chain_id: u64,
+    producer_pubkey: &str,
+    token: &str,
+    amount: u64,
+    cm_out_hex: &str,
+) -> Fr {
+    bind_hash(&[
+        BIND_DOMAIN.as_bytes(),
+        &chain_id.to_be_bytes(),
+        b"claim_fees",
+        &BIND_VERSION.to_be_bytes(),
+        producer_pubkey.as_bytes(),
+        token.as_bytes(),
+        &amount.to_be_bytes(),
+        cm_out_hex.as_bytes(),
+    ])
+}
+
 /// Bind for a SettleSmall request (Go: `core.settleSmallBind`). The other
 /// publics (cm_q, collateral, price, side, asset) are rebuilt by the chain
 /// from its own order state; bind welds the proof to the pair and the
