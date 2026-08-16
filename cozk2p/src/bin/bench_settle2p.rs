@@ -30,7 +30,10 @@ use cozk2p::{
     SidePrivate, compute_public, default_cache_dir, dev_keys,
     poseidon::{commit, fr_to_hex},
     prove_single, sample_trade,
-    session::{LockedCash, MyPrivate, NeedSig, SessionConfig, SessionInput, SigIo, run_session},
+    session::{
+        CompareReady, LockedCash, MyPrivate, NeedSig, SessionConfig, SessionInput, SigIo,
+        run_session,
+    },
     setup::circuit_size,
     stats::peak_rss_bytes,
     verify_settle,
@@ -49,6 +52,11 @@ struct DummySigIo;
 impl SigIo for DummySigIo {
     fn request_sig(&mut self, _need: &NeedSig) -> Result<String> {
         Ok(DUMMY_SIG.to_string())
+    }
+
+    /// In-process bench: no chain, so the on-chain confirm is a no-op.
+    fn confirm_compare_onchain(&mut self, _ready: &CompareReady) -> Result<()> {
+        Ok(())
     }
 }
 

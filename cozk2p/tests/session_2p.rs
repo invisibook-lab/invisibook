@@ -12,7 +12,10 @@ use ark_serialize::CanonicalDeserialize;
 use cozk2p::{
     dev_keys,
     poseidon::{commit, fr_to_hex},
-    session::{LockedCash, MyPrivate, NeedSig, SessionConfig, SessionInput, SigIo, run_session},
+    session::{
+        CompareReady, LockedCash, MyPrivate, NeedSig, SessionConfig, SessionInput, SigIo,
+        run_session,
+    },
     verify_settle,
 };
 use mpc_plonk::proof_system::structs::Proof;
@@ -34,6 +37,12 @@ impl SigIo for TestSigIo {
     fn request_sig(&mut self, need: &NeedSig) -> Result<String> {
         self.seen = Some(need.clone());
         Ok(self.sig.to_string())
+    }
+
+    /// In-process test: no real chain, so confirming the on-chain compare is
+    /// a no-op that always proceeds to the reveal.
+    fn confirm_compare_onchain(&mut self, _ready: &CompareReady) -> Result<()> {
+        Ok(())
     }
 }
 
