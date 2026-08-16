@@ -252,8 +252,6 @@ mod tests {
     use ark_ff::{BigInteger, PrimeField};
     use circom_bridge::fr_to_decimal_string;
 
-    use crate::wallet::{SettleCoZkSide, SettleCoZkWitness};
-
     /// Cached `dev_setup` result per circuit name. A real ceremony's PK is
     /// loaded once at startup; mirroring that here also avoids paying ~200 ms
     /// of random-setup cost on every test.
@@ -523,7 +521,7 @@ mod tests {
         assert!(generate_proof::<Bn254>("split", &input, params).is_err());
     }
 
-    // ────────────────────── SettleCoZk ──────────────────────
+    // ────────────────────── SettleCmp (co-zk comparison) ──────────────────────
 
     /// Fr blinding rendered as the 32-byte big-endian array the wallet API takes.
     fn r_bytes(seed: u64) -> [u8; 32] {
@@ -533,106 +531,53 @@ mod tests {
         out
     }
 
-    /// Build a settle_cozk witness: A's order is `a_amt` token1, B's `b_amt`,
-    /// each backed by a single locked cash of exactly the required collateral.
-    fn cozk_witness(a_amt: u64, b_amt: u64, price: u64, a_is_seller: bool) -> SettleCoZkWitness {
-        let side = |amt: u64, is_seller: bool, salt: u64| SettleCoZkSide {
-            order_amount: amt,
-            r_order: r_bytes(salt),
-            r_order_new: r_bytes(salt + 1),
-            locked: vec![(if is_seller { amt } else { amt * price }, r_bytes(salt + 2))],
-            r_locked_new: r_bytes(salt + 3),
-            r_recv: r_bytes(salt + 4),
-        };
-        SettleCoZkWitness {
-            a: side(a_amt, a_is_seller, 0x0A00),
-            b: side(b_amt, !a_is_seller, 0x0B00),
-            price,
-            a_is_seller,
-        }
-    }
-
-    /// Prove and verify, then assert the 15-signal public vector layout
-    /// (outputs first, then public inputs) matches the documented order the
-    /// chain rebuilds. Returns the proof for further inspection.
-    fn cozk_prove_and_check(w: &SettleCoZkWitness) -> CircuitProof<Bn254> {
-        use crate::wallet::{
-            poseidon_commit, settle_cozk_cmp_fr, settle_cozk_input_json, settle_cozk_outcome,
-        };
-        let input = settle_cozk_input_json(w).expect("witness builds");
+    /// Prove + verify the comparison statement and pin the 3-signal public
+    /// vector [cmp, order_a, order_b] the chain rebuilds.
+    fn cmp_prove_and_check(a: u64, b: u64, expected_cmp: i8) {
+        use crate::wallet::{poseidon_commit, settle_cmp_fr};
+        let (r_a, r_b) = (r_bytes(0x0A00), r_bytes(0x0B00));
+        let input = serde_json::json!({
+            "cmp": fr_to_decimal_string(&settle_cmp_fr(expected_cmp)),
+            "order_a_commitment": fr_to_decimal_string(&poseidon_commit(a, &r_a)),
+            "order_b_commitment": fr_to_decimal_string(&poseidon_commit(b, &r_b)),
+            "a": a.to_string(),
+            "r_a": fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&r_a)),
+            "b": b.to_string(),
+            "r_b": fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&r_b)),
+        });
         let params = cached_params("settle_cozk");
         let proof = generate_proof::<Bn254>("settle_cozk", &input, params)
             .expect("settle_cozk should prove");
         assert!(verify_proof(&proof, &params.vk).unwrap());
-
-        let out = settle_cozk_outcome(w).expect("outcome computes");
         let expected: Vec<Fr> = vec![
-            settle_cozk_cmp_fr(out.cmp),
-            poseidon_commit(out.a_prime, &w.a.r_order_new),
-            poseidon_commit(out.b_prime, &w.b.r_order_new),
-            poseidon_commit(out.a_new_locked, &w.a.r_locked_new),
-            poseidon_commit(out.b_new_locked, &w.b.r_locked_new),
-            poseidon_commit(out.a_recv, &w.a.r_recv),
-            poseidon_commit(out.b_recv, &w.b.r_recv),
-            poseidon_commit(w.a.order_amount, &w.a.r_order),
-            poseidon_commit(w.b.order_amount, &w.b.r_order),
-            Fr::from(w.price),
-            Fr::from(w.a_is_seller as u64),
-            poseidon_commit(w.a.locked[0].0, &w.a.locked[0].1),
-            poseidon_commit(0, &[0u8; 32]),
-            poseidon_commit(w.b.locked[0].0, &w.b.locked[0].1),
-            poseidon_commit(0, &[0u8; 32]),
+            settle_cmp_fr(expected_cmp),
+            poseidon_commit(a, &r_a),
+            poseidon_commit(b, &r_b),
         ];
-        assert_eq!(
-            proof.public_inputs, expected,
-            "public vector must be [outputs..., public inputs...] in declaration order"
-        );
-        proof
+        assert_eq!(proof.public_inputs, expected);
     }
 
-    /// A (maker) sells 80 token1 at price 3; B buys 60 → B fully fills,
-    /// cmp = 1, A keeps 20 on the book. Covers the seller-is-larger mux path.
     #[test]
-    fn settle_cozk_proof_verifies_partial_fill() {
-        let w = cozk_witness(80, 60, 3, true);
-        cozk_prove_and_check(&w);
+    fn settle_cmp_proves_all_three_outcomes() {
+        cmp_prove_and_check(80, 60, 1);
+        cmp_prove_and_check(50, 90, -1);
+        cmp_prove_and_check(60, 60, 0);
     }
 
-    /// A (maker) buys 50 token1 at price 2; B sells 90 → A fully fills,
-    /// cmp = -1, B keeps 40. Covers the buyer-side-A mux path.
+    /// A lying cmp claim is unsatisfiable.
     #[test]
-    fn settle_cozk_proof_verifies_buyer_maker_smaller() {
-        let w = cozk_witness(50, 90, 2, false);
-        cozk_prove_and_check(&w);
-    }
-
-    /// Equal amounts: cmp = 0, both remainders are commitments to zero.
-    #[test]
-    fn settle_cozk_proof_verifies_equal_amounts() {
-        let w = cozk_witness(60, 60, 5, true);
-        cozk_prove_and_check(&w);
-    }
-
-    /// Buyer collateral must be exactly order_amount * price — a buyer locking
-    /// the wrong total fails witness generation on the conservation constraint.
-    #[test]
-    fn settle_cozk_proof_fails_when_buyer_collateral_mismatched() {
-        use crate::wallet::settle_cozk_input_json;
-        let mut w = cozk_witness(80, 60, 3, true);
-        // B is the buyer and should lock 180; lock 179 instead.
-        w.b.locked = vec![(179, r_bytes(0x0B02))];
-        let input = settle_cozk_input_json(&w).expect("builder does not enforce conservation");
-        let params = cached_params("settle_cozk");
-        assert!(generate_proof::<Bn254>("settle_cozk", &input, params).is_err());
-    }
-
-    /// An order commitment that does not open to (amount, r) is rejected.
-    #[test]
-    fn settle_cozk_proof_fails_when_order_commitment_tampered() {
-        use crate::wallet::settle_cozk_input_json;
-        let w = cozk_witness(80, 60, 3, true);
-        let mut input = settle_cozk_input_json(&w).expect("witness builds");
-        input["order_a_commitment"] = serde_json::json!(hash_str(81));
+    fn settle_cmp_fails_on_wrong_claim() {
+        use crate::wallet::{poseidon_commit, settle_cmp_fr};
+        let (r_a, r_b) = (r_bytes(0x0A00), r_bytes(0x0B00));
+        let input = serde_json::json!({
+            "cmp": fr_to_decimal_string(&settle_cmp_fr(-1)), // lie: a > b
+            "order_a_commitment": fr_to_decimal_string(&poseidon_commit(80, &r_a)),
+            "order_b_commitment": fr_to_decimal_string(&poseidon_commit(60, &r_b)),
+            "a": "80",
+            "r_a": fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&r_a)),
+            "b": "60",
+            "r_b": fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&r_b)),
+        });
         let params = cached_params("settle_cozk");
         assert!(generate_proof::<Bn254>("settle_cozk", &input, params).is_err());
     }

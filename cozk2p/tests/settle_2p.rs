@@ -18,8 +18,8 @@ fn keys_dir() -> std::path::PathBuf {
 /// proof round-trips; tampering with any public signal must fail.
 #[test]
 fn single_prover_roundtrip_and_tamper() {
-    let (a, b, price, a_is_seller) = sample_trade();
-    let public = compute_public(&a, &b, price, a_is_seller).unwrap();
+    let (a, b, _price, _a_is_seller) = sample_trade();
+    let public = compute_public(&a, &b);
 
     let circuit = cozk2p::build_single_prover_circuit(&a, &b, &public).unwrap();
     circuit
@@ -42,24 +42,21 @@ fn single_prover_roundtrip_and_tamper() {
 /// All three comparison branches are satisfiable and produce the right cmp.
 #[test]
 fn relation_cmp_branches() {
-    let (mut a, mut b, price, a_is_seller) = sample_trade();
+    let (mut a, mut b, _price, _a_is_seller) = sample_trade();
 
-    // a < b  →  cmp = -1, A fully fills.
+    // a < b  →  cmp = -1.
     a.order_amount = 50;
-    a.locked = vec![(50, [0xA3; 32])];
     b.order_amount = 60;
-    b.locked = vec![(180, [0xB3; 32])];
-    let public = compute_public(&a, &b, price, a_is_seller).unwrap();
+    let public = compute_public(&a, &b);
     assert_eq!(public.cmp, -1);
     let circuit = cozk2p::build_single_prover_circuit(&a, &b, &public).unwrap();
     circuit
         .check_circuit_satisfiability(&public.to_vec())
         .unwrap();
 
-    // a == b  →  cmp = 0, both fully fill.
+    // a == b  →  cmp = 0.
     a.order_amount = 60;
-    a.locked = vec![(60, [0xA3; 32])];
-    let public = compute_public(&a, &b, price, a_is_seller).unwrap();
+    let public = compute_public(&a, &b);
     assert_eq!(public.cmp, 0);
     let circuit = cozk2p::build_single_prover_circuit(&a, &b, &public).unwrap();
     circuit
@@ -72,8 +69,8 @@ fn relation_cmp_branches() {
 /// shares, produce ONE proof, and each verifies it locally.
 #[tokio::test(flavor = "multi_thread")]
 async fn collaborative_prove_and_verify() {
-    let (a, b, price, a_is_seller) = sample_trade();
-    let public = compute_public(&a, &b, price, a_is_seller).unwrap();
+    let (a, b, _price, _a_is_seller) = sample_trade();
+    let public = compute_public(&a, &b);
     let (pk, vk) = dev_keys(&keys_dir()).unwrap();
 
     let (proof0, proof1) = execute_mock_mpc(|fabric| {
@@ -105,9 +102,9 @@ async fn collaborative_prove_and_verify() {
 /// the counterparty (eprint 2025/1026, Pitfall 1).
 #[tokio::test(flavor = "multi_thread")]
 async fn validity_gate_aborts_on_invalid_witness() {
-    let (a, b, price, a_is_seller) = sample_trade();
+    let (a, b, _price, _a_is_seller) = sample_trade();
     // Statement is agreed from the honest amounts...
-    let public = compute_public(&a, &b, price, a_is_seller).unwrap();
+    let public = compute_public(&a, &b);
     let (pk, _vk) = dev_keys(&keys_dir()).unwrap();
 
     // ...but B lies to the MPC: an amount whose commitment differs from the

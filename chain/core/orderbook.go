@@ -33,9 +33,12 @@ type OrderBook struct {
 	*tripod.Tripod
 	Account        *Account `tripod:"account"`
 	db             *gorm.DB
+	chainID        uint64
 	splitVK        *CircuitVK
 	settleCoZkVK   *CircuitVK
 	settleCoZk2pVK *PlonkVK
+	settleSmallVK  *CircuitVK
+	settleLargeVK  *CircuitVK
 }
 
 // NewOrderBook constructs the OrderBook tripod and registers its writings and
@@ -55,6 +58,14 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	if err != nil {
 		panic(fmt.Sprintf("loading settle_cozk2p VK: %v", err))
 	}
+	settleSmallVK, err := LoadVK("settle_small", cfg.SettleSmallVKPath)
+	if err != nil {
+		panic(fmt.Sprintf("loading settle_small VK: %v", err))
+	}
+	settleLargeVK, err := LoadVK("settle_large", cfg.SettleLargeVKPath)
+	if err != nil {
+		panic(fmt.Sprintf("loading settle_large VK: %v", err))
+	}
 	// Fail-closed in production: a nil VK means LoadVK/LoadPlonkVK found an
 	// empty path and verification would be silently skipped. Refuse to boot
 	// so a misconfigured node never accepts unverified settlements.
@@ -63,6 +74,8 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 			"split":         splitVK == nil,
 			"settle_cozk":   settleCoZkVK == nil,
 			"settle_cozk2p": settleCoZk2pVK == nil,
+			"settle_small":  settleSmallVK == nil,
+			"settle_large":  settleLargeVK == nil,
 		} {
 			if missing {
 				panic(fmt.Sprintf("require_proofs is set but %s VK path is empty; refusing to start with proof verification disabled", name))
@@ -72,11 +85,15 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	ot := &OrderBook{
 		Tripod:         tri,
 		db:             InitOrderDB(cfg.DBPath, ParseGormLogLevel(cfg.DBLogLevel)),
+		chainID:        cfg.ChainID,
 		splitVK:        splitVK,
 		settleCoZkVK:   settleCoZkVK,
 		settleCoZk2pVK: settleCoZk2pVK,
+		settleSmallVK:  settleSmallVK,
+		settleLargeVK:  settleLargeVK,
 	}
-	ot.SetWritings(ot.SendOrder, ot.SettleOrdersCoZk, ot.SettleOrdersCoZk2p, ot.RegisterSettleAddr)
+	ot.SetWritings(ot.SendOrder, ot.SubmitCompareCoZk, ot.SubmitCompareCoZk2p,
+		ot.SettleSmall, ot.SettleLarge, ot.RegisterSettleAddr)
 	ot.SetReadings(ot.QueryOrders, ot.QuerySettleAddr)
 	return ot
 }

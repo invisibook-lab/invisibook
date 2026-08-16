@@ -145,9 +145,9 @@ func (a *Account) NoteDeposit(ctx *context.WriteContext) error {
 		return fmt.Errorf("note_deposit proof verification failed: %w", err)
 	}
 
-	cm, ok := new(big.Int).SetString(req.OutputCommitment, 16)
-	if !ok {
-		return fmt.Errorf("output_commitment is not hex")
+	cm, err := ParseFrHex(req.OutputCommitment)
+	if err != nil {
+		return fmt.Errorf("output_commitment: %w", err)
 	}
 	indices, err := a.ApplyPoolMutation(PoolMutation{
 		NoteCms: []*big.Int{cm},
@@ -221,6 +221,14 @@ func (a *Account) NoteWithdraw(ctx *context.WriteContext) error {
 		return err
 	}
 
+	// Canonical-form checks: a non-canonical nullifier hex would alias its
+	// reduced form and reopen double-spending; a non-canonical anchor or
+	// commitment would panic Poseidon downstream.
+	for _, h := range []string{req.Anchor, req.Nullifiers[0], req.Nullifiers[1], req.ChangeCommitment} {
+		if _, err := ParseFrHex(h); err != nil {
+			return fmt.Errorf("non-canonical field element %q: %w", h, err)
+		}
+	}
 	// Request-internal duplicate (both slots emitting one nf would let one
 	// note satisfy two slots).
 	if req.Nullifiers[0] == req.Nullifiers[1] {
@@ -279,9 +287,9 @@ func (a *Account) NoteWithdraw(ctx *context.WriteContext) error {
 		return fmt.Errorf("spend_withdraw proof verification failed: %w", err)
 	}
 
-	cmChange, ok := new(big.Int).SetString(req.ChangeCommitment, 16)
-	if !ok {
-		return fmt.Errorf("change_commitment is not hex")
+	cmChange, err := ParseFrHex(req.ChangeCommitment)
+	if err != nil {
+		return fmt.Errorf("change_commitment: %w", err)
 	}
 	indices, err := a.ApplyPoolMutation(PoolMutation{
 		Nullifiers: req.Nullifiers,

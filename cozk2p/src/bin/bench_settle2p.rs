@@ -59,8 +59,10 @@ fn commit_hex(amount: u64, random: &[u8; 32]) -> String {
 
 /// Build both traders' `SessionInput`s for a sample trade — the same
 /// chain-sourced publics + per-side witnesses the app assembles, so the
-/// benchmark drives the FULL session (compare + reveal + exchange + prove),
-/// not just the prove. Token/id fields are placeholders (no chain here).
+/// benchmark drives the FULL session (compare + reveal + key exchange +
+/// prove), not just the prove. Token/id fields are placeholders (no chain
+/// here). Collateral backs each order at the execution price so the
+/// session's sanity checks pass.
 fn build_session_inputs(
     a: &SidePrivate,
     b: &SidePrivate,
@@ -70,53 +72,70 @@ fn build_session_inputs(
     let zero = commit_hex(0, &[0u8; 32]);
     let order_a = commit_hex(a.order_amount, &a.r_order);
     let order_b = commit_hex(b.order_amount, &b.r_order);
-    let pad = |locked: &[(u64, [u8; 32])]| -> [String; 2] {
-        let mut out = [zero.clone(), zero.clone()];
-        for (i, (amt, r)) in locked.iter().take(2).enumerate() {
-            out[i] = commit_hex(*amt, r);
-        }
-        out
-    };
-    let locked_a = pad(&a.locked);
-    let locked_b = pad(&b.locked);
-    let my_priv = |s: &SidePrivate| MyPrivate {
+    let collateral = |amt: u64, is_seller: bool| if is_seller { amt } else { amt * price };
+    let locked_amt_a = collateral(a.order_amount, a_is_seller);
+    let locked_amt_b = collateral(b.order_amount, !a_is_seller);
+    let (r_locked_a, r_locked_b) = ([0xA3u8; 32], [0xB3u8; 32]);
+    let locked_a = [commit_hex(locked_amt_a, &r_locked_a), zero.clone()];
+    let locked_b = [commit_hex(locked_amt_b, &r_locked_b), zero.clone()];
+    let my_priv = |s: &SidePrivate, locked_amt: u64, r_locked: [u8; 32]| MyPrivate {
         order_amount: s.order_amount,
         r_order: hex::encode(s.r_order),
-        locked: s
-            .locked
-            .iter()
-            .map(|(amt, r)| LockedCash {
-                amount: *amt,
-                random: hex::encode(r),
-            })
-            .collect(),
+        locked: vec![LockedCash {
+            amount: locked_amt,
+            random: hex::encode(r_locked),
+        }],
     };
+    // Fresh npk per side: any in-range field element works for the bench.
+    let npk_hex = |seed: u8| fr_to_hex(&commit(seed as u64, &[seed; 32]));
     // Seller locks/receives token1/token2; the buyer is the opposite leg.
     let (a_lock, a_recv) = if a_is_seller {
         ("ETH", "USDT")
     } else {
         ("USDT", "ETH")
     };
-    let common =
-        |role: &str, my_id: &str, cash: &str, lock: &str, recv: &str, my: MyPrivate| SessionInput {
-            role: role.to_string(),
-            order_a_id: "order-a".into(),
-            order_b_id: "order-b".into(),
-            my_order_id: my_id.into(),
-            my_input_cash_ids: vec![cash.into()],
-            my_lock_token: lock.into(),
-            my_recv_token: recv.into(),
-            price,
-            a_is_seller,
-            order_a: order_a.clone(),
-            order_b: order_b.clone(),
-            locked_a: locked_a.clone(),
-            locked_b: locked_b.clone(),
-            my,
-        };
+    let common = |role: &str,
+                  my_id: &str,
+                  cash: &str,
+                  lock: &str,
+                  recv: &str,
+                  npk: String,
+                  my: MyPrivate| SessionInput {
+        role: role.to_string(),
+        order_a_id: "order-a".into(),
+        order_b_id: "order-b".into(),
+        my_order_id: my_id.into(),
+        my_input_cash_ids: vec![cash.into()],
+        my_lock_token: lock.into(),
+        my_recv_token: recv.into(),
+        price,
+        a_is_seller,
+        order_a: order_a.clone(),
+        order_b: order_b.clone(),
+        locked_a: locked_a.clone(),
+        locked_b: locked_b.clone(),
+        my_recv_npk: npk,
+        my,
+    };
     (
-        common("trader-a", "order-a", "a-cash", a_lock, a_recv, my_priv(a)),
-        common("trader-b", "order-b", "b-cash", a_recv, a_lock, my_priv(b)),
+        common(
+            "trader-a",
+            "order-a",
+            "a-cash",
+            a_lock,
+            a_recv,
+            npk_hex(0x51),
+            my_priv(a, locked_amt_a, r_locked_a),
+        ),
+        common(
+            "trader-b",
+            "order-b",
+            "b-cash",
+            a_recv,
+            a_lock,
+            npk_hex(0x52),
+            my_priv(b, locked_amt_b, r_locked_b),
+        ),
     )
 }
 
@@ -150,7 +169,7 @@ fn mean(xs: &[f64]) -> f64 {
 async fn main() -> Result<()> {
     let args = Args::parse();
     let (a, b, price, a_is_seller) = sample_trade();
-    let public = compute_public(&a, &b, price, a_is_seller)?;
+    let public = compute_public(&a, &b);
 
     println!("=== setup (cached after first run) ===");
     let t = Instant::now();

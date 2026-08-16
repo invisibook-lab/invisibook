@@ -225,3 +225,22 @@ func FrontierFromState(s FrontierState) (*Frontier, error) {
 	f.root = root
 	return f, nil
 }
+
+// ParseFrHex parses a 64-char hex string as a CANONICAL BN254 field
+// element: well-formed hex, and strictly below the modulus. Every hex that
+// enters pool state (commitments, nullifiers, anchors) must pass through
+// this — a non-canonical value would either panic Poseidon or alias a
+// canonical one after modular reduction.
+func ParseFrHex(s string) (*big.Int, error) {
+	if len(s) != 64 {
+		return nil, fmt.Errorf("expected 64 hex chars, got %d", len(s))
+	}
+	x, ok := new(big.Int).SetString(s, 16)
+	if !ok {
+		return nil, fmt.Errorf("not valid hex: %q", s)
+	}
+	if x.Cmp(frModulus) >= 0 {
+		return nil, fmt.Errorf("value is not a canonical field element (>= modulus)")
+	}
+	return x, nil
+}

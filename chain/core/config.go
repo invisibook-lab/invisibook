@@ -36,8 +36,11 @@ type OrderBookConfig struct {
 	SplitVKPath        string `toml:"split_vk_path"`
 	SettleCoZkVKPath   string `toml:"settle_cozk_vk_path"`
 	SettleCoZk2pVKPath string `toml:"settle_cozk2p_vk_path"`
+	SettleSmallVKPath  string `toml:"settle_small_vk_path"`
+	SettleLargeVKPath  string `toml:"settle_large_vk_path"`
 	RequireProofs      bool   `toml:"require_proofs"`
 	DBLogLevel         string `toml:"db_log_level"`
+	ChainID            uint64 `toml:"-"`
 }
 
 // AccountConfig holds configuration for the Account tripod.
@@ -125,5 +128,6 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	// Propagate the chain id into the per-tripod configs (bind transcripts).
 	cfg.Account.ChainID = cfg.ChainID
+	cfg.OrderBook.ChainID = cfg.ChainID
 	return cfg, nil
 }

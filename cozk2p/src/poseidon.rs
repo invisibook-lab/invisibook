@@ -83,3 +83,32 @@ mod tests {
         );
     }
 }
+
+// ────────────────────── Shielded-pool note helpers ──────────────────────
+
+/// Domain tag of the note commitment chain (spec/golden.json).
+pub const TAG_CM: u64 = 3;
+
+/// assetID of a token symbol: its UTF-8 bytes read big-endian into Fr.
+/// The chain validates symbols are 1..=31 bytes; mirror that here.
+pub fn asset_fr(token: &str) -> anyhow::Result<Fr> {
+    use ark_ff::PrimeField;
+    let bytes = token.as_bytes();
+    anyhow::ensure!(
+        !bytes.is_empty() && bytes.len() <= 31,
+        "token symbol must be 1..=31 bytes, got {}",
+        bytes.len()
+    );
+    Ok(Fr::from_be_bytes_mod_order(bytes))
+}
+
+/// The pool's note commitment as the tagged nested 2-input chain
+/// `P2(P2(P2(P2(TAG_CM, npk), asset), v), r)` — byte-identical to
+/// `lib/chain/src/note.rs::note_commit` and `note.circom`'s NoteCommit.
+pub fn note_commit(npk: Fr, asset: Fr, v: u64, r: &[u8; 32]) -> Fr {
+    use ark_ff::PrimeField;
+    let c = hash2(Fr::from(TAG_CM), npk);
+    let c = hash2(c, asset);
+    let c = hash2(c, Fr::from(v));
+    hash2(c, Fr::from_be_bytes_mod_order(r))
+}

@@ -2,8 +2,10 @@ package core
 
 import (
 	"crypto/ed25519"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"strconv"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
@@ -11,77 +13,68 @@ import (
 	"github.com/yu-org/yu/core/context"
 )
 
-// ────────────────────── Writing: SettleOrdersCoZk ──────────────────────
-
-// CoZkSettleRequest is the single-submission settlement message of the co-zk
-// protocol (docs/cozk_design.md). Both traders jointly generated `ZkProof`
-// via MPC and both signed the canonical settlement message, so either party
-// (or anyone relaying on their behalf) may submit it. The same request shape
-// serves both collaborative variants: SettleOrdersCoZk (3-party, Groth16)
-// and SettleOrdersCoZk2p (2-party, PLONK) — only the proof format and the
-// signed message's domain prefix differ.
+// Settlement per the paper (§V-C/VI, plan rev. 3 Phase 3):
 //
-// Order A must be the maker (see makerTakerOrder). `Cmp` is the public
-// three-way comparison sign(a - b) of the two hidden order amounts. The six
-// commitments are the circuit's public outputs; the chain rebuilds the full
-// public-input vector from them plus on-chain state.
-type CoZkSettleRequest struct {
+//  1. SubmitCompareCoZk / SubmitCompareCoZk2p — the ONLY collaborative
+//     step. Both traders jointly proved `cmp = sign(q_A − q_B)` against
+//     their on-chain order commitments (π_cmp) and both signed the result;
+//     the chain records cmp and moves the pair to Settling.
+//  2. SettleSmall — the fully filled side's own update (paper π_A): its
+//     whole collateral becomes a pool note paid to the counterparty.
+//  3. SettleLarge — the partially filled side's own update (paper π_B):
+//     pays the fill as a pool note, relists its residual under fresh
+//     commitments.
+//
+// Steps 2 and 3 are ordinary single-prover Groth16 proofs — each party
+// holds its complete witness after the comparison (the smaller side
+// revealed its opening over the settlement channel).
+
+// ────────────────────── Compare submission ──────────────────────
+
+// CompareRequest is the dual-signed comparison result of the collaborative
+// settlement's first phase. `Cmp` is sign(q_A − q_B); `ZkProof` is the
+// jointly generated π_cmp (snarkjs Groth16 JSON for SubmitCompareCoZk,
+// hex-encoded ark-compressed PLONK bytes for SubmitCompareCoZk2p). Order A
+// must be the maker (see makerTakerOrder).
+type CompareRequest struct {
 	OrderAID OrderID `json:"order_a_id" validate:"required"`
 	OrderBID OrderID `json:"order_b_id" validate:"required"`
 	Cmp      int     `json:"cmp"        validate:"oneof=-1 0 1"`
 
-	NewOrderACommitment  string `json:"new_order_a_commitment"  validate:"required,len=64"`
-	NewOrderBCommitment  string `json:"new_order_b_commitment"  validate:"required,len=64"`
-	NewLockedACommitment string `json:"new_locked_a_commitment" validate:"required,len=64"`
-	NewLockedBCommitment string `json:"new_locked_b_commitment" validate:"required,len=64"`
-	RecvACommitment      string `json:"recv_a_commitment"       validate:"required,len=64"`
-	RecvBCommitment      string `json:"recv_b_commitment"       validate:"required,len=64"`
-
-	// ed25519 signatures (128-char hex) over CoZkSettleMessage, by each
-	// order's pubkey.
+	// ed25519 signatures (128-char hex) over the compare message, by each
+	// order's pubkey. Dual signing is what makes the public result
+	// unforgeable by either party alone (paper Property 1(ii)).
 	SigA string `json:"sig_a" validate:"required,len=128"`
 	SigB string `json:"sig_b" validate:"required,len=128"`
 
-	// The collaboratively produced proof: snarkjs-format Groth16 JSON for
-	// SettleOrdersCoZk, hex-encoded ark-compressed PLONK bytes for
-	// SettleOrdersCoZk2p.
 	ZkProof string `json:"zk_proof" validate:"required"`
 }
 
-// CoZkSettleEvent is emitted after a successful co-zk settlement. `Relisted`
-// carries the surviving larger order (already updated and back to Pending),
-// and `Matched` its immediate re-match if one happened.
-type CoZkSettleEvent struct {
-	EventType string `json:"event_type"` // "cozk_settled" or "cozk2p_settled"
-	Cmp       int    `json:"cmp"`
-	OrderA    *Order `json:"order_a"`
-	OrderB    *Order `json:"order_b"`
-	Relisted  *Order `json:"relisted,omitempty"`
-	Matched   *Order `json:"matched,omitempty"`
+// CompareEvent is emitted when a comparison lands on chain.
+type CompareEvent struct {
+	EventType string  `json:"event_type"` // "compared"
+	Cmp       int     `json:"cmp"`
+	OrderA    OrderID `json:"order_a"`
+	OrderB    OrderID `json:"order_b"`
 }
 
-// coZkSettleMessage builds the canonical byte string both traders
-// ed25519-sign, domain-separated by `prefix` so a signature for one settle
-// variant can never authorize the other.
-func coZkSettleMessage(prefix string, req *CoZkSettleRequest) []byte {
+// compareMessage builds the canonical byte string both traders ed25519-sign
+// for a comparison result, domain-separated per proof variant.
+func compareMessage(prefix string, req *CompareRequest) []byte {
 	msg := prefix + ":" + string(req.OrderAID) + ":" + string(req.OrderBID) +
-		":" + strconv.Itoa(req.Cmp) +
-		":" + req.NewOrderACommitment + ":" + req.NewOrderBCommitment +
-		":" + req.NewLockedACommitment + ":" + req.NewLockedBCommitment +
-		":" + req.RecvACommitment + ":" + req.RecvBCommitment
+		":" + strconv.Itoa(req.Cmp)
 	return []byte(msg)
 }
 
-// CoZkSettleMessage builds the message signed for SettleOrdersCoZk. Must stay
-// in lockstep with the Rust client (lib/chain settle_cozk_message).
-func CoZkSettleMessage(req *CoZkSettleRequest) []byte {
-	return coZkSettleMessage("invisibook-cozk-settle", req)
+// CoZkCompareMessage is the signed message for SubmitCompareCoZk. Must stay
+// in lockstep with the Rust client.
+func CoZkCompareMessage(req *CompareRequest) []byte {
+	return compareMessage("invisibook-cozk-compare-v2", req)
 }
 
-// CoZk2pSettleMessage builds the message signed for SettleOrdersCoZk2p (the
-// 2-party PLONK path); the distinct prefix domain-separates the variants.
-func CoZk2pSettleMessage(req *CoZkSettleRequest) []byte {
-	return coZkSettleMessage("invisibook-cozk2p-settle", req)
+// CoZk2pCompareMessage is the signed message for SubmitCompareCoZk2p.
+func CoZk2pCompareMessage(req *CompareRequest) []byte {
+	return compareMessage("invisibook-cozk2p-compare-v2", req)
 }
 
 // makerTakerOrder orders a matched pair deterministically: the maker is the
@@ -153,60 +146,22 @@ func recvToken(ord *Order) TokenID {
 	return ord.Subject.Token2
 }
 
-// buildSettleCoZkPublicSignals lays out the 15 public signals of
-// settle_cozk.circom in witness order (outputs first, then public inputs):
-//
-//	[cmp, new_order_a, new_order_b, new_locked_a, new_locked_b, recv_a,
-//	 recv_b, order_a_commitment, order_b_commitment, price, a_is_seller,
-//	 locked_a_hashes[2], locked_b_hashes[2]]
-func buildSettleCoZkPublicSignals(
-	req *CoZkSettleRequest, orderA, orderB *Order, price uint64, aIsSeller bool, acc *Account,
-) ([]string, error) {
+// buildCompareSignals lays out settle_cozk.circom's 3 public signals:
+// [cmp, order_a_commitment, order_b_commitment].
+func buildCompareSignals(req *CompareRequest, orderA, orderB *Order) ([]string, error) {
 	cmpDec, err := cmpToFrDecimal(req.Cmp)
 	if err != nil {
 		return nil, err
 	}
-	hexFields := []struct {
-		name string
-		hex  string
-	}{
-		{"new_order_a_commitment", req.NewOrderACommitment},
-		{"new_order_b_commitment", req.NewOrderBCommitment},
-		{"new_locked_a_commitment", req.NewLockedACommitment},
-		{"new_locked_b_commitment", req.NewLockedBCommitment},
-		{"recv_a_commitment", req.RecvACommitment},
-		{"recv_b_commitment", req.RecvBCommitment},
-		{"order_a_commitment", string(orderA.Amount)},
-		{"order_b_commitment", string(orderB.Amount)},
-	}
-	decs := make([]string, 0, len(hexFields))
-	for _, f := range hexFields {
-		dec, err := HexToDecimal(f.hex)
-		if err != nil {
-			return nil, fmt.Errorf("invalid %s: %w", f.name, err)
-		}
-		decs = append(decs, dec)
-	}
-	aIsSellerStr := "0"
-	if aIsSeller {
-		aIsSellerStr = "1"
-	}
-	lockedA, err := lockedInputHashesPadded(orderA, acc, 2, lockToken(orderA))
+	orderADec, err := HexToDecimal(string(orderA.Amount))
 	if err != nil {
-		return nil, fmt.Errorf("order A locked inputs: %w", err)
+		return nil, fmt.Errorf("invalid order A commitment: %w", err)
 	}
-	lockedB, err := lockedInputHashesPadded(orderB, acc, 2, lockToken(orderB))
+	orderBDec, err := HexToDecimal(string(orderB.Amount))
 	if err != nil {
-		return nil, fmt.Errorf("order B locked inputs: %w", err)
+		return nil, fmt.Errorf("invalid order B commitment: %w", err)
 	}
-
-	signals := []string{cmpDec}
-	signals = append(signals, decs[:6]...)                            // new/recv commitments
-	signals = append(signals, decs[6], decs[7])                       // order commitments
-	signals = append(signals, fmt.Sprintf("%d", price), aIsSellerStr) // price, a_is_seller
-	signals = append(signals, lockedA...)
-	signals = append(signals, lockedB...)
-	return signals, nil
+	return []string{cmpDec, orderADec, orderBDec}, nil
 }
 
 // verifyCoZkSignature checks an ed25519 signature (128-char hex) by the
@@ -226,9 +181,9 @@ func verifyCoZkSignature(pubkeyHex, sigHex string, msg []byte) error {
 	return nil
 }
 
-// verifyCoZkPairSignatures checks both traders' ed25519 signatures over the
-// canonical settlement message, each by its own order's pubkey.
-func verifyCoZkPairSignatures(req *CoZkSettleRequest, orderA, orderB *Order, msg []byte) error {
+// verifyComparePairSignatures checks both traders' signatures over the
+// canonical compare message, each by its own order's pubkey.
+func verifyComparePairSignatures(req *CompareRequest, orderA, orderB *Order, msg []byte) error {
 	if err := verifyCoZkSignature(orderA.Pubkey, req.SigA, msg); err != nil {
 		return fmt.Errorf("order A signature: %w", err)
 	}
@@ -238,74 +193,88 @@ func verifyCoZkPairSignatures(req *CoZkSettleRequest, orderA, orderB *Order, msg
 	return nil
 }
 
-// loadCoZkMatchedPair loads the pair referenced by `req` and enforces every
-// precondition shared by the co-zk settle variants: both orders exist, are
-// Matched with each other on opposite sides, order A is the maker of the
-// pair, and both quote the same price. Returns the orders plus the execution
-// price and whether A is the token1 seller.
-func (ot *OrderBook) loadCoZkMatchedPair(req *CoZkSettleRequest) (*Order, *Order, uint64, bool, error) {
-	orderA, err := ot.GetOrder(req.OrderAID)
+// loadMatchedPair loads the pair (A, B) and enforces every precondition of
+// the compare phase: both orders exist, are Matched with each other on
+// opposite sides, order A is the maker, prices are in range and equal.
+// Returns the orders plus the execution price.
+func (ot *OrderBook) loadMatchedPair(orderAID, orderBID OrderID) (*Order, *Order, uint64, error) {
+	orderA, err := ot.GetOrder(orderAID)
 	if err != nil {
-		return nil, nil, 0, false, fmt.Errorf("order %s not found: %w", req.OrderAID, err)
+		return nil, nil, 0, fmt.Errorf("order %s not found: %w", orderAID, err)
 	}
-	orderB, err := ot.GetOrder(req.OrderBID)
+	orderB, err := ot.GetOrder(orderBID)
 	if err != nil {
-		return nil, nil, 0, false, fmt.Errorf("order %s not found: %w", req.OrderBID, err)
+		return nil, nil, 0, fmt.Errorf("order %s not found: %w", orderBID, err)
 	}
 	if orderA.Status != Matched {
-		return nil, nil, 0, false, fmt.Errorf("order %s is not Matched (current: %s)", orderA.ID, orderA.Status.String())
+		return nil, nil, 0, fmt.Errorf("order %s is not Matched (current: %s)", orderA.ID, orderA.Status.String())
 	}
 	if orderB.Status != Matched {
-		return nil, nil, 0, false, fmt.Errorf("order %s is not Matched (current: %s)", orderB.ID, orderB.Status.String())
+		return nil, nil, 0, fmt.Errorf("order %s is not Matched (current: %s)", orderB.ID, orderB.Status.String())
 	}
 	if orderA.MatchOrder != orderB.ID || orderB.MatchOrder != orderA.ID {
-		return nil, nil, 0, false, fmt.Errorf("orders %s and %s are not matched with each other", orderA.ID, orderB.ID)
+		return nil, nil, 0, fmt.Errorf("orders %s and %s are not matched with each other", orderA.ID, orderB.ID)
 	}
 	if orderA.Type == orderB.Type {
-		return nil, nil, 0, false, fmt.Errorf("matched orders must be on opposite sides")
+		return nil, nil, 0, fmt.Errorf("matched orders must be on opposite sides")
 	}
 
 	// Role assignment is deterministic: order A must be the maker, so the
 	// circuit's a-side always corresponds to the same trader for everyone.
 	if maker, _ := makerTakerOrder(orderA, orderB); maker.ID != orderA.ID {
-		return nil, nil, 0, false, fmt.Errorf("order_a %s must be the maker of the pair", req.OrderAID)
+		return nil, nil, 0, fmt.Errorf("order_a %s must be the maker of the pair", orderAID)
 	}
 
 	// Defense in depth against silent truncation in executionPrice: SendOrder
 	// rejects out-of-range prices at ingress, but rows written before that
-	// check existed (or restored from a backup) would still reach the circuit
-	// as a different number than the book matched on.
+	// check existed would still reach the circuits as a different number.
 	for _, ord := range []*Order{orderA, orderB} {
 		if err := validateOrderPrice(ord.Price); err != nil {
-			return nil, nil, 0, false, fmt.Errorf("order %s: %w", ord.ID, err)
+			return nil, nil, 0, fmt.Errorf("order %s: %w", ord.ID, err)
 		}
 	}
 
-	// Equal-price requirement. The buyer's locked collateral was fixed at
-	// order creation to amount*buyer_price, but the joint circuits constrain
-	// it to amount*exec_price with strict equality and have no buyer-change
-	// output. That only holds when exec_price == buyer_price, i.e. when both
-	// orders quote the same price. A cross-price (marketable) match would make
-	// the joint proof unsatisfiable, so we reject it here (it can still settle
-	// via the legacy change-producing path) rather than let the pair wedge.
+	// Equal-price requirement: collateral was locked at the order's own
+	// price, and the settle circuits equate it with the execution price
+	// with strict equality (no price-improvement change output).
 	if orderA.Price == nil || orderB.Price == nil || orderA.Price.Cmp(orderB.Price) != 0 {
-		return nil, nil, 0, false, fmt.Errorf("co-zk settlement requires equal order prices; use the legacy settle path for cross-price matches")
+		return nil, nil, 0, fmt.Errorf("co-zk settlement requires equal order prices")
 	}
 
-	return orderA, orderB, executionPrice(orderA, orderB), orderA.Type == Sell, nil
+	return orderA, orderB, executionPrice(orderA, orderB), nil
 }
 
-// SettleOrdersCoZk settles a matched pair with ONE jointly generated Groth16
-// proof: verifies both traders' signatures over the settlement message and
-// the proof against on-chain state, then spends both locked collaterals,
-// mints both receive cashes, marks the fully-filled side(s) Done (removing
-// them from the book), and relists the surviving larger order in place with
-// its remainder commitments — keeping its original block height so it retains
-// time priority.
-func (ot *OrderBook) SettleOrdersCoZk(ctx *context.WriteContext) error {
+// applyCompareResult records cmp for the pair and moves both orders to
+// Settling. Runs only after signatures and π_cmp verified.
+func (ot *OrderBook) applyCompareResult(ctx *context.WriteContext, req *CompareRequest) error {
+	if err := ot.SaveCompareResult(&CompareResultScheme{
+		OrderAID: string(req.OrderAID),
+		OrderBID: string(req.OrderBID),
+		Cmp:      req.Cmp,
+		Height:   uint64(ctx.Block.Height),
+	}); err != nil {
+		return fmt.Errorf("saving compare result: %w", err)
+	}
+	if err := ot.UpdateOrderStatus(req.OrderAID, Settling); err != nil {
+		return fmt.Errorf("updating order %s: %w", req.OrderAID, err)
+	}
+	if err := ot.UpdateOrderStatus(req.OrderBID, Settling); err != nil {
+		return fmt.Errorf("updating order %s: %w", req.OrderBID, err)
+	}
+	return ctx.EmitJsonEvent(&CompareEvent{
+		EventType: "compared",
+		Cmp:       req.Cmp,
+		OrderA:    req.OrderAID,
+		OrderB:    req.OrderBID,
+	})
+}
+
+// SubmitCompareCoZk records a comparison proven with the jointly generated
+// Groth16 π_cmp (settle_cozk circuit, 3 publics).
+func (ot *OrderBook) SubmitCompareCoZk(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
 
-	req := new(CoZkSettleRequest)
+	req := new(CompareRequest)
 	if err := ctx.BindJson(req); err != nil {
 		return err
 	}
@@ -313,165 +282,358 @@ func (ot *OrderBook) SettleOrdersCoZk(ctx *context.WriteContext) error {
 		return err
 	}
 
-	orderA, orderB, price, aIsSeller, err := ot.loadCoZkMatchedPair(req)
+	orderA, orderB, _, err := ot.loadMatchedPair(req.OrderAID, req.OrderBID)
 	if err != nil {
 		return err
 	}
-
-	// Both traders must have signed the settlement message.
-	if err := verifyCoZkPairSignatures(req, orderA, orderB, CoZkSettleMessage(req)); err != nil {
+	if err := verifyComparePairSignatures(req, orderA, orderB, CoZkCompareMessage(req)); err != nil {
 		return err
 	}
-
-	// Verify the jointly generated proof against the reconstructed publics.
-	signals, err := buildSettleCoZkPublicSignals(req, orderA, orderB, price, aIsSeller, ot.Account)
+	signals, err := buildCompareSignals(req, orderA, orderB)
 	if err != nil {
-		return fmt.Errorf("building settle_cozk public signals: %w", err)
+		return err
 	}
 	if err := VerifyGroth16(ot.settleCoZkVK, req.ZkProof, signals); err != nil {
-		return fmt.Errorf("settle_cozk proof verification failed: %w", err)
+		return fmt.Errorf("compare proof verification failed: %w", err)
 	}
-
-	return ot.applyCoZkSettlement(ctx, req, orderA, orderB, "cozk")
+	return ot.applyCompareResult(ctx, req)
 }
 
-// applyCoZkSettlement performs the state mutation shared by the co-zk settle
-// variants, to be called only after all signature and proof checks passed:
-// spends both locked collaterals, mints both receive cashes, updates the book
-// according to `req.Cmp`, and emits the settlement event. `variant` ("cozk"
-// or "cozk2p") tags the spend attribution and the emitted event type.
-func (ot *OrderBook) applyCoZkSettlement(
-	ctx *context.WriteContext, req *CoZkSettleRequest, orderA, orderB *Order, variant string,
-) error {
-	// Pre-flight the cash IDs we are about to mint. computeCashID is
-	// content-addressed over client-chosen commitments, so a caller could set
-	// a recv/locked commitment that collides with an existing cash and make a
-	// CreateCash fail *after* collateral is already spent (the per-tripod
-	// SQLite writes below are not one atomic transaction — the same
-	// non-atomicity the legacy settle path has). Checking for collisions
-	// before any irreversible write keeps a malformed request from freezing
-	// collateral. `newCashIDs` are the recv cashes plus the surviving order's
-	// relisted locked cash (if any).
-	mintIDs := []string{
-		computeCashID(orderA.Pubkey, recvToken(orderA), CipherText(req.RecvACommitment)),
-		computeCashID(orderB.Pubkey, recvToken(orderB), CipherText(req.RecvBCommitment)),
-	}
-	switch req.Cmp {
-	case 1:
-		mintIDs = append(mintIDs, computeCashID(orderA.Pubkey, lockToken(orderA), CipherText(req.NewLockedACommitment)))
-	case -1:
-		mintIDs = append(mintIDs, computeCashID(orderB.Pubkey, lockToken(orderB), CipherText(req.NewLockedBCommitment)))
-	}
-	for _, id := range mintIDs {
-		if ot.Account.CashExists(id) {
-			return fmt.Errorf("cash %s to be minted already exists; refusing to settle", id)
-		}
-	}
+// ────────────────────── Settle submissions (π_A / π_B) ──────────────────────
 
-	// All checks passed — mutate state.
-	settleBy := fmt.Sprintf("%s-settle:%s:%s", variant, orderA.ID[:8], orderB.ID[:8])
-	if err := ot.Account.SpendCash(orderA.InputCashIDs, settleBy); err != nil {
-		return fmt.Errorf("failed to spend cash for order %s: %w", orderA.ID, err)
-	}
-	if err := ot.Account.SpendCash(orderB.InputCashIDs, settleBy); err != nil {
-		return fmt.Errorf("failed to spend cash for order %s: %w", orderB.ID, err)
-	}
-
-	// Mint both receive cashes; the receiving party chose the blinding, so
-	// each party can open (and later spend) its own new UTXO.
-	for _, mint := range []struct {
-		ord        *Order
-		commitment string
-	}{
-		{orderA, req.RecvACommitment},
-		{orderB, req.RecvBCommitment},
-	} {
-		token := recvToken(mint.ord)
-		cash := &Cash{
-			ID:      computeCashID(mint.ord.Pubkey, token, CipherText(mint.commitment)),
-			Pubkey:  mint.ord.Pubkey,
-			Token:   token,
-			Amount:  CipherText(mint.commitment),
-			ZkProof: req.ZkProof,
-			Status:  Active,
-		}
-		if err := ot.Account.CreateCash(cash); err != nil {
-			return fmt.Errorf("failed to create recv cash for order %s: %w", mint.ord.ID, err)
-		}
-	}
-
-	// Update the book according to the public comparison result.
-	var relisted, rematched *Order
-	var err error
-	fullyFilled := func(ord *Order) error {
-		if err := ot.UpdateOrderStatus(ord.ID, Done); err != nil {
-			return fmt.Errorf("failed to close order %s: %w", ord.ID, err)
-		}
-		return nil
-	}
-	switch req.Cmp {
-	case 0:
-		// Equal amounts: both orders fully fill and leave the book.
-		if err := fullyFilled(orderA); err != nil {
-			return err
-		}
-		if err := fullyFilled(orderB); err != nil {
-			return err
-		}
-	case -1:
-		// a < b: A fully fills, B survives with remainder b - a.
-		if err := fullyFilled(orderA); err != nil {
-			return err
-		}
-		relisted, rematched, err = ot.relistWithRemainder(
-			orderB, CipherText(req.NewOrderBCommitment), CipherText(req.NewLockedBCommitment), req.ZkProof)
-		if err != nil {
-			return err
-		}
-	case 1:
-		// a > b: B fully fills, A survives with remainder a - b.
-		if err := fullyFilled(orderB); err != nil {
-			return err
-		}
-		relisted, rematched, err = ot.relistWithRemainder(
-			orderA, CipherText(req.NewOrderACommitment), CipherText(req.NewLockedACommitment), req.ZkProof)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Clean up any leftover legacy rendezvous/submission rows for the pair.
-	_ = ot.DeleteSettleAddr(orderA.ID)
-	_ = ot.DeleteSettleAddr(orderB.ID)
-
-	finalA, err := ot.GetOrder(orderA.ID)
-	if err != nil {
-		return fmt.Errorf("re-reading order %s: %w", orderA.ID, err)
-	}
-	finalB, err := ot.GetOrder(orderB.ID)
-	if err != nil {
-		return fmt.Errorf("re-reading order %s: %w", orderB.ID, err)
-	}
-	event := &CoZkSettleEvent{
-		EventType: variant + "_settled",
-		Cmp:       req.Cmp,
-		OrderA:    finalA,
-		OrderB:    finalB,
-		Relisted:  relisted,
-		Matched:   rematched,
-	}
-	if err := ctx.EmitJsonEvent(event); err != nil {
-		return fmt.Errorf("failed to emit cozk settle event: %w", err)
-	}
-	return nil
+// SettleSmallRequest is the fully filled side's own settlement update: its
+// entire collateral transfers to the counterparty as the pool note
+// `CmNoteOut` (whose opening the counterparty chose and already persisted).
+// Also used by BOTH sides when cmp == 0.
+type SettleSmallRequest struct {
+	OrderID      OrderID `json:"order_id"       validate:"required"`
+	MatchOrderID OrderID `json:"match_order_id" validate:"required"`
+	CmNoteOut    string  `json:"cm_note_out"    validate:"required,len=64"`
+	// Owner's ed25519 signature over settleSmallSigMessage (the order's
+	// pubkey authenticates its settlement update — paper §V-B).
+	Signature string `json:"signature" validate:"required,len=128"`
+	ZkProof   string `json:"zk_proof"  validate:"required"`
 }
 
-// relistWithRemainder keeps the surviving larger order on the book: mints its
-// new Locked collateral cash, swaps the order's amount commitment and input
-// cash list, clears the match linkage, and returns it to Pending (retaining
-// its original block height, i.e. its time priority). It then immediately
-// attempts a re-match against the book. Returns the updated order and the
-// counter order it re-matched with (nil if none).
+// SettleLargeRequest is the partially filled side's own update: pays the
+// fill as `CmNoteOut` and relists its residual order under the fresh
+// commitments `CmQResidual` / `CmLockedResidual`.
+type SettleLargeRequest struct {
+	OrderID          OrderID `json:"order_id"           validate:"required"`
+	MatchOrderID     OrderID `json:"match_order_id"     validate:"required"`
+	CmQResidual      string  `json:"cm_q_residual"      validate:"required,len=64"`
+	CmLockedResidual string  `json:"cm_locked_residual" validate:"required,len=64"`
+	CmNoteOut        string  `json:"cm_note_out"        validate:"required,len=64"`
+	Signature        string  `json:"signature"          validate:"required,len=128"`
+	ZkProof          string  `json:"zk_proof"           validate:"required"`
+}
+
+// SettleEvent is emitted after a settle submission lands. `NoteLeafIndex`
+// tells the counterparty where its payout note sits (no probing needed).
+type SettleEvent struct {
+	EventType     string  `json:"event_type"` // "settle_small" | "settle_large"
+	Order         OrderID `json:"order"`
+	NoteLeafIndex uint64  `json:"note_leaf_index"`
+	Relisted      *Order  `json:"relisted,omitempty"`
+	Matched       *Order  `json:"matched,omitempty"`
+}
+
+// settleSigMessage builds the canonical length-prefixed message an order's
+// owner signs for its settle submission.
+func settleSigMessage(domain string, fields ...string) []byte {
+	msg := make([]byte, 0, 256)
+	put := func(f []byte) {
+		var l [4]byte
+		binary.BigEndian.PutUint32(l[:], uint32(len(f)))
+		msg = append(msg, l[:]...)
+		msg = append(msg, f...)
+	}
+	put([]byte(domain))
+	for _, f := range fields {
+		put([]byte(f))
+	}
+	return msg
+}
+
+// SettleSmallSigMessage is the owner-signed message for SettleSmall.
+// Lockstep with the Rust client.
+func SettleSmallSigMessage(req *SettleSmallRequest) []byte {
+	return settleSigMessage("invisibook-settle-small-v1",
+		string(req.OrderID), string(req.MatchOrderID), req.CmNoteOut)
+}
+
+// SettleLargeSigMessage is the owner-signed message for SettleLarge.
+func SettleLargeSigMessage(req *SettleLargeRequest) []byte {
+	return settleSigMessage("invisibook-settle-large-v1",
+		string(req.OrderID), string(req.MatchOrderID),
+		req.CmQResidual, req.CmLockedResidual, req.CmNoteOut)
+}
+
+// settleSmallBind computes the bind public input welding π_A to this exact
+// request (Rust twin: note::settle_small_bind).
+func settleSmallBind(chainID uint64, req *SettleSmallRequest) *big.Int {
+	return BindHash(
+		[]byte(bindDomain),
+		u64be(chainID),
+		[]byte("settle_small"),
+		u32be(bindVersion),
+		[]byte(req.OrderID),
+		[]byte(req.MatchOrderID),
+		[]byte(req.CmNoteOut),
+	)
+}
+
+// settleLargeBind computes the bind public input welding π_B to this exact
+// request (Rust twin: note::settle_large_bind).
+func settleLargeBind(chainID uint64, req *SettleLargeRequest) *big.Int {
+	return BindHash(
+		[]byte(bindDomain),
+		u64be(chainID),
+		[]byte("settle_large"),
+		u32be(bindVersion),
+		[]byte(req.OrderID),
+		[]byte(req.MatchOrderID),
+		[]byte(req.CmQResidual),
+		[]byte(req.CmLockedResidual),
+		[]byte(req.CmNoteOut),
+	)
+}
+
+// loadSettlingOrder loads `orderID` and its match for a settle submission:
+// both must be Settling and mutually matched, and the pair must have a
+// recorded comparison. Returns (mine, match, cmp normalized so that
+// NEGATIVE means MINE is smaller).
+func (ot *OrderBook) loadSettlingOrder(orderID, matchID OrderID) (*Order, *Order, int, error) {
+	mine, err := ot.GetOrder(orderID)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("order %s not found: %w", orderID, err)
+	}
+	match, err := ot.GetOrder(matchID)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("order %s not found: %w", matchID, err)
+	}
+	if mine.Status != Settling {
+		return nil, nil, 0, fmt.Errorf("order %s is not Settling (current: %s)", mine.ID, mine.Status.String())
+	}
+	if mine.MatchOrder != match.ID {
+		return nil, nil, 0, fmt.Errorf("orders %s and %s are not matched with each other", mine.ID, match.ID)
+	}
+	res, mineIsA, err := ot.GetCompareResult(orderID, matchID)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("no comparison recorded for pair %s/%s: %w", orderID, matchID, err)
+	}
+	cmp := res.Cmp
+	if !mineIsA {
+		cmp = -cmp
+	}
+	return mine, match, cmp, nil
+}
+
+// settlePublicPrefix builds the leading publics shared by both settle
+// circuits: my order commitment, my two locked collateral commitments,
+// price, side, all as decimal strings.
+func (ot *OrderBook) settlePublicPrefix(mine, match *Order) (cmQ string, locked []string, price uint64, side string, err error) {
+	cmQ, err = HexToDecimal(string(mine.Amount))
+	if err != nil {
+		return "", nil, 0, "", fmt.Errorf("invalid order commitment: %w", err)
+	}
+	locked, err = lockedInputHashesPadded(mine, ot.Account, 2, lockToken(mine))
+	if err != nil {
+		return "", nil, 0, "", fmt.Errorf("locked inputs: %w", err)
+	}
+	price = executionPrice(mine, match)
+	side = "0"
+	if mine.Type == Sell {
+		side = "1"
+	}
+	return cmQ, locked, price, side, nil
+}
+
+// SettleSmall applies the fully filled side's settlement: verifies the
+// owner's signature and π_A, spends the collateral, appends the payout note
+// to the pool, and closes the order.
+func (ot *OrderBook) SettleSmall(ctx *context.WriteContext) error {
+	ctx.SetLei(100)
+
+	req := new(SettleSmallRequest)
+	if err := ctx.BindJson(req); err != nil {
+		return err
+	}
+	if err := Validator.Struct(req); err != nil {
+		return err
+	}
+
+	mine, match, cmp, err := ot.loadSettlingOrder(req.OrderID, req.MatchOrderID)
+	if err != nil {
+		return err
+	}
+	// SettleSmall is for the smaller side — or both sides on equality.
+	if cmp > 0 {
+		return fmt.Errorf("order %s is the larger side; submit SettleLarge", req.OrderID)
+	}
+	if err := verifyCoZkSignature(mine.Pubkey, req.Signature, SettleSmallSigMessage(req)); err != nil {
+		return fmt.Errorf("owner signature: %w", err)
+	}
+
+	// Publics: [cm_q, locked_0, locked_1, price, side, pay_asset,
+	// cm_note_out, bind].
+	cmQ, locked, price, side, err := ot.settlePublicPrefix(mine, match)
+	if err != nil {
+		return err
+	}
+	payAsset, err := AssetID(lockToken(mine))
+	if err != nil {
+		return err
+	}
+	noteDec, err := HexToDecimal(req.CmNoteOut)
+	if err != nil {
+		return fmt.Errorf("invalid cm_note_out: %w", err)
+	}
+	bind := settleSmallBind(ot.chainID, req)
+	signals := []string{cmQ, locked[0], locked[1], fmt.Sprintf("%d", price), side,
+		payAsset.String(), noteDec, bind.String()}
+	if err := VerifyGroth16(ot.settleSmallVK, req.ZkProof, signals); err != nil {
+		return fmt.Errorf("settle_small proof verification failed: %w", err)
+	}
+
+	// Mutate: spend collateral, mint the payout note, close the order.
+	// (Cross-DB, non-atomic: a crash between steps destroys value but never
+	// duplicates it — same ordering discipline as the pool writings.)
+	settleBy := fmt.Sprintf("settle-small:%s", req.OrderID[:8])
+	if err := ot.Account.SpendCash(mine.InputCashIDs, settleBy); err != nil {
+		return fmt.Errorf("spending collateral: %w", err)
+	}
+	cmNote, err := ParseFrHex(req.CmNoteOut)
+	if err != nil {
+		return fmt.Errorf("cm_note_out: %w", err)
+	}
+	indices, err := ot.Account.ApplyPoolMutation(PoolMutation{
+		NoteCms: []*big.Int{cmNote},
+		Height:  uint64(ctx.Block.Height),
+		Source:  "settle",
+		By:      settleBy,
+	})
+	if err != nil {
+		return fmt.Errorf("minting payout note: %w", err)
+	}
+	if err := ot.UpdateOrderStatus(mine.ID, Done); err != nil {
+		return fmt.Errorf("closing order: %w", err)
+	}
+	_ = ot.DeleteSettleAddr(mine.ID)
+
+	return ctx.EmitJsonEvent(&SettleEvent{
+		EventType:     "settle_small",
+		Order:         mine.ID,
+		NoteLeafIndex: indices[0],
+	})
+}
+
+// SettleLarge applies the partially filled side's settlement: verifies the
+// owner's signature and π_B, spends the collateral, appends the fill note
+// to the pool, and relists the residual order under fresh commitments
+// (keeping its block height, i.e. its time priority).
+func (ot *OrderBook) SettleLarge(ctx *context.WriteContext) error {
+	ctx.SetLei(100)
+
+	req := new(SettleLargeRequest)
+	if err := ctx.BindJson(req); err != nil {
+		return err
+	}
+	if err := Validator.Struct(req); err != nil {
+		return err
+	}
+
+	mine, match, cmp, err := ot.loadSettlingOrder(req.OrderID, req.MatchOrderID)
+	if err != nil {
+		return err
+	}
+	if cmp <= 0 {
+		return fmt.Errorf("order %s is not the larger side; submit SettleSmall", req.OrderID)
+	}
+	if err := verifyCoZkSignature(mine.Pubkey, req.Signature, SettleLargeSigMessage(req)); err != nil {
+		return fmt.Errorf("owner signature: %w", err)
+	}
+
+	// Publics: [cm_q, cm_q_ctr, locked_0, locked_1, price, side,
+	// cm_q_residual, cm_locked_residual, pay_asset, cm_note_out, bind].
+	cmQ, locked, price, side, err := ot.settlePublicPrefix(mine, match)
+	if err != nil {
+		return err
+	}
+	cmQCtr, err := HexToDecimal(string(match.Amount))
+	if err != nil {
+		return fmt.Errorf("invalid counterparty order commitment: %w", err)
+	}
+	payAsset, err := AssetID(lockToken(mine))
+	if err != nil {
+		return err
+	}
+	toDec := func(h, what string) (string, error) {
+		d, err := HexToDecimal(h)
+		if err != nil {
+			return "", fmt.Errorf("invalid %s: %w", what, err)
+		}
+		return d, nil
+	}
+	resQDec, err := toDec(req.CmQResidual, "cm_q_residual")
+	if err != nil {
+		return err
+	}
+	resLockedDec, err := toDec(req.CmLockedResidual, "cm_locked_residual")
+	if err != nil {
+		return err
+	}
+	noteDec, err := toDec(req.CmNoteOut, "cm_note_out")
+	if err != nil {
+		return err
+	}
+	bind := settleLargeBind(ot.chainID, req)
+	signals := []string{cmQ, cmQCtr, locked[0], locked[1], fmt.Sprintf("%d", price), side,
+		resQDec, resLockedDec, payAsset.String(), noteDec, bind.String()}
+	if err := VerifyGroth16(ot.settleLargeVK, req.ZkProof, signals); err != nil {
+		return fmt.Errorf("settle_large proof verification failed: %w", err)
+	}
+
+	// Mutate: spend collateral, mint the fill note, relist the residual.
+	settleBy := fmt.Sprintf("settle-large:%s", req.OrderID[:8])
+	if err := ot.Account.SpendCash(mine.InputCashIDs, settleBy); err != nil {
+		return fmt.Errorf("spending collateral: %w", err)
+	}
+	cmNote, err := ParseFrHex(req.CmNoteOut)
+	if err != nil {
+		return fmt.Errorf("cm_note_out: %w", err)
+	}
+	indices, err := ot.Account.ApplyPoolMutation(PoolMutation{
+		NoteCms: []*big.Int{cmNote},
+		Height:  uint64(ctx.Block.Height),
+		Source:  "settle",
+		By:      settleBy,
+	})
+	if err != nil {
+		return fmt.Errorf("minting fill note: %w", err)
+	}
+	relisted, rematched, err := ot.relistWithRemainder(
+		mine, CipherText(req.CmQResidual), CipherText(req.CmLockedResidual), req.ZkProof)
+	if err != nil {
+		return err
+	}
+	_ = ot.DeleteSettleAddr(mine.ID)
+
+	return ctx.EmitJsonEvent(&SettleEvent{
+		EventType:     "settle_large",
+		Order:         mine.ID,
+		NoteLeafIndex: indices[0],
+		Relisted:      relisted,
+		Matched:       rematched,
+	})
+}
+
+// relistWithRemainder keeps the surviving larger order on the book: mints
+// its residual Locked collateral cash, swaps the order's amount commitment
+// and input cash list, clears the match linkage, and returns it to Pending
+// (retaining its original block height, i.e. its time priority). It then
+// immediately attempts a re-match against the book. Returns the updated
+// order and the counter order it re-matched with (nil if none).
 func (ot *OrderBook) relistWithRemainder(
 	ord *Order, newOrderCommitment, newLockedCommitment CipherText, zkProof string,
 ) (*Order, *Order, error) {
@@ -507,8 +669,6 @@ func (ot *OrderBook) relistWithRemainder(
 	if err != nil {
 		return nil, nil, fmt.Errorf("re-reading relisted order: %w", err)
 	}
-	// The remainder goes straight back into the matching engine so it can
-	// pair with any compatible resting order.
 	rematched, err := ot.matchOrder(updated)
 	if err != nil {
 		return nil, nil, fmt.Errorf("re-matching relisted order: %w", err)

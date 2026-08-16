@@ -55,10 +55,27 @@ func (SettleAddrScheme) TableName() string {
 	return "settle_addrs"
 }
 
+// ────────────────────── Compare Result SQL Model ──────────────────────
+
+// CompareResultScheme records the dual-signed, proof-verified comparison
+// result of a matched pair (paper π_cmp phase). Keyed by the canonical
+// A-side (the maker); `Cmp` is sign(q_A − q_B).
+type CompareResultScheme struct {
+	OrderAID string `gorm:"primaryKey;column:order_a_id"`
+	OrderBID string `gorm:"column:order_b_id;index"`
+	Cmp      int    `gorm:"column:cmp"`
+	Height   uint64 `gorm:"column:height"`
+}
+
+// TableName returns the SQL table name for CompareResultScheme rows.
+func (CompareResultScheme) TableName() string {
+	return "compare_results"
+}
+
 // ────────────────────── DB Initialization ──────────────────────
 
-// InitOrderDB opens a SQLite database and auto-migrates the orders and
-// settle_submissions tables. `logLevel` controls GORM SQL logging verbosity.
+// InitOrderDB opens a SQLite database and auto-migrates the order-side
+// tables. `logLevel` controls GORM SQL logging verbosity.
 func InitOrderDB(dsn string, logLevel logger.LogLevel) *gorm.DB {
 	gormLogger := logger.New(
 		log.New(os.Stdout, "\n", log.LstdFlags),
@@ -71,7 +88,7 @@ func InitOrderDB(dsn string, logLevel logger.LogLevel) *gorm.DB {
 	if err != nil {
 		panic(fmt.Sprintf("failed to open orders database: %v", err))
 	}
-	if err := db.AutoMigrate(&OrderScheme{}, &SettleAddrScheme{}); err != nil {
+	if err := db.AutoMigrate(&OrderScheme{}, &SettleAddrScheme{}, &CompareResultScheme{}); err != nil {
 		panic(fmt.Sprintf("failed to migrate orders table: %v", err))
 	}
 	return db
@@ -298,4 +315,36 @@ func (ot *OrderBook) GetSettleAddr(orderID OrderID) (*SettleAddrScheme, error) {
 // DeleteSettleAddr removes a settle address entry by order ID.
 func (ot *OrderBook) DeleteSettleAddr(orderID OrderID) error {
 	return ot.db.Where("order_id = ?", string(orderID)).Delete(&SettleAddrScheme{}).Error
+}
+
+// ────────────────────── Compare Result CRUD ──────────────────────
+
+// SaveCompareResult upserts the pair's comparison row (an identical
+// re-submission is idempotent).
+func (ot *OrderBook) SaveCompareResult(res *CompareResultScheme) error {
+	return ot.db.Save(res).Error
+}
+
+// GetCompareResult looks the pair up in either orientation. Returns the row
+// plus whether `myID` is the canonical A side (callers normalize Cmp with
+// it). gorm.ErrRecordNotFound when no comparison was recorded.
+func (ot *OrderBook) GetCompareResult(myID, matchID OrderID) (*CompareResultScheme, bool, error) {
+	var row CompareResultScheme
+	err := ot.db.First(&row, "order_a_id = ? AND order_b_id = ?", string(myID), string(matchID)).Error
+	if err == nil {
+		return &row, true, nil
+	}
+	err = ot.db.First(&row, "order_a_id = ? AND order_b_id = ?", string(matchID), string(myID)).Error
+	if err != nil {
+		return nil, false, err
+	}
+	return &row, false, nil
+}
+
+// DeleteCompareResult removes the pair's comparison row (both orientations).
+func (ot *OrderBook) DeleteCompareResult(x, y OrderID) error {
+	return ot.db.
+		Where("(order_a_id = ? AND order_b_id = ?) OR (order_a_id = ? AND order_b_id = ?)",
+			string(x), string(y), string(y), string(x)).
+		Delete(&CompareResultScheme{}).Error
 }
