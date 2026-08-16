@@ -437,9 +437,9 @@ func (ot *OrderBook) settlePublicPrefix(mine, match *Order) (cmQ string, locked 
 	if err != nil {
 		return "", nil, 0, "", fmt.Errorf("invalid order commitment: %w", err)
 	}
-	locked, err = lockedInputHashesPadded(mine, ot.Account, 2, lockToken(mine))
+	locked, err = lockedSlotsDec(mine)
 	if err != nil {
-		return "", nil, 0, "", fmt.Errorf("locked inputs: %w", err)
+		return "", nil, 0, "", fmt.Errorf("locked commitment: %w", err)
 	}
 	price = executionPrice(mine, match)
 	side = "0"
@@ -496,13 +496,10 @@ func (ot *OrderBook) SettleSmall(ctx *context.WriteContext) error {
 		return fmt.Errorf("settle_small proof verification failed: %w", err)
 	}
 
-	// Mutate: spend collateral, mint the payout note, close the order.
-	// (Cross-DB, non-atomic: a crash between steps destroys value but never
-	// duplicates it — same ordering discipline as the pool writings.)
+	// Mutate: the collateral commitment lives only on the order row (it
+	// leaves the book when the order closes), so settlement mints the payout
+	// note and closes the order — no cash to spend.
 	settleBy := fmt.Sprintf("settle-small:%s", req.OrderID[:8])
-	if err := ot.Account.SpendCash(mine.InputCashIDs, settleBy); err != nil {
-		return fmt.Errorf("spending collateral: %w", err)
-	}
 	cmNote, err := ParseFrHex(req.CmNoteOut)
 	if err != nil {
 		return fmt.Errorf("cm_note_out: %w", err)
@@ -594,11 +591,9 @@ func (ot *OrderBook) SettleLarge(ctx *context.WriteContext) error {
 		return fmt.Errorf("settle_large proof verification failed: %w", err)
 	}
 
-	// Mutate: spend collateral, mint the fill note, relist the residual.
+	// Mutate: mint the fill note, relist the residual (the collateral
+	// commitment is order-bound, so relisting just swaps it — no cash).
 	settleBy := fmt.Sprintf("settle-large:%s", req.OrderID[:8])
-	if err := ot.Account.SpendCash(mine.InputCashIDs, settleBy); err != nil {
-		return fmt.Errorf("spending collateral: %w", err)
-	}
 	cmNote, err := ParseFrHex(req.CmNoteOut)
 	if err != nil {
 		return fmt.Errorf("cm_note_out: %w", err)
@@ -628,35 +623,20 @@ func (ot *OrderBook) SettleLarge(ctx *context.WriteContext) error {
 	})
 }
 
-// relistWithRemainder keeps the surviving larger order on the book: mints
-// its residual Locked collateral cash, swaps the order's amount commitment
-// and input cash list, clears the match linkage, and returns it to Pending
-// (retaining its original block height, i.e. its time priority). It then
-// immediately attempts a re-match against the book. Returns the updated
-// order and the counter order it re-matched with (nil if none).
+// relistWithRemainder keeps the surviving larger order on the book: swaps
+// its quantity and collateral commitments to the residual, clears the match
+// linkage, and returns it to Pending (retaining its original block height,
+// i.e. its time priority). It then immediately attempts a re-match against
+// the book. Returns the updated order and the counter order it re-matched
+// with (nil if none).
 func (ot *OrderBook) relistWithRemainder(
 	ord *Order, newOrderCommitment, newLockedCommitment CipherText, zkProof string,
 ) (*Order, *Order, error) {
-	token := lockToken(ord)
-	newLockedID := computeCashID(ord.Pubkey, token, newLockedCommitment)
-	lockedCash := &Cash{
-		ID:      newLockedID,
-		Pubkey:  ord.Pubkey,
-		Token:   token,
-		Amount:  newLockedCommitment,
-		ZkProof: zkProof,
-		Status:  Locked,
-		By:      string(ord.ID),
-	}
-	if err := ot.Account.CreateCash(lockedCash); err != nil {
-		return nil, nil, fmt.Errorf("failed to create remainder locked cash: %w", err)
-	}
-
 	if err := ot.UpdateOrderAmount(ord.ID, newOrderCommitment); err != nil {
 		return nil, nil, fmt.Errorf("failed to update order amount: %w", err)
 	}
-	if err := ot.UpdateOrderInputCashIDs(ord.ID, []string{newLockedID}); err != nil {
-		return nil, nil, fmt.Errorf("failed to update order input cash: %w", err)
+	if err := ot.UpdateOrderLockedCommitment(ord.ID, string(newLockedCommitment)); err != nil {
+		return nil, nil, fmt.Errorf("failed to update order collateral: %w", err)
 	}
 	if err := ot.UpdateOrderMatchOrder(ord.ID, ""); err != nil {
 		return nil, nil, fmt.Errorf("failed to clear match order: %w", err)

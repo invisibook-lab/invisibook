@@ -12,20 +12,24 @@ import (
 var Validator = validator.New()
 
 // Order is the on-chain domain model of a buy or sell intent.
-// `Amount` is encrypted ciphertext; `InputCashIDs` references the locked Cash
-// that will fund settlement once the order is matched.
+// `Amount` is the order's quantity commitment cm_q. `LockedCommitment` is
+// the order's collateral commitment (P2(locked_value, r) — order-bound,
+// outside the shielded pool); `Fee` is the plaintext fee destroyed at
+// admission. `IntraBlockIndex` is the transaction index within the block,
+// the 4th matching tiebreak.
 type Order struct {
-	ID           OrderID    `json:"id"      validate:"required"`
-	Type         TradeType  `json:"type"    validate:"oneof=0 1"`
-	Subject      TradePair  `json:"subject"`
-	Price        *big.Int   `json:"price,omitempty"`
-	Amount       CipherText `json:"amount"  validate:"required"`
-	Pubkey       string     `json:"pubkey"  validate:"required"` // owner's ed25519 pubkey (64-char hex)
-	InputCashIDs []string   `json:"input_cash_ids" validate:"required,min=1"`
-	HandlingFee  []string   `json:"handling_fee,omitempty"`
-	BlockHeight  uint32     `json:"block_height"`
-	MatchOrder   OrderID    `json:"match_order,omitempty"`
-	Status       OrderStat  `json:"status"  validate:"oneof=0 1 2 3 4 5"`
+	ID               OrderID    `json:"id"      validate:"required"`
+	Type             TradeType  `json:"type"    validate:"oneof=0 1"`
+	Subject          TradePair  `json:"subject"`
+	Price            *big.Int   `json:"price,omitempty"`
+	Amount           CipherText `json:"amount"  validate:"required"`
+	Pubkey           string     `json:"pubkey"  validate:"required"` // owner's ed25519 pubkey (64-char hex)
+	LockedCommitment string     `json:"locked_commitment"`
+	Fee              uint64     `json:"fee"`
+	BlockHeight      uint32     `json:"block_height"`
+	IntraBlockIndex  uint32     `json:"intra_block_index"`
+	MatchOrder       OrderID    `json:"match_order,omitempty"`
+	Status           OrderStat  `json:"status"  validate:"oneof=0 1 2 3 4 5"`
 }
 
 // Validate checks all struct tag constraints on the Order.
@@ -34,12 +38,12 @@ func (o *Order) Validate() error {
 }
 
 // ComputeOrderID derives a deterministic order ID by SHA-256 hashing the
-// concatenation of all input Cash IDs.
-// Must match the Rust compute_order_id in invisibook-lib.
-func ComputeOrderID(inputCashIDs []string) OrderID {
+// concatenation of the input nullifiers. Must match the Rust
+// compute_order_id in invisibook-lib.
+func ComputeOrderID(inputNullifiers []string) OrderID {
 	h := sha256.New()
-	for _, id := range inputCashIDs {
-		h.Write([]byte(id))
+	for _, nf := range inputNullifiers {
+		h.Write([]byte(nf))
 	}
 	return OrderID(hex.EncodeToString(h.Sum(nil)))
 }

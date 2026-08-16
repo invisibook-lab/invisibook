@@ -12,10 +12,10 @@ pub fn short_id(id: &str) -> &str {
 }
 
 /// Computes a deterministic order ID by SHA-256 hashing the concatenation
-/// of all input Cash IDs. Must match the Go side ComputeOrderID.
-pub fn compute_order_id(input_cash_ids: &[String]) -> OrderID {
+/// of the input nullifiers. Must match the Go side ComputeOrderID.
+pub fn compute_order_id(input_nullifiers: &[String]) -> OrderID {
     let mut hasher = Sha256::new();
-    for id in input_cash_ids {
+    for id in input_nullifiers {
         hasher.update(id.as_bytes());
     }
     hasher
@@ -227,8 +227,8 @@ pub fn sample_orders() -> Vec<Order> {
             token2: t2.into(),
         };
         let amount = encrypt_amount(amt);
-        let fake_cash_id = format!("sample-cash-{}", idx);
-        let id = compute_order_id(std::slice::from_ref(&fake_cash_id));
+        let fake_nf = format!("sample-nf-{}", idx);
+        let id = compute_order_id(std::slice::from_ref(&fake_nf));
         Order {
             id,
             trade_type,
@@ -236,12 +236,12 @@ pub fn sample_orders() -> Vec<Order> {
             price: Some(price),
             amount,
             pubkey: String::new(),
-            input_cash_ids: vec![fake_cash_id],
-            handling_fee: vec!["0".to_string()],
+            locked_commitment: String::new(),
+            fee: 0,
             block_height: 0,
+            intra_block_index: 0,
             status,
             match_order: None,
-            is_smaller: false,
         }
     };
 
@@ -311,12 +311,12 @@ mod tests {
             price: None,
             amount: String::new(),
             pubkey: tag.to_string(),
-            input_cash_ids: Vec::new(),
-            handling_fee: Vec::new(),
+            locked_commitment: String::new(),
+            fee: 0,
             block_height,
+            intra_block_index: 0,
             status: OrderStatus::Pending,
             match_order: None,
-            is_smaller: false,
         }
     }
 

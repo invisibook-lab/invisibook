@@ -4,87 +4,44 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"math/big"
+	"strings"
 	"testing"
 )
 
-// fullSigningRequest builds a SendOrderRequest exercising every field of the
-// signing message: split mode with change output and locked commitment.
+// sendOrderV2Vector is the frozen byte-lockstep signing vector (Go↔Rust).
+const sendOrderV2Vector = "00000018696e76697369626f6f6b2d73656e642d6f726465722d7632000000076f726465722d3100000001300000000345544800000004555344540000000433353030000000406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100000008616c6963652d706b00000040626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262620000004063636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363000000406464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646400000040656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565650000000800000000000000070000004066666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666"
+
+// fullSigningRequest builds a SendOrder v2 request exercising every field of
+// the signing message.
 func fullSigningRequest() *SendOrderRequest {
 	return &SendOrderRequest{
-		ID:           "order-1",
-		Type:         Buy,
-		Subject:      TradePair{Token1: "ETH", Token2: "USDT"},
-		Price:        big.NewInt(3500),
-		Amount:       "amt-commit",
-		Pubkey:       "alice-pk",
-		InputCashIDs: []string{"cash-a", "cash-b"},
-		HandlingFee:  []string{"5", "10"},
-		Change: &CashChangeOutput{
-			CashID: "change-cash",
-			Amount: "change-amt",
-		},
-		LockedCommitment: "locked-commit",
+		ID:               "order-1",
+		Type:             Buy,
+		Subject:          TradePair{Token1: "ETH", Token2: "USDT"},
+		Price:            big.NewInt(3500),
+		Amount:           CipherText(strings.Repeat("a", 64)),
+		Pubkey:           "alice-pk",
+		Anchor:           strings.Repeat("b", 64),
+		InputNullifiers:  []string{strings.Repeat("c", 64), strings.Repeat("d", 64)},
+		LockedCommitment: strings.Repeat("e", 64),
+		Fee:              7,
+		ChangeCommitment: strings.Repeat("f", 64),
 	}
 }
 
 // The signing message must match the byte layout shared with the Rust client
 // (`send_order_signing_message` in invisibook-lib): each field u32-BE
-// length-prefixed, lists prefixed with a u32-BE element count. The expected
-// hex was computed independently from the layout spec; the Rust side asserts
-// the identical vectors.
+// length-prefixed, fee as a u64-BE 8-byte field. The vector was recomputed
+// from the frozen layout; the Rust test asserts the identical bytes.
 func TestSendOrderSigningMessageLockstepVectors(t *testing.T) {
-	const fullVector = "00000018696e76697369626f6f6b2d73656e642d6f726465722d7631000000076f726465722d31000000013000000003455448000000045553445400000004333530300000000a616d742d636f6d6d697400000008616c6963652d706b0000000200000006636173682d6100000006636173682d6200000002000000013500000002313000000001310000000b6368616e67652d636173680000000a6368616e67652d616d740000000d6c6f636b65642d636f6d6d6974"
-	if got := hex.EncodeToString(SendOrderSigningMessage(fullSigningRequest())); got != fullVector {
-		t.Errorf("full request message mismatch:\n got  %s\n want %s", got, fullVector)
-	}
-
-	// Minimal request: nil price, no change, no locked commitment — all three
-	// encode as empty fields (with change flag "0") rather than being omitted.
-	const minimalVector = "00000018696e76697369626f6f6b2d73656e642d6f726465722d7631000000076f726465722d3200000001310000000345544800000004555344540000000000000003616d7400000006626f622d706b0000000100000006636173682d630000000100000001300000000130000000000000000000000000"
-	minimal := &SendOrderRequest{
-		ID:           "order-2",
-		Type:         Sell,
-		Subject:      TradePair{Token1: "ETH", Token2: "USDT"},
-		Amount:       "amt",
-		Pubkey:       "bob-pk",
-		InputCashIDs: []string{"cash-c"},
-		HandlingFee:  []string{"0"},
-	}
-	if got := hex.EncodeToString(SendOrderSigningMessage(minimal)); got != minimalVector {
-		t.Errorf("minimal request message mismatch:\n got  %s\n want %s", got, minimalVector)
-	}
-}
-
-// Length-prefixed encoding must keep adjacent fields and list elements
-// unambiguous: moving a byte across any boundary has to change the message.
-// A plain delimiter join would collapse several of these pairs.
-func TestSendOrderSigningMessageUnambiguous(t *testing.T) {
-	base := fullSigningRequest()
-
-	mutations := map[string]func(r *SendOrderRequest){
-		"shift byte between tokens":        func(r *SendOrderRequest) { r.Subject = TradePair{Token1: "ETHU", Token2: "SDT"} },
-		"shift byte between list elements": func(r *SendOrderRequest) { r.InputCashIDs = []string{"cash-ac", "ash-b"} },
-		"merge list elements":              func(r *SendOrderRequest) { r.InputCashIDs = []string{"cash-acash-b"} },
-		"move element across lists": func(r *SendOrderRequest) {
-			r.InputCashIDs = []string{"cash-a"}
-			r.HandlingFee = []string{"cash-b", "5", "10"}
-		},
-		"drop change into locked": func(r *SendOrderRequest) { r.Change = nil; r.LockedCommitment = "change-cashchange-amtlocked-commit" },
-	}
-
-	baseMsg := hex.EncodeToString(SendOrderSigningMessage(base))
-	for name, mutate := range mutations {
-		r := fullSigningRequest()
-		mutate(r)
-		if got := hex.EncodeToString(SendOrderSigningMessage(r)); got == baseMsg {
-			t.Errorf("%s: mutated request produced an identical signing message", name)
-		}
+	got := hex.EncodeToString(SendOrderSigningMessage(fullSigningRequest()))
+	if got != sendOrderV2Vector {
+		t.Errorf("signing message mismatch:\n got  %s\n want %s", got, sendOrderV2Vector)
 	}
 }
 
 // A signature over the canonical message must stop verifying as soon as any
-// covered field changes — this is the property the old sign-the-ID scheme
-// lacked (price, pair, and fees were malleable by any observer).
+// covered field changes.
 func TestSendOrderSignatureCoversAllFields(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -98,12 +55,15 @@ func TestSendOrderSignatureCoversAllFields(t *testing.T) {
 	}
 
 	tampered := map[string]func(r *SendOrderRequest){
-		"price":        func(r *SendOrderRequest) { r.Price = big.NewInt(1) },
-		"type":         func(r *SendOrderRequest) { r.Type = Sell },
-		"token1":       func(r *SendOrderRequest) { r.Subject.Token1 = "SHIB" },
-		"amount":       func(r *SendOrderRequest) { r.Amount = "other-commit" },
-		"handling fee": func(r *SendOrderRequest) { r.HandlingFee = []string{"999999"} },
-		"change dest":  func(r *SendOrderRequest) { r.Change.CashID = "attacker-cash" },
+		"price":       func(r *SendOrderRequest) { r.Price = big.NewInt(1) },
+		"type":        func(r *SendOrderRequest) { r.Type = Sell },
+		"token1":      func(r *SendOrderRequest) { r.Subject.Token1 = "SHIB" },
+		"amount":      func(r *SendOrderRequest) { r.Amount = CipherText(strings.Repeat("9", 64)) },
+		"anchor":      func(r *SendOrderRequest) { r.Anchor = strings.Repeat("9", 64) },
+		"nullifier 0": func(r *SendOrderRequest) { r.InputNullifiers[0] = strings.Repeat("9", 64) },
+		"locked":      func(r *SendOrderRequest) { r.LockedCommitment = strings.Repeat("9", 64) },
+		"fee":         func(r *SendOrderRequest) { r.Fee = 8 },
+		"change":      func(r *SendOrderRequest) { r.ChangeCommitment = strings.Repeat("9", 64) },
 	}
 	for name, mutate := range tampered {
 		r := fullSigningRequest()

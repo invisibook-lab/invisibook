@@ -122,10 +122,10 @@ pub struct Order {
     pub price: Option<u64>,
     pub amount: CipherText,
     pub pubkey: String, // owner's ed25519 pubkey (64-char hex)
-    pub input_cash_ids: Vec<String>,
-    pub handling_fee: Vec<String>,
+    pub locked_commitment: String,
+    pub fee: u64,
     pub block_height: u32,
+    pub intra_block_index: u32,
     pub status: OrderStatus,
     pub match_order: Option<OrderID>,
-    pub is_smaller: bool, // true if this order is the smaller side after MPC comparison
 }

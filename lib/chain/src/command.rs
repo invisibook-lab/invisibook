@@ -101,12 +101,12 @@ pub fn parse_command(input: &str) -> CommandResult {
         price: Some(price),
         amount,
         pubkey: String::new(),
-        input_cash_ids: Vec::new(),
-        handling_fee: vec!["0".to_string()],
+        locked_commitment: String::new(),
+        fee: 0,
         block_height: 0,
+        intra_block_index: 0,
         status: OrderStatus::Pending,
         match_order: None,
-        is_smaller: false,
     };
 
     let type_name = match trade_type {
