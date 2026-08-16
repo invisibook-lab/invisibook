@@ -139,11 +139,16 @@ fn App() -> Element {
                         }
                     };
 
+                    let Some(note_seed) = *seed_signal.read() else {
+                        message.set(Some(("✗ wallet seed unavailable".into(), true)));
+                        continue;
+                    };
                     let deps = match &settle2p_bin {
                         Some(bin) => settle::SettleDeps {
                             bin: bin.clone(),
                             keys_dir: settle2p_keys_dir.clone(),
                             sessions_dir: settle2p_sessions_dir.clone(),
+                            note_seed,
                         },
                         None => {
                             message.set(Some((
@@ -187,18 +192,6 @@ fn App() -> Element {
                                         rec.status = CASH_SPENT;
                                     }
                                 }
-                                let recv = &outcome.recv;
-                                if !store.records().iter().any(|r| r.cash_id == recv.cash_id) {
-                                    store.records_mut().push(CashRecord {
-                                        cash_id: recv.cash_id.clone(),
-                                        token: recv.token.clone(),
-                                        amount: recv.amount,
-                                        random: recv.random_hex.clone(),
-                                        status: CASH_ACTIVE,
-                                        order_amount: None,
-                                        order_random: None,
-                                    });
-                                }
                                 if let Some(rem) = &outcome.remainder {
                                     let l = &rem.locked;
                                     if !store.records().iter().any(|r| r.cash_id == l.cash_id) {
@@ -214,6 +207,29 @@ fn App() -> Element {
                                     }
                                 }
                                 let _ = store.flush();
+                            }
+                            // The incoming payout is a pool NOTE: it goes into
+                            // the notes.json ledger (the wallet's money file).
+                            {
+                                use invisibook_lib::note_store::{
+                                    NOTE_PENDING_MINT, NoteRecord, NoteStore,
+                                };
+                                let recv = &outcome.recv;
+                                let mut nstore = NoteStore::load(NoteStore::default_path());
+                                if nstore.find(&recv.cm).is_none() {
+                                    nstore.upsert(NoteRecord {
+                                        cm: recv.cm.clone(),
+                                        token: recv.token.clone(),
+                                        amount: recv.amount,
+                                        r: recv.r_hex.clone(),
+                                        key_index: 0,
+                                        sk: recv.sk_hex.clone(),
+                                        leaf_index: 0,
+                                        status: NOTE_PENDING_MINT,
+                                        nf: String::new(),
+                                    });
+                                    let _ = nstore.save();
+                                }
                             }
                             // The chain relisted the survivor in place (same id,
                             // block height); the poller drives its next round.
@@ -393,7 +409,13 @@ fn App() -> Element {
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 };
-                let recovered = settle::recover_all_sessions(&c, &sessions_dir).await;
+                let note_seed = loop {
+                    if let Some(s) = *seed_signal.read() {
+                        break s;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                };
+                let recovered = settle::recover_all_sessions(&c, &note_seed, &sessions_dir).await;
                 for rec in recovered {
                     {
                         let mut store = cash_store.write();
@@ -404,12 +426,20 @@ fn App() -> Element {
                                 }
                             }
                         }
-                        for add in &rec.add {
+                        for add in &rec.remainder_cash {
                             if !store.records().iter().any(|r| r.cash_id == add.cash_id) {
                                 store.records_mut().push(add.clone());
                             }
                         }
                         let _ = store.flush();
+                    }
+                    {
+                        use invisibook_lib::note_store::NoteStore;
+                        let mut nstore = NoteStore::load(NoteStore::default_path());
+                        if nstore.find(&rec.note.cm).is_none() {
+                            nstore.upsert(rec.note.clone());
+                            let _ = nstore.save();
+                        }
                     }
                     let _ = std::fs::remove_dir_all(&rec.dir);
                 }

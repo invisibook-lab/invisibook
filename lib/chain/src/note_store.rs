@@ -28,8 +28,13 @@ pub struct NoteRecord {
     pub amount: u64,
     /// 64-char hex blinding (big-endian Fr bytes).
     pub r: String,
-    /// Key index of the spending secret (SLIP-0010 note path index).
+    /// Key index of the spending secret (SLIP-0010 note path index);
+    /// 0 when `sk` is carried explicitly.
     pub key_index: u32,
+    /// The note spending secret as 64-char hex (per-trade derived keys).
+    /// Empty when the secret is derivable from `key_index` alone.
+    #[serde(default)]
+    pub sk: String,
     /// Leaf index in the tree; meaningful once status leaves PENDING_MINT.
     #[serde(default)]
     pub leaf_index: u64,
@@ -157,6 +162,7 @@ mod tests {
             amount: 7,
             r: "33".into(),
             key_index: 0,
+            sk: String::new(),
             leaf_index: 0,
             status: NOTE_UNSPENT,
             nf: String::new(),
@@ -167,6 +173,7 @@ mod tests {
             amount: 5,
             r: "35".into(),
             key_index: 0,
+            sk: String::new(),
             leaf_index: 2,
             status: NOTE_UNSPENT,
             nf: String::new(),
@@ -190,6 +197,7 @@ mod tests {
             amount: 7,
             r: "33".into(),
             key_index: 0,
+            sk: String::new(),
             leaf_index: 0,
             status: NOTE_PENDING_SPEND,
             nf: "deadbeef".into(),

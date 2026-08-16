@@ -100,94 +100,51 @@ fn send_order_signing_message(params: &SendOrderParams) -> Vec<u8> {
     buf
 }
 
-/// Mirror of chain Go `CoZkSettleRequest` — the single-submission co-zk
-/// settlement message, serving both variants (`SettleOrdersCoZk` and
-/// `SettleOrdersCoZk2p`). The six `*_commitment` fields are the settlement
-/// circuit's public outputs: 64-char big-endian hex of
-/// `Poseidon(amount, blinding)` over BN254, with fresh blindings drawn by
-/// the owning side during the settle session.
+/// Mirror of chain Go `CompareRequest` — the dual-signed comparison result
+/// (paper π_cmp phase). `zk_proof` is snarkjs Groth16 JSON for
+/// `SubmitCompareCoZk`, hex-encoded ark-compressed PLONK bytes for
+/// `SubmitCompareCoZk2p`.
 #[derive(Debug, Clone, Serialize)]
-pub struct SettleCoZkParams {
+pub struct CompareParams {
     /// The maker's order ID (lower block height; ties broken by the
     /// lexicographically smaller ID) — always the circuit's a-side.
     pub order_a_id: OrderID,
     /// The taker's order ID — the circuit's b-side.
     pub order_b_id: OrderID,
     /// Public three-way comparison of the hidden order amounts,
-    /// `sign(a - b)`: `1` → B fully fills and A survives with a remainder,
-    /// `-1` → the reverse, `0` → both fill exactly.
+    /// `sign(a - b)`.
     pub cmp: i8,
-    /// A's remainder order amount, `a - fill` (commits 0 when A fully
-    /// fills). The chain relists order A under it when `cmp == 1`.
-    pub new_order_a_commitment: String,
-    /// B's remainder order amount — the relist analogue for `cmp == -1`.
-    pub new_order_b_commitment: String,
-    /// A's remainder collateral in A's locked token (the remainder itself
-    /// for a seller, remainder × price for a buyer); minted as A's fresh
-    /// Locked cash when `cmp == 1`.
-    pub new_locked_a_commitment: String,
-    /// B's remainder collateral — minted when `cmp == -1`.
-    pub new_locked_b_commitment: String,
-    /// What A receives: `fill` token1 when A buys, `fill × price` token2
-    /// when A sells. Minted as an Active cash owned by order A's pubkey.
-    pub recv_a_commitment: String,
-    /// What B receives — the opposite leg of `recv_a_commitment`.
-    pub recv_b_commitment: String,
-    /// Trader A's ed25519 signature (128-char hex) over the canonical
-    /// settlement message (`settle_cozk_message` / `settle_cozk2p_message`
-    /// by variant), verified on-chain against order A's pubkey.
     pub sig_a: String,
-    /// Trader B's signature over the same message, by order B's key.
     pub sig_b: String,
-    /// The jointly generated proof: snarkjs Groth16 JSON for the 3-party
-    /// variant, hex-encoded ark-compressed PLONK bytes for the 2-party one.
     pub zk_proof: String,
 }
 
-/// Builds the canonical co-zk settlement byte string with the given domain
-/// `prefix`, in lockstep with Go `core.coZkSettleMessage`. The signature
-/// fields of `params` are not part of the message and may be empty.
-fn settle_cozk_message_with_prefix(prefix: &str, params: &SettleCoZkParams) -> Vec<u8> {
-    let msg = format!(
-        "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
-        prefix,
-        params.order_a_id,
-        params.order_b_id,
-        params.cmp,
-        params.new_order_a_commitment,
-        params.new_order_b_commitment,
-        params.new_locked_a_commitment,
-        params.new_locked_b_commitment,
-        params.recv_a_commitment,
-        params.recv_b_commitment,
-    );
-    msg.into_bytes()
+/// Builds the canonical compare byte string with the given domain `prefix`,
+/// in lockstep with Go `core.compareMessage`. The signature fields of
+/// `params` are not part of the message and may be empty.
+fn compare_message_with_prefix(prefix: &str, params: &CompareParams) -> Vec<u8> {
+    format!(
+        "{}:{}:{}:{}",
+        prefix, params.order_a_id, params.order_b_id, params.cmp
+    )
+    .into_bytes()
 }
 
-/// Canonical byte string both traders ed25519-sign for a 3-party co-zk
-/// settlement. Must stay in lockstep with Go `core.CoZkSettleMessage`. The
-/// signature fields of `params` are not part of the message and may be empty.
-pub fn settle_cozk_message(params: &SettleCoZkParams) -> Vec<u8> {
-    settle_cozk_message_with_prefix("invisibook-cozk-settle", params)
+/// Canonical byte string both traders ed25519-sign for the Groth16 compare
+/// variant. Lockstep with Go `core.CoZkCompareMessage`.
+pub fn compare_cozk_message(params: &CompareParams) -> Vec<u8> {
+    compare_message_with_prefix("invisibook-cozk-compare-v2", params)
 }
 
-/// Canonical byte string both traders ed25519-sign for a 2-party co-zk
-/// settlement. Must stay in lockstep with Go `core.CoZk2pSettleMessage`; the
-/// distinct prefix domain-separates the 2-party variant from the 3-party one.
-/// The signature fields of `params` are not part of the message and may be empty.
-pub fn settle_cozk2p_message(params: &SettleCoZkParams) -> Vec<u8> {
-    settle_cozk_message_with_prefix("invisibook-cozk2p-settle", params)
+/// Canonical byte string both traders ed25519-sign for the 2-party PLONK
+/// compare variant. Lockstep with Go `core.CoZk2pCompareMessage`.
+pub fn compare_cozk2p_message(params: &CompareParams) -> Vec<u8> {
+    compare_message_with_prefix("invisibook-cozk2p-compare-v2", params)
 }
 
-/// Verifies an ed25519 signature over `settle_cozk2p_message(params)`.
-/// `pubkey_hex` must be the signer's raw ed25519 public key as a 64-char hex
-/// string and `sig_hex` the 64-byte signature as a 128-char hex string.
+/// Verifies an ed25519 signature over `compare_cozk2p_message(params)`.
 /// Returns `false` (never panics) on any malformed input.
-pub fn verify_settle_cozk2p_sig(
-    params: &SettleCoZkParams,
-    pubkey_hex: &str,
-    sig_hex: &str,
-) -> bool {
+pub fn verify_compare_cozk2p_sig(params: &CompareParams, pubkey_hex: &str, sig_hex: &str) -> bool {
     let Ok(pk_bytes) = hex::decode(pubkey_hex) else {
         return false;
     };
@@ -205,8 +162,73 @@ pub fn verify_settle_cozk2p_sig(
     };
     let signature = Signature::from_bytes(&sig_arr);
     verifying_key
-        .verify(&settle_cozk2p_message(params), &signature)
+        .verify(&compare_cozk2p_message(params), &signature)
         .is_ok()
+}
+
+/// Mirror of chain Go `SettleSmallRequest` — the fully filled side's own
+/// settlement update (paper π_A).
+#[derive(Debug, Clone, Serialize)]
+pub struct SettleSmallParams {
+    pub order_id: OrderID,
+    pub match_order_id: OrderID,
+    pub cm_note_out: String,
+    pub signature: String,
+    pub zk_proof: String,
+}
+
+/// Mirror of chain Go `SettleLargeRequest` — the partially filled side's
+/// own update (paper π_B).
+#[derive(Debug, Clone, Serialize)]
+pub struct SettleLargeParams {
+    pub order_id: OrderID,
+    pub match_order_id: OrderID,
+    pub cm_q_residual: String,
+    pub cm_locked_residual: String,
+    pub cm_note_out: String,
+    pub signature: String,
+    pub zk_proof: String,
+}
+
+/// Length-prefixed settle signing message, lockstep with Go
+/// `core.settleSigMessage`.
+fn settle_sig_message(domain: &str, fields: &[&str]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(256);
+    let mut put = |f: &[u8]| {
+        msg.extend_from_slice(&(f.len() as u32).to_be_bytes());
+        msg.extend_from_slice(f);
+    };
+    put(domain.as_bytes());
+    for f in fields {
+        put(f.as_bytes());
+    }
+    msg
+}
+
+/// The owner-signed message for SettleSmall (Go `core.SettleSmallSigMessage`).
+pub fn settle_small_message(params: &SettleSmallParams) -> Vec<u8> {
+    settle_sig_message(
+        "invisibook-settle-small-v1",
+        &[
+            &params.order_id,
+            &params.match_order_id,
+            &params.cm_note_out,
+        ],
+    )
+}
+
+/// The owner-signed message for SettleLarge (Go `core.SettleLargeSigMessage`).
+pub fn settle_large_message(params: &SettleLargeParams) -> Vec<u8> {
+    settle_sig_message(
+        "invisibook-settle-large-v1",
+        &[
+            &params.order_id,
+            &params.match_order_id,
+            &params.cm_q_residual,
+            &params.cm_locked_residual,
+            &params.cm_note_out,
+        ],
+    )
 }
 
 /// Register settle address request params.
@@ -474,6 +496,11 @@ impl ChainClient {
     }
 
     /// Returns the owner's raw ed25519 pubkey as a 64-char hex string.
+    /// The chain id this client signs and binds against.
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
     pub fn pubkey_hex(&self) -> &str {
         &self.pubkey_hex
     }
@@ -535,24 +562,23 @@ impl ChainClient {
             .await
     }
 
-    /// ed25519-signs the canonical co-zk settlement message with this
+    /// ed25519-signs the canonical 2-party compare message with this
     /// client's key, returning the 128-char hex signature. The signature
     /// fields of `params` are ignored (they are not part of the message).
-    pub fn sign_settle_cozk(&self, params: &SettleCoZkParams) -> String {
-        self.sign(&settle_cozk_message(params))
+    pub fn sign_compare_cozk2p(&self, params: &CompareParams) -> String {
+        self.sign(&compare_cozk2p_message(params))
     }
 
-    /// Submits the jointly generated co-zk settlement in a single writing.
-    /// `params` must carry both traders' signatures (`sig_a`, `sig_b`) and
-    /// the collaboratively generated proof; either party may submit.
-    pub async fn settle_orders_cozk(
+    /// Submits the dual-signed comparison result with its collaboratively
+    /// generated PLONK π_cmp; either party may submit.
+    pub async fn submit_compare_cozk2p(
         &self,
-        params: &SettleCoZkParams,
+        params: &CompareParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.client
             .write_chain(
                 "orderbook",
-                "SettleOrdersCoZk",
+                "SubmitCompareCoZk2p",
                 params,
                 self.chain_id,
                 100,
@@ -561,30 +587,36 @@ impl ChainClient {
             .await
     }
 
-    /// ed25519-signs the canonical 2-party co-zk settlement message with this
-    /// client's key, returning the 128-char hex signature. The signature
-    /// fields of `params` are ignored (they are not part of the message).
-    pub fn sign_settle_cozk2p(&self, params: &SettleCoZkParams) -> String {
-        self.sign(&settle_cozk2p_message(params))
+    /// ed25519-signs the SettleSmall message with this client's key.
+    pub fn sign_settle_small(&self, params: &SettleSmallParams) -> String {
+        self.sign(&settle_small_message(params))
     }
 
-    /// Submits the jointly generated 2-party co-zk settlement in a single
-    /// writing. `params` must carry both traders' signatures (`sig_a`,
-    /// `sig_b`) and the collaboratively generated proof; either party may
-    /// submit.
-    pub async fn settle_orders_cozk2p(
+    /// Submits this side's fully-filled settlement update (paper π_A).
+    /// Persist-before-publish: the payout note the counterparty will
+    /// receive was already committed to by their wallet; MY submission must
+    /// come after MY WAL holds everything needed to re-submit.
+    pub async fn settle_small(
         &self,
-        params: &SettleCoZkParams,
+        params: &SettleSmallParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.client
-            .write_chain(
-                "orderbook",
-                "SettleOrdersCoZk2p",
-                params,
-                self.chain_id,
-                100,
-                0,
-            )
+            .write_chain("orderbook", "SettleSmall", params, self.chain_id, 100, 0)
+            .await
+    }
+
+    /// ed25519-signs the SettleLarge message with this client's key.
+    pub fn sign_settle_large(&self, params: &SettleLargeParams) -> String {
+        self.sign(&settle_large_message(params))
+    }
+
+    /// Submits this side's partially-filled settlement update (paper π_B).
+    pub async fn settle_large(
+        &self,
+        params: &SettleLargeParams,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.client
+            .write_chain("orderbook", "SettleLarge", params, self.chain_id, 100, 0)
             .await
     }
 
@@ -1115,54 +1147,121 @@ mod tests {
 
     /// Builds a SettleCoZkParams with the given `cmp` and six distinct dummy
     /// 64-char commitments; signature and proof fields are left empty.
-    fn test_params(cmp: i8) -> SettleCoZkParams {
-        SettleCoZkParams {
+    fn test_params(cmp: i8) -> CompareParams {
+        CompareParams {
             order_a_id: "order-a-id".to_string(),
             order_b_id: "order-b-id".to_string(),
             cmp,
-            new_order_a_commitment: "11".repeat(32),
-            new_order_b_commitment: "22".repeat(32),
-            new_locked_a_commitment: "33".repeat(32),
-            new_locked_b_commitment: "44".repeat(32),
-            recv_a_commitment: "55".repeat(32),
-            recv_b_commitment: "66".repeat(32),
             sig_a: String::new(),
             sig_b: String::new(),
             zk_proof: String::new(),
         }
     }
 
-    /// Byte-lockstep check against a hand-concatenated 2p message for every
-    /// `cmp` sign; `cmp_str` is written out explicitly to mirror Go's
-    /// `strconv.Itoa` rendering rather than reusing Rust formatting.
+    /// Byte-lockstep check against a hand-concatenated 2p compare message
+    /// for every `cmp` sign; `cmp_str` mirrors Go's `strconv.Itoa`.
     #[test]
-    fn settle_cozk2p_message_lockstep() {
+    fn compare_cozk2p_message_lockstep() {
         for (cmp, cmp_str) in [(-1i8, "-1"), (0i8, "0"), (1i8, "1")] {
             let p = test_params(cmp);
-            let expected = String::from("invisibook-cozk2p-settle:")
+            let expected = String::from("invisibook-cozk2p-compare-v2:")
                 + &p.order_a_id
                 + ":"
                 + &p.order_b_id
                 + ":"
-                + cmp_str
-                + ":"
-                + &p.new_order_a_commitment
-                + ":"
-                + &p.new_order_b_commitment
-                + ":"
-                + &p.new_locked_a_commitment
-                + ":"
-                + &p.new_locked_b_commitment
-                + ":"
-                + &p.recv_a_commitment
-                + ":"
-                + &p.recv_b_commitment;
-            assert_eq!(settle_cozk2p_message(&p), expected.into_bytes());
+                + cmp_str;
+            assert_eq!(compare_cozk2p_message(&p), expected.into_bytes());
         }
     }
 
-    /// Builds a SendOrderParams exercising every field of the signing
-    /// message: split mode with change output and locked commitment.
+    #[test]
+    fn compare_messages_are_domain_separated() {
+        let p = test_params(1);
+        assert_ne!(compare_cozk_message(&p), compare_cozk2p_message(&p));
+    }
+
+    /// The settle signing messages are length-prefixed and domain-separated
+    /// (lockstep with Go core.settleSigMessage: u32-BE length per field).
+    #[test]
+    fn settle_messages_lockstep() {
+        let small = SettleSmallParams {
+            order_id: "order-b-id".into(),
+            match_order_id: "order-a-id".into(),
+            cm_note_out: "77".repeat(32),
+            signature: String::new(),
+            zk_proof: String::new(),
+        };
+        let msg = settle_small_message(&small);
+        let mut expected = Vec::new();
+        for f in [
+            "invisibook-settle-small-v1",
+            "order-b-id",
+            "order-a-id",
+            &"77".repeat(32),
+        ] {
+            expected.extend_from_slice(&(f.len() as u32).to_be_bytes());
+            expected.extend_from_slice(f.as_bytes());
+        }
+        assert_eq!(msg, expected);
+
+        let large = SettleLargeParams {
+            order_id: "order-a-id".into(),
+            match_order_id: "order-b-id".into(),
+            cm_q_residual: "88".repeat(32),
+            cm_locked_residual: "99".repeat(32),
+            cm_note_out: "aa".repeat(32),
+            signature: String::new(),
+            zk_proof: String::new(),
+        };
+        assert_ne!(settle_large_message(&large), settle_small_message(&small));
+    }
+
+    /// sign_compare_cozk2p output must verify under verify_compare_cozk2p_sig,
+    /// and any tampering must fail verification without panicking.
+    #[test]
+    fn sign_verify_compare_cozk2p_roundtrip() {
+        let seed = [7u8; 32];
+        let client = ChainClient::new("http://localhost:7999", "ws://localhost:8999", seed, 1926);
+        let params = test_params(1);
+
+        let sig = client.sign_compare_cozk2p(&params);
+        assert!(verify_compare_cozk2p_sig(
+            &params,
+            client.pubkey_hex(),
+            &sig
+        ));
+
+        let mut bad_sig = hex::decode(&sig).unwrap();
+        bad_sig[0] ^= 0x01;
+        assert!(!verify_compare_cozk2p_sig(
+            &params,
+            client.pubkey_hex(),
+            &hex::encode(bad_sig)
+        ));
+
+        let other = test_params(-1);
+        assert!(!verify_compare_cozk2p_sig(
+            &other,
+            client.pubkey_hex(),
+            &sig
+        ));
+
+        // A Groth16-domain signature must not verify in the 2p domain.
+        let sig_3p = client.sign(&compare_cozk_message(&params));
+        assert!(!verify_compare_cozk2p_sig(
+            &params,
+            client.pubkey_hex(),
+            &sig_3p
+        ));
+
+        assert!(!verify_compare_cozk2p_sig(&params, "zz", &sig));
+        assert!(!verify_compare_cozk2p_sig(
+            &params,
+            client.pubkey_hex(),
+            "zz"
+        ));
+    }
+
     fn full_send_order_params() -> SendOrderParams {
         SendOrderParams {
             id: "order-1".to_string(),
@@ -1186,11 +1285,6 @@ mod tests {
         }
     }
 
-    /// The signing message must match the byte layout shared with the Go
-    /// chain (`core.SendOrderSigningMessage`): each field u32-BE
-    /// length-prefixed, lists prefixed with a u32-BE element count. The
-    /// expected hex was computed independently from the layout spec; the Go
-    /// side asserts the identical vectors.
     #[test]
     fn send_order_signing_message_lockstep_vectors() {
         let full_vector = "00000018696e76697369626f6f6b2d73656e642d6f726465722d7631000000076f726465722d31000000013000000003455448000000045553445400000004333530300000000a616d742d636f6d6d697400000008616c6963652d706b0000000200000006636173682d6100000006636173682d6200000002000000013500000002313000000001310000000b6368616e67652d636173680000000a6368616e67652d616d740000000d6c6f636b65642d636f6d6d6974";
@@ -1247,61 +1341,5 @@ mod tests {
         let mut refeed = full_send_order_params();
         refeed.handling_fee = vec!["999999".to_string()];
         assert_ne!(send_order_signing_message(&refeed), base);
-    }
-
-    /// The 3-party builder must keep its original prefix (domain separation).
-    #[test]
-    fn settle_cozk_message_keeps_3p_prefix() {
-        let p = test_params(1);
-        let msg = settle_cozk_message(&p);
-        assert!(msg.starts_with(b"invisibook-cozk-settle:"));
-        assert!(!msg.starts_with(b"invisibook-cozk2p-settle:"));
-    }
-
-    /// sign_settle_cozk2p output must verify under verify_settle_cozk2p_sig,
-    /// and any tampering (signature bit-flip, different params, wrong domain,
-    /// malformed inputs) must fail verification without panicking.
-    #[test]
-    fn sign_verify_settle_cozk2p_roundtrip() {
-        let seed = [7u8; 32];
-        let client = ChainClient::new("http://localhost:7999", "ws://localhost:8999", seed, 1926);
-        let params = test_params(1);
-
-        let sig = client.sign_settle_cozk2p(&params);
-        assert!(verify_settle_cozk2p_sig(&params, client.pubkey_hex(), &sig));
-
-        // Flipping one bit of the signature must break verification.
-        let mut bad_sig = hex::decode(&sig).unwrap();
-        bad_sig[0] ^= 0x01;
-        assert!(!verify_settle_cozk2p_sig(
-            &params,
-            client.pubkey_hex(),
-            &hex::encode(bad_sig)
-        ));
-
-        // A signature over different params must not verify.
-        let other = test_params(-1);
-        assert!(!verify_settle_cozk2p_sig(&other, client.pubkey_hex(), &sig));
-
-        // A 3-party signature must not verify in the 2-party domain.
-        let sig_3p = client.sign_settle_cozk(&params);
-        assert!(!verify_settle_cozk2p_sig(
-            &params,
-            client.pubkey_hex(),
-            &sig_3p
-        ));
-
-        // Malformed inputs must return false, not panic.
-        assert!(!verify_settle_cozk2p_sig(&params, "zz", &sig));
-        assert!(!verify_settle_cozk2p_sig(
-            &params,
-            client.pubkey_hex(),
-            "zz"
-        ));
-        assert!(!verify_settle_cozk2p_sig(
-            &params,
-            client.pubkey_hex(),
-            "deadbeef"
-        ));
     }
 }

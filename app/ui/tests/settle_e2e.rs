@@ -353,11 +353,13 @@ async fn settle_e2e_relist() {
         bin: prover_bin.clone(),
         keys_dir: keys_dir.clone(),
         sessions_dir: sessions_root.join("alice"),
+        note_seed: seed_from_hex(ALICE_SEED_HEX),
     };
     let bob_deps = SettleDeps {
         bin: prover_bin.clone(),
         keys_dir: keys_dir.clone(),
         sessions_dir: sessions_root.join("bob"),
+        note_seed: seed_from_hex(BOB_SEED_HEX),
     };
 
     // Warm the proving-key cache once so the two concurrent provers don't race
@@ -437,28 +439,21 @@ async fn settle_e2e_relist() {
         "order commitment must be rewritten to the remainder commitment"
     );
 
-    // ── Minted UTXOs exist on chain with the expected ids/status ──
-    let bob_eth = bob
-        .get_account(&bob_pubkey, TOKEN1)
-        .await
-        .expect("bob ETH account");
+    // ── Payout NOTES exist in the pool tree ──
     assert!(
-        bob_eth
-            .cash
-            .iter()
-            .any(|c| c.id == bob_outcome.recv.cash_id && c.status == CASH_ACTIVE),
-        "bob must hold an Active ETH recv cash"
+        bob.get_note_by_cm(&bob_outcome.recv.cm)
+            .await
+            .expect("bob note lookup")
+            >= 0,
+        "bob's payout note must be in the pool tree"
     );
-    let alice_usdt = alice
-        .get_account(&alice_pubkey, TOKEN2)
-        .await
-        .expect("alice USDT account");
     assert!(
-        alice_usdt
-            .cash
-            .iter()
-            .any(|c| c.id == alice_outcome.recv.cash_id && c.status == CASH_ACTIVE),
-        "alice must hold an Active USDT recv cash"
+        alice
+            .get_note_by_cm(&alice_outcome.recv.cm)
+            .await
+            .expect("alice note lookup")
+            >= 0,
+        "alice's payout note must be in the pool tree"
     );
     let alice_eth = alice
         .get_account(&alice_pubkey, TOKEN1)
