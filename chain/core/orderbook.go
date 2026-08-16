@@ -107,7 +107,7 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 		claimFeesVK:    claimFeesVK,
 	}
 	ot.SetWritings(ot.SendOrder, ot.SubmitCompareCoZk, ot.SubmitCompareCoZk2p,
-		ot.SettleSmall, ot.SettleLarge, ot.ClaimFees, ot.RegisterSettleAddr)
+		ot.SettleSmall, ot.SettleLarge, ot.SettlePair, ot.ClaimFees, ot.RegisterSettleAddr)
 	ot.SetReadings(ot.QueryOrders, ot.QuerySettleAddr, ot.QueryFees)
 	return ot
 }
