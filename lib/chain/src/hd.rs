@@ -54,6 +54,31 @@ pub fn derive_ed25519_key(bip39_seed: &[u8], coin_type: u32, index: u32) -> [u8;
     k
 }
 
+/// Derive the shielded-pool spending secret at m/44'/coin_type'/0'/1'/index'.
+/// The change level `1'` keeps it independent from the ed25519 identity key
+/// at `0'`; the 32 bytes are later reduced big-endian into BN254 Fr.
+pub fn derive_note_sk(bip39_seed: &[u8], coin_type: u32, index: u32) -> [u8; 32] {
+    let (mut k, mut c) = master(bip39_seed);
+    for seg in [44u32, coin_type, 0, 1, index] {
+        let (k2, c2) = child(&k, &c, seg);
+        k = k2;
+        c = c2;
+    }
+    k
+}
+
+/// Parse a BIP-39 mnemonic and derive the note spending secret at
+/// m/44'/coin_type'/0'/1'/index'. Returns an error on an invalid mnemonic.
+pub fn mnemonic_to_note_sk(
+    mnemonic: &str,
+    coin_type: u32,
+    index: u32,
+) -> Result<[u8; 32], bip39::Error> {
+    let m = bip39::Mnemonic::parse(mnemonic)?;
+    let bip39_seed = m.to_seed("");
+    Ok(derive_note_sk(&bip39_seed, coin_type, index))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

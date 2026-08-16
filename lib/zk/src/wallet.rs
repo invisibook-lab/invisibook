@@ -27,9 +27,17 @@ use crate::{
 pub fn poseidon_commit(amount: u64, random: &[u8; 32]) -> Fr {
     let amount_fr = Fr::from(amount);
     let random_fr = Fr::from_be_bytes_mod_order(random);
+    poseidon2(amount_fr, random_fr)
+}
+
+/// The bare 2-input circomlib Poseidon over BN254 — the `P2(a, b)` every
+/// shielded-pool derivation (note commitments, Merkle nodes, nullifiers) is
+/// built from. Must stay byte-identical to circom's `Poseidon(2)` and to the
+/// chain's go-iden3 Poseidon.
+pub fn poseidon2(a: Fr, b: Fr) -> Fr {
     let mut hasher = Poseidon::<Fr>::new_circom(2).expect("circom(2) Poseidon params must build");
     hasher
-        .hash(&[amount_fr, random_fr])
+        .hash(&[a, b])
         .expect("Poseidon hash must not fail on two field elements")
 }
 
