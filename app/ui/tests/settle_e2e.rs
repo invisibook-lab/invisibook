@@ -220,9 +220,13 @@ async fn place_order(
         .send_order(prepared.params)
         .await
         .expect("send_order");
-    poll_order(client, &order_id, 15, |o| o.status == OrderStatus::Pending)
-        .await
-        .expect("order confirmed Pending");
+    // A taker order can match in its landing block, so Matched counts as
+    // landed too.
+    poll_order(client, &order_id, 15, |o| {
+        o.status == OrderStatus::Pending || o.status == OrderStatus::Matched
+    })
+    .await
+    .expect("order landed on chain");
     let land_ms = t.elapsed().as_secs_f64() * 1e3;
     (order_id, prepared.opening, prove_ms, land_ms)
 }
