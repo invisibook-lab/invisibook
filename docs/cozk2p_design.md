@@ -207,3 +207,95 @@ re-audited this path. Standing of the previously known gaps:
   [paper_deviations.md](paper_deviations.md) D4).
 - **Open — fail-open verification (P1).** An empty VK path skips
   verification; set `require_proofs = true` on production nodes.
+
+## 8. The merged path (benchmark twin)
+
+The `cozk-merged-settle` branch adds a SECOND settlement flavor next to
+the split flow above. One collaborative TurboPlonk proof covers the
+comparison AND both settlement legs — the note-model successor of the
+old 15-signal joint statement (see [cozk_design.md](cozk_design.md)).
+The split flow stays unchanged; a config switch selects the flavor, so
+the two paths give a direct A/B benchmark.
+
+### 8.1 The merged relation (`relation_pair.rs`)
+
+15 public signals (order is normative; the chain rebuilds 7..14 from
+its order rows and takes 0..6 from the request):
+
+```
+ 0 cmp              sign(q_a − q_b) in {−1, 0, 1}
+ 1 cm_note_out_a    payout note minted TO trader A (B pays it)
+ 2 cm_note_out_b    payout note minted TO trader B (A pays it)
+ 3 cm_q_res_a       A's residual quantity commitment (used iff cmp = +1)
+ 4 cm_locked_res_a  A's residual collateral commitment
+ 5 cm_q_res_b       B's residual quantity commitment (used iff cmp = −1)
+ 6 cm_locked_res_b  B's residual collateral commitment
+ 7 cm_q_a           order A quantity commitment (on chain)
+ 8 cm_q_b           order B quantity commitment (on chain)
+ 9 locked_a         order A collateral commitment (on chain)
+10 locked_b         order B collateral commitment (on chain)
+11 price            execution price (equal-price rule)
+12 a_is_seller      1 when A sells token1
+13 asset_recv_a     assetID of the token A receives
+14 asset_recv_b     assetID of the token B receives
+```
+
+Constraints: booleanity + recomposition of `q_a`, `q_b`, and the price
+bits; Poseidon opens of both order and both collateral commitments (the
+collateral value is not a witness — the circuit computes `needed =
+q·price + side·(q − q·price)` and opens the commitment against it); the
+MSB-scan comparison; `fill = min(q_a, q_b)`; residual quantity and
+collateral commitments for BOTH sides (the filled side commits zero);
+and the two payout-note chains `NoteCommit(npk, asset, recv, r)`.
+16 Poseidon gadgets; 16 384 gates after padding — inside the existing
+`MAX_DEGREE = 32768` SRS. Keys are cached under a separate
+`settlepair2p-*` tag.
+
+Range safety: every derived amount is bounded by a 64-bit-checked
+input. The buyer-side collateral equation pins `q·price` to the opened
+admission-time collateral, so `fill·price` and the residual collateral
+stay below 2^64 without extra bit witnesses.
+
+### 8.2 The merged session (`session_pair.rs`)
+
+Same preamble, witness binding, and comparison as §2. Then, INSTEAD of
+reveal + solo settle proofs + leg exchange:
+
+1. Compute the six output commitments OVER SHARES (Poseidon on the
+   fabric; the fill selection is public once `cmp` is open) and open
+   them. Opening a hiding commitment reveals nothing.
+2. Ferry ONE signature per trader over the full 15-signal statement
+   (domain `invisibook-settle-pair-cozk2p-v1`).
+3. Collaboratively prove the merged relation; verify locally.
+4. Hand `{cmp, public, proof, sig_a, sig_b}` to the host. The host
+   submits `SettlePairCoZk2p` and BLOCKS until the settlement is FINAL.
+5. Only after finality does the smaller side reveal the fill (bound to
+   the MPC shares — a lying reveal aborts), so the larger side learns
+   its payout amount and residual opening.
+
+Privacy delta vs. the split flow: no quantity is revealed to anyone
+before the settlement is final, and the reveal shrinks from `(q, r)` to
+the fill value alone. The F1 anchor becomes the settlement itself.
+Griefing caveat: a counterparty that vanishes after finality but before
+the fill reveal leaves the larger side with a minted note of unknown
+amount; the WAL keeps the session recoverable, and the amount can be
+re-learned only from the counterparty.
+
+### 8.3 Chain writing (`SettlePairCoZk2p`)
+
+Accepts a MATCHED pair directly (no Settling stage). It re-does the
+compare-phase preconditions (mutual match, opposite sides, maker = A,
+equal prices), verifies both ed25519 signatures and ONE PLONK proof
+(`cozk2p_verify_settle_pair` over the same cgo bridge), then reuses the
+SettlePair pipeline unchanged: journal → idempotent mint of both payout
+notes → close/relist in one transaction → recovery on boot. Config key:
+`settle_pair_cozk2p_vk_path`; artifact:
+`chain/vk/settle_pair_cozk2p_vk.bin` (`make dump-settlepair2p-fixture`).
+
+### 8.4 Selecting the flavor
+
+- App config: `settle2p_mode = "merged"` (or env
+  `INVISIBOOK_SETTLE2P_MODE=merged`); default is `split`.
+- Subprocess: `settle2p_session --mode merged`.
+- Benchmark: `settle_e2e_relist` (split) vs `settle_e2e_relist_merged`
+  (merged), same scenario and assertions; run them one at a time.

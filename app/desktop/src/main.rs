@@ -259,6 +259,11 @@ fn App() -> Element {
     let settle2p_bin = cfg.settle2p_bin();
     let settle2p_keys_dir = cfg.settle2p_keys_dir();
     let settle2p_sessions_dir = cfg.settle2p_sessions_dir();
+    // Settlement flavor (benchmark switch): "split" (default) or "merged".
+    let settle2p_mode = match cfg.settle2p_mode().as_str() {
+        "merged" => settle::SettleMode::Merged,
+        _ => settle::SettleMode::Split,
+    };
 
     // ── Settle coroutine: receives order IDs to settle (strictly serial) ──
     let settle_coro = use_coroutine({
@@ -319,6 +324,7 @@ fn App() -> Element {
                             keys_dir: settle2p_keys_dir.clone(),
                             sessions_dir: settle2p_sessions_dir.clone(),
                             note_seed,
+                            mode: settle2p_mode,
                         },
                         None => {
                             message.set(Some((

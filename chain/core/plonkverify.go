@@ -48,7 +48,21 @@ func LoadPlonkVK(name, path string) (*PlonkVK, error) {
 // `SettlePublic` statement JSON the chain rebuilt from on-chain state.
 // Logs one line per call plus the verdict, like VerifyGroth16.
 func VerifyPlonkSettle2p(vk *PlonkVK, proofHex string, publicJSON []byte) error {
-	// When no VK is loaded (path was empty in config), skip verification.
+	return verifyPlonkWith(vk, proofHex, publicJSON, plonkVerifySettle2p)
+}
+
+// VerifyPlonkSettlePair verifies a MERGED settlement proof (compare + both
+// settle legs in one statement) against the 15-signal `PairPublic` JSON.
+func VerifyPlonkSettlePair(vk *PlonkVK, proofHex string, publicJSON []byte) error {
+	return verifyPlonkWith(vk, proofHex, publicJSON, plonkVerifySettlePair)
+}
+
+// verifyPlonkWith is the shared decode/log/skip shell around one FFI
+// verifier entry. A nil VK (empty path in config) skips verification.
+func verifyPlonkWith(
+	vk *PlonkVK, proofHex string, publicJSON []byte,
+	verify func(vkBytes, publicJSON, proofBytes []byte) error,
+) error {
 	if vk == nil {
 		log.Printf("[zk] no PLONK VK loaded, skipping proof verification")
 		return nil
@@ -61,7 +75,7 @@ func VerifyPlonkSettle2p(vk *PlonkVK, proofHex string, publicJSON []byte) error 
 		return fmt.Errorf("%s proof or public statement is empty", vk.Name)
 	}
 	log.Printf("[zk] verifying %s: %d B proof (PLONK)", vk.Name, len(proofBytes))
-	if err := plonkVerifySettle2p(vk.VKBytes, publicJSON, proofBytes); err != nil {
+	if err := verify(vk.VKBytes, publicJSON, proofBytes); err != nil {
 		log.Printf("[zk] %s REJECTED: %v", vk.Name, err)
 		return fmt.Errorf("plonk verification failed for %s: %w", vk.Name, err)
 	}

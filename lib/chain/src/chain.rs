@@ -293,6 +293,77 @@ pub struct SettlePairParams {
     pub b: SettlePairLegParams,
 }
 
+/// Mirror of chain Go `SettlePairCoZk2pRequest` — the MERGED settlement:
+/// one collaborative PLONK proof covers the comparison and both settle
+/// legs, so a Matched pair settles in a single writing. All four residual
+/// commitments are always present (the fully filled side's commit to
+/// zero); `zk_proof` is hex of the ark-compressed PLONK proof.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlePairCoZk2pParams {
+    pub order_a_id: OrderID,
+    pub order_b_id: OrderID,
+    pub cmp: i8,
+    pub cm_note_out_a: String,
+    pub cm_note_out_b: String,
+    pub cm_q_residual_a: String,
+    pub cm_locked_residual_a: String,
+    pub cm_q_residual_b: String,
+    pub cm_locked_residual_b: String,
+    pub sig_a: String,
+    pub sig_b: String,
+    pub zk_proof: String,
+}
+
+/// The dual-signed message for the merged settlement (Go
+/// `core.SettlePairCoZk2pMessage`): length-prefixed, domain-separated,
+/// covering the pair ids, cmp, and every output commitment. The signature
+/// and proof fields of `params` are not part of the message.
+pub fn settle_pair_cozk2p_message(params: &SettlePairCoZk2pParams) -> Vec<u8> {
+    let cmp = params.cmp.to_string();
+    settle_sig_message(
+        "invisibook-settle-pair-cozk2p-v1",
+        &[
+            &params.order_a_id,
+            &params.order_b_id,
+            &cmp,
+            &params.cm_note_out_a,
+            &params.cm_note_out_b,
+            &params.cm_q_residual_a,
+            &params.cm_locked_residual_a,
+            &params.cm_q_residual_b,
+            &params.cm_locked_residual_b,
+        ],
+    )
+}
+
+/// Verifies an ed25519 signature over `settle_pair_cozk2p_message(params)`.
+/// Returns `false` (never panics) on any malformed input.
+pub fn verify_settle_pair_cozk2p_sig(
+    params: &SettlePairCoZk2pParams,
+    pubkey_hex: &str,
+    sig_hex: &str,
+) -> bool {
+    let Ok(pk_bytes) = hex::decode(pubkey_hex) else {
+        return false;
+    };
+    let Ok(sig_bytes) = hex::decode(sig_hex) else {
+        return false;
+    };
+    let Ok(pk_arr) = <[u8; 32]>::try_from(pk_bytes.as_slice()) else {
+        return false;
+    };
+    let Ok(sig_arr) = <[u8; 64]>::try_from(sig_bytes.as_slice()) else {
+        return false;
+    };
+    let Ok(verifying_key) = VerifyingKey::from_bytes(&pk_arr) else {
+        return false;
+    };
+    let signature = Signature::from_bytes(&sig_arr);
+    verifying_key
+        .verify(&settle_pair_cozk2p_message(params), &signature)
+        .is_ok()
+}
+
 /// Length-prefixed settle signing message, lockstep with Go
 /// `core.settleSigMessage`.
 fn settle_sig_message(domain: &str, fields: &[&str]) -> Vec<u8> {
@@ -613,6 +684,30 @@ impl ChainClient {
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.client
             .write_chain("orderbook", "SettlePair", params, self.chain_id, 100, 0)
+            .await
+    }
+
+    /// ed25519-signs the merged settle message with this client's key.
+    pub fn sign_settle_pair_cozk2p(&self, params: &SettlePairCoZk2pParams) -> String {
+        self.sign(&settle_pair_cozk2p_message(params))
+    }
+
+    /// Submits the MERGED settlement: one collaborative proof for compare
+    /// plus both settle legs, settling a Matched pair in a single writing.
+    /// Either party may submit.
+    pub async fn settle_pair_cozk2p(
+        &self,
+        params: &SettlePairCoZk2pParams,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.client
+            .write_chain(
+                "orderbook",
+                "SettlePairCoZk2p",
+                params,
+                self.chain_id,
+                100,
+                0,
+            )
             .await
     }
 
@@ -1056,6 +1151,55 @@ mod tests {
             zk_proof: String::new(),
         };
         assert_ne!(settle_large_message(&large), settle_small_message(&small));
+    }
+
+    /// The merged settle message is length-prefixed, covers every output
+    /// commitment, and is domain-separated from the other settle messages
+    /// (lockstep with Go core.SettlePairCoZk2pMessage).
+    #[test]
+    fn settle_pair_cozk2p_message_lockstep() {
+        let p = SettlePairCoZk2pParams {
+            order_a_id: "order-a-id".into(),
+            order_b_id: "order-b-id".into(),
+            cmp: -1,
+            cm_note_out_a: "11".repeat(32),
+            cm_note_out_b: "22".repeat(32),
+            cm_q_residual_a: "33".repeat(32),
+            cm_locked_residual_a: "44".repeat(32),
+            cm_q_residual_b: "55".repeat(32),
+            cm_locked_residual_b: "66".repeat(32),
+            sig_a: String::new(),
+            sig_b: String::new(),
+            zk_proof: String::new(),
+        };
+        let msg = settle_pair_cozk2p_message(&p);
+        let mut expected = Vec::new();
+        for f in [
+            "invisibook-settle-pair-cozk2p-v1",
+            "order-a-id",
+            "order-b-id",
+            "-1",
+            &"11".repeat(32),
+            &"22".repeat(32),
+            &"33".repeat(32),
+            &"44".repeat(32),
+            &"55".repeat(32),
+            &"66".repeat(32),
+        ] {
+            expected.extend_from_slice(&(f.len() as u32).to_be_bytes());
+            expected.extend_from_slice(f.as_bytes());
+        }
+        assert_eq!(msg, expected);
+
+        // Signature round-trip through the verify helper.
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let sig = hex::encode(sk.sign(&msg).to_bytes());
+        let pk = hex::encode(sk.verifying_key().to_bytes());
+        assert!(verify_settle_pair_cozk2p_sig(&p, &pk, &sig));
+        let mut tampered = p.clone();
+        tampered.cmp = 1;
+        assert!(!verify_settle_pair_cozk2p_sig(&tampered, &pk, &sig));
     }
 
     /// SettlePair wire JSON must match the Go request: a fully filled leg
