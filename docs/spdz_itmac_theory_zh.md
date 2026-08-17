@@ -1,5 +1,8 @@
 # SPDZ 在线阶段可验证打开(Authenticated Opening)——完整理论
 
+> **Status:** Current(中文理论笔记,背景阅读;与实现的对应关系见
+> [cozk2p_design.md](cozk2p_design.md))。
+
 > 说明:本文解释 `cozk2p` 比较协议里"每次打开都是 `open_authenticated`,
 > 篡改份额会在 MAC 校验处 abort"这一机制的全部理论细节。
 >

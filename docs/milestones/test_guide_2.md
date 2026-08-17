@@ -1,5 +1,12 @@
 # Invisibook Test Guide 2 — Dual-Party Settlement
 
+> **Status:** Historical (milestone acceptance guide). It references
+> the cash model wallet files, which Phase 5 removed. For current test entry points, read
+> [../README.md](../README.md) (docs index) and
+> [../app_design.md](../app_design.md) §4; dev wallets now come from
+> `chain/cfg/tests/{alice,bob}_notes.json` via `scripts/dev-dual.sh`.
+
+
 This guide tests the full settlement flow with two separate desktop instances (Alice and Bob) communicating via MPC and P2P.
 
 ## Prerequisites

@@ -1,10 +1,17 @@
 # Co-zk Settlement — Experiments
 
+> **Status:** Current as a measurement record (last updated 2026-08-16).
+> Early sections measure the historical 3-party REP3 path and the old
+> joint settle relation ([cozk_design.md](cozk_design.md), historical);
+> the final section measures the current hardened note flow. Each
+> section states its own setup.
+
+
 Two collaborative provers are measured: the **3-party REP3** path
-(`lib/cozk`, co-snarks, Groth16) and the **2-party SPDZ** path
-(`cozk2p/`, mpc-jellyfish, TurboPlonk — see
-[cozk2p_design.md](cozk2p_design.md)). §"2-party" at the bottom compares
-them.
+(`lib/cozk`, co-snarks, Groth16 — a historical experiment, not on this
+branch; see [cozk_design.md](cozk_design.md)) and the **2-party SPDZ**
+path (`cozk2p/`, mpc-jellyfish, TurboPlonk — see
+[cozk2p_design.md](cozk2p_design.md)). §"2-party" compares them.
 
 Measurements of the collaborative settlement prover (`settle_cozk` circuit)
 against single-prover baselines: **time**, **memory**, and **proof size**.
@@ -17,8 +24,8 @@ cargo build --release -p cozk --bins
 cargo run --release -p cozk --bin bench_settle_cozk -- --runs 8
 ```
 
-The harness ([`lib/cozk/src/bin/bench_settle_cozk.rs`](../lib/cozk/src/bin/bench_settle_cozk.rs))
-proves the same trade (A sells 80 token1 @ price 3, B buys 60 → `cmp = 1`)
+The harness (`lib/cozk/src/bin/bench_settle_cozk.rs`, on the historical
+branch) proves the same trade (A sells 80 token1 @ price 3, B buys 60 → `cmp = 1`)
 five/eight ways and writes a JSON report.
 
 ## Environment
@@ -166,7 +173,7 @@ verified before release.
 | adversary tolerated | semi-honest, no 2-of-3 collusion; helper must not collude | **1 fully malicious counterparty** |
 | proof system | Groth16 (circom, snarkjs zkey) | TurboPlonk (KZG) |
 | proof size | 128 B (ark) / ~720 B (snarkjs JSON) | 769 B compressed |
-| chain verifier | go-rapidsnark (already wired) | cozk2p staticlib over cgo (`-tags cozk2p`, wired; `SettleOrdersCoZk2p`) |
+| chain verifier | go-rapidsnark (already wired) | cozk2p staticlib over cgo (`-tags cozk2p`, wired; today the writing is `SubmitCompareCoZk2p`) |
 | prove wall-clock | 0.4 s (in-proc) / ~1.6-2 s (TCP) | ~24 s (in-proc) / ~20 s (QUIC) |
 | peak RSS per node | ~110 MB | ~7.4 GB |
 | offline phase | none (REP3) | Beaver triples (mock in dev; LowGear/OT for production) |

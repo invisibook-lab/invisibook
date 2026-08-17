@@ -1,246 +1,211 @@
 # App Design
 
-> **NOTE (2026-08-16):** This document shows the legacy cash model. Phase 5
-> removed the cash model from the code. The chain now keeps value only in
-> the shielded note pool. Orders spend pool notes and lock collateral as a
-> commitment on the order row. Read
-> [settlement_hardening_plan_zh.md](settlement_hardening_plan_zh.md) for the
-> current design. Do not use this document as a reference for new code.
+> **Status:** Current (2026-08-16, note model + two-phase settlement).
+> For every place this design differs from the paper, see
+> [paper_deviations.md](paper_deviations.md).
 
 ## 1. Overview
 
-The `app/` component is Invisibook's end-user trading client. It is a
-cross-platform Rust application built on [Dioxus 0.6](https://dioxuslabs.com/),
-sharing one set of RSX components across desktop (macOS / Windows / Linux)
-and mobile (iOS / Android). The app's responsibilities are:
+The `app/` component is Invisibook's end-user trading client: a
+cross-platform Rust application built on [Dioxus](https://dioxuslabs.com/),
+sharing one set of RSX components across desktop and mobile. The app:
 
-1. Render the order book and a trade form so users can place buy / sell orders.
-2. Locally encrypt the plaintext amount before any network call, so the
-   chain only ever sees ciphertext (see `encrypt_amount` in
-   [lib/chain/src/orderbook.rs](../lib/chain/src/orderbook.rs)).
-3. Track which orders the user *originated* (so those amounts can be
-   displayed as plaintext) vs. which came from others (displayed as cipher).
-4. Drive the L2 chain through the shared Rust client in [lib/chain/](../lib/chain/).
+1. Renders the order book and a trade form.
+2. Places orders through the real shielded path: it selects pool notes,
+   proves the `send_order` circuit with rapidsnark, and persists the
+   wallet records **before** it submits (persist-before-publish).
+3. Drives the full hardened settlement for its own matched orders: the
+   2-party MPC compare (in the `settle2p_session` subprocess), the
+   on-chain compare confirmation (F1), this side's settle proof, the
+   settle-leg exchange, and the atomic `SettlePair` (F2).
+4. Keeps the wallet's money files: `notes.json` (note openings — this
+   file IS the money) and `orders.json` (order openings).
 
-The app is deliberately thin: all business logic (ciphering, order-ID
-hashing, chain RPC shapes) lives in the shared `invisibook-lib` so both the
-desktop and mobile crates can reuse it verbatim, and so the CLI can
-exercise the same code paths. Each platform crate only differs in the
-startup entry point, window/layout configuration, and the CSS theme.
+The app links no MPC cryptography. The collaborative proof runs in the
+pre-built `settle2p_session` subprocess (the `cozk2p/` workspace pins an
+older nightly and cannot be linked directly); the app drives it over
+piped stdio. Groth16 proving (rapidsnark) is linked via `lib/zk`.
 
 ## 2. Main Components
 
 ```
-┌───────────────────────────────────── app/ ─────────────────────────────────────┐
-│                                                                                │
-│  ┌───────────────────┐                         ┌───────────────────┐           │
-│  │ app/desktop       │                         │ app/mobile        │           │
-│  │  src/main.rs      │                         │  src/main.rs      │           │
-│  │  Dioxus::desktop  │                         │  Dioxus::launch   │           │
-│  │  fixed layout     │                         │  Tab bar (OB/Trade)           │
-│  │  style::CSS       │                         │  style_mobile::CSS_MOBILE     │
-│  └─────────┬─────────┘                         └─────────┬─────────┘           │
-│            │                                             │                     │
-│            └──────────────┬──────────────────────────────┘                     │
-│                           ▼                                                    │
-│                 ┌──────────────────────────┐                                   │
-│                 │ app/ui (shared RSX)      │                                   │
-│                 │   components/            │                                   │
-│                 │     Header               │                                   │
-│                 │     OrderBook            │  ← reads `orders`, `own_order_ids`│
-│                 │     TradeForm            │  ← writes new orders              │
-│                 │     Toast                │                                   │
-│                 │   constants.rs  TOKENS   │                                   │
-│                 │   style.rs / style_mobile│                                   │
-│                 └─────────────┬────────────┘                                   │
-│                               │ uses                                           │
-│                               ▼                                                │
-│  ┌────────────────────────────────────────────────────────────────────────┐    │
-│  │ lib/chain  (invisibook-lib)                                            │    │
-│  │   types.rs        Order, TradeType, OrderStatus, CipherText, ...       │    │
-│  │   orderbook.rs    encrypt_amount, compute_order_id, sort_orders, …     │    │
-│  │   chain.rs        ChainClient (send_order / settle_order / query)      │    │
-│  │   command.rs      higher-level flows                                   │    │
-│  └──────────────────────────────┬─────────────────────────────────────────┘    │
-│                                 │ yu-sdk (HTTP/WS)                             │
-└─────────────────────────────────┼──────────────────────────────────────────────┘
-                                  ▼
-                         chain/ (yu node @ :7999)
+┌───────────────────────────────── app/ ─────────────────────────────────┐
+│  app/desktop (entry, window, settle coroutines)   app/mobile (entry,   │
+│                                                    tabs; no settle)    │
+│                    │                                    │              │
+│                    └───────────────┬────────────────────┘              │
+│                                    ▼                                   │
+│  app/ui (shared)                                                       │
+│    components/: Header  OrderBook  TradeForm  KeyImport  Toast         │
+│    settle.rs:   run_settle — the two-phase settlement driver           │
+│    tests/settle_e2e.rs: full-path e2e + per-step benchmark             │
+│                                    │                                   │
+│                                    ▼                                   │
+│  lib/chain (invisibook-lib)                    lib/zk                  │
+│    chain.rs      ChainClient (yu-sdk)            circom templates      │
+│    note_store.rs NoteStore   (notes.json)        snarkjs/rapidsnark    │
+│    order_store.rs OrderStore (orders.json)       drivers               │
+│    note_prover.rs witness builders + provers                           │
+│    note_tree.rs  Merkle tree (paths, anchor)                           │
+│                                    │                                   │
+│           ┌────────────────────────┼──────────────────────────┐        │
+│           ▼                        ▼                          ▼        │
+│    chain (yu node :7999)   settle2p_session (subprocess)   rapidsnark  │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.1 Platform crates
+### 2.1 Wallet state (the money files)
 
-| Crate | Purpose |
-|---|---|
-| [app/desktop/](../app/desktop/) | Desktop entry point. `main()` builds a Dioxus desktop `Config` with a titled window (1060×720, min 860×520) and disabled context menu, then launches the shared `App` component. Uses the desktop stylesheet. |
-| [app/mobile/](../app/mobile/) | Mobile entry point. Adds a viewport meta tag, a `Tab` enum (`OrderBook` / `Trade`) and a bottom tab bar because the screen is too narrow to host both panes side-by-side. Uses the mobile stylesheet. |
+| File | Store | Content | Rule |
+|---|---|---|---|
+| `notes.json` | [`NoteStore`](../lib/chain/src/note_store.rs) | every owned note's full opening (cm, token, amount, r, sk, leaf index, status) | fsync + atomic rename; write BEFORE any note-creating tx is submitted |
+| `orders.json` | [`OrderStore`](../lib/chain/src/order_store.rs) | every open order's opening (q, r_q, locked_amount, r_locked, lock token) | write BEFORE `SendOrder`; a relist replaces the opening with the residual one |
 
-Both `App` components maintain the same set of Dioxus signals:
+Note lifecycle: `UNSPENT → PENDING_SPEND → SPENT` and
+`PENDING_MINT → UNSPENT` (the poller resolves pending states against the
+chain via `GetNoteByCm` / `GetNullifiers`).
 
-- `orders: Signal<Vec<Order>>` — the current order book snapshot.
-- `own_order_ids: Signal<HashMap<OrderID, String>>` — orders originated on
-  this device, keyed by order ID, with the plaintext amount as value (the
-  *only* place plaintext lives; it is never sent over the network).
-- `selected`, `expanded` — UI state for the order list.
-- `message: Signal<Option<(String, bool)>>` — toast queue, `bool` = is-error.
+### 2.2 Order placement (`TradeForm` → `prepare_order`)
 
-### 2.2 `app/ui` — shared component library
+[trade_form.rs](../app/ui/src/components/trade_form.rs). On submit:
 
-All RSX components are declared here and re-exported via
-[app/ui/src/components/mod.rs](../app/ui/src/components/mod.rs):
+1. Compute the collateral: `q` token1 for a sell, `q·price` token2 for
+   a buy, plus the plaintext fee.
+2. Select at most two unspent notes covering it
+   (`NoteStore::select_unspent` — the circuits have a fixed 2-slot
+   shape; a missing slot becomes an Orchard-style dummy).
+3. Sync the pool tree (`ChainClient::fetch_note_tree`) for the anchor
+   and Merkle paths; the client re-checks the root against the chain
+   head.
+4. `prepare_order` (pure CPU, also used verbatim by the e2e test):
+   derive the nullifiers → `order_id = SHA-256(nf_0 ‖ nf_1)` → draw
+   fresh blindings and a fresh change-note key → compute the `bind` →
+   prove `send_order` with rapidsnark.
+5. Persist FIRST: inputs → `PENDING_SPEND` (with their nullifiers), the
+   change note → `PENDING_MINT`, the order opening into `orders.json`.
+6. Submit `SendOrder`. On rejection, roll the wallet records back.
 
-- **`Header`** — branding plus the active token pair badge. Reads
-  `token1 / token2` from the first order.
-- **`OrderBook`** — scrollable list. For each row it looks up the order's
-  `id` in `own_order_ids`:
-  - if present → render the plaintext amount
-  - otherwise → render the ciphertext hex, truncated
-- **`TradeForm`** — Buy/Sell tabs, token pair selectors (sourced from
-  `constants::TOKENS`), price + amount inputs, computed total, submit
-  button. On submit the form:
-  1. validates positive-integer price and amount,
-  2. calls `orderbook::encrypt_amount(amount_str)` to produce the
-     ciphertext,
-  3. generates a local `input_cash_ids` list and derives
-     `id = compute_order_id(input_cash_ids)`,
-  4. pushes a new `Order` into the `orders` signal (plus the plaintext into
-     `own_order_ids`),
-  5. in release builds, sends the order through the `ChainClient`.
-- **`Toast`** — observes `message` signal and renders a transient banner.
+Android: on-device proving is not wired; the submit handler reports it
+as unsupported.
 
-Two stylesheets, [style.rs](../app/ui/src/style.rs) and
-[style_mobile.rs](../app/ui/src/style_mobile.rs), embed CSS as `pub const
-CSS: &str`. The platform crate injects the right one with `style { {CSS} }`.
+### 2.3 Settlement (`settle.rs` — the two-phase driver)
 
-### 2.3 `invisibook-lib` (see `lib/chain/src/`)
-
-The app never talks to the chain directly; it goes through the shared lib:
-
-- [types.rs](../lib/chain/src/types.rs) — `Order`, `TradeType`,
-  `OrderStatus`, `CipherText`, `TradePair`, `CashOutput`, …
-- [orderbook.rs](../lib/chain/src/orderbook.rs) — off-chain helpers:
-  `compute_order_id` (sha256 of inputs, mirrors
-  [chain/core/order.go](../chain/core/order.go)), `encrypt_amount`
-  (Poseidon on desktop, SHA-256 on Android), `sort_orders`,
-  `sample_orders` (used as initial UI state).
-- [chain.rs](../lib/chain/src/chain.rs) — `ChainClient` wrapping
-  `yu-sdk::YuClient`. Thin typed wrappers for `SendOrder`, `SettleOrder`,
-  `QueryOrders`.
-- [command.rs](../lib/chain/src/command.rs) — higher-level flows that
-  combine multiple RPCs.
-
-## 3. Business-Scenario Walkthroughs
-
-### 3.1 Placing a buy order (desktop)
-
-User picks `Buy`, pair `ETH / USDT`, price `3500`, amount `10`.
+[settle.rs](../app/ui/src/settle.rs) drives one matched pair end to end.
+The desktop settle coroutine is strictly serial and feeds it one order
+id at a time.
 
 ```
- TradeForm              app state                lib/chain                 chain
- ─────────              ─────────                ─────────                 ─────
- on_submit
-  │
-  ├─ validate price=3500, amount=10
-  ├─ ciphertext = encrypt_amount("10")
-  │     └─ Poseidon(10, 256-bit rand)  (Sha256 fallback on Android)
-  ├─ cash_ids = [local cash ids selected by user]
-  ├─ id = compute_order_id(cash_ids)
-  ├─ orders.push(Order{id, Buy, ETH/USDT,
-  │            price=3500, amount=CT, status=Pending, …})
-  ├─ own_order_ids.insert(id → "10")
-  └─ ChainClient.send_order(&order)
-                              │
-                              └─ yu-sdk write_chain("orderbook","SendOrder",…)
-                                                                                ▶ orderbook.SendOrder
-                                                                                   (match / lock / insert)
-  message ← "Order submitted"
+run_settle
+  ├─ role assignment: maker = trader-a (lower block height, tie → id)
+  ├─ equal-price check (cross-price pairs are rejected — paper D6)
+  ├─ SessionInput: chain publics (cm_q ×2, [LockedCommitment, zero-pad] ×2,
+  │    price, side) + MY OrderOpening (q, r_q, locked, r_locked)
+  ├─ rendezvous: RegisterSettleAddr / QuerySettleAddr (QUIC addrs, dev)
+  └─ settle2p_session subprocess over stdio:
+       "need_sig"       → sign the canonical compare message
+       "compare_ready"  → cross-check the proven statement + both sigs,
+                          submit SubmitCompareCoZk2p, block until BOTH
+                          orders are Settling, reply compare_confirmed
+                          ── the F1 gate: no reveal before this anchor
+       (subprocess: smaller side reveals; payout-note keys exchanged;
+        witness.json WAL written before secrets leave the process)
+       "result_ready"   → read result.json, prove MY settle circuit
+                          (settle_small if fully filled, else
+                          settle_large), sign the leg, hand it back
+       "pair_ready"     → both legs, exchanged in-fabric; either party
+                          submits the ATOMIC SettlePair (F2)
+  ├─ confirm on chain: my order Done, or relisted under the residual cm
+  └─ persist: recv note → notes.json (PENDING_MINT); remainder →
+       orders.json (residual opening) or opening removed when Done
 ```
 
-Then in `OrderBook`, the row for `id` shows `10 ETH` in plaintext to
-*this* user. Every other node rendering the same order sees
-`CT(poseidon(10, r))` — a 64-hex blob.
+Error classes: `CrossPrice` / `SelfMatch` / `Unrecoverable` are
+permanent (never retried); `Transient` / `OnChainRejected` retry after a
+backoff.
 
-### 3.2 Seeing someone else's order
+**Crash recovery** (`recover_all_sessions`): on startup the app scans
+session dirs; a `witness.json` whose payout note is in the pool tree is
+materialized into the wallet stores (the note key is re-derived from the
+wallet seed + order id), a session that never landed is deleted, and a
+mid-flight one is left alone.
 
-A second device fetches orders via `ChainClient.query_orders(...)`. The
-returned list is merged into the `orders` signal. Because this device did
-not originate those orders, `own_order_ids` lookups miss and the
-`OrderBook` component renders the ciphertext — so amount privacy is
-preserved even though everything else (pair, price, status, owner address)
-is public.
+### 2.4 Desktop main loop
 
-### 3.3 Mobile tab switch
+[main.rs](../app/desktop/src/main.rs): a 3-second poller (order list +
+auto-settle dispatch + pending-note resolution), a WebSocket
+subscription for order events, a startup coroutine that warms the
+subprocess proving keys (~1 min cold) and runs crash recovery, and the
+serial settle coroutine. Mobile renders the same components but has no
+settlement flow.
 
-The mobile crate keeps the same `orders` / `own_order_ids` signals but
-renders only one of `OrderBook` or `TradeForm` at a time, selected via the
-bottom tab bar. Because both components share the same signal handles,
-placing an order in the Trade tab and then switching to the Order Book tab
-shows the new order instantly without any refresh.
+### 2.5 Key import
 
-### 3.4 Matching & settlement visibility
+[key_import.rs](../app/ui/src/components/key_import.rs): BIP-39
+mnemonic → SLIP-0010 ed25519 seed (m/44'/60'/0'/0'/0'), persisted to
+`data_dir/mnemonic`; optional `notes.json` import (upsert by
+commitment). Dev wallets for Alice/Bob come from
+`chain/cfg/tests/{alice,bob}_notes.json`
+(`scripts/dev-dual.sh` seeds them).
 
-The app never runs matching logic — that is authoritative on-chain
-(`orderbook.matchOrder`). The app learns about matches by re-running
-`query_orders(status=Matched)` and updating the signal; a row whose status
-flips to `Matched` / `Done` gets restyled. Settlement is initiated by an
-off-chain relayer holding the zk-proof of `sum(inputs)==sum(outputs)`, not
-by the app.
+## 3. Walkthrough: the e2e scenario
 
-## 4. Reference: Definitions & Tools
+Alice sells 2 ETH @ 3, Bob buys 1 ETH @ 3
+([settle_e2e.rs](../app/ui/tests/settle_e2e.rs) drives exactly this
+against a live chain with two real subprocess provers and prints a
+per-step wall-clock table; numbers in
+[cozk_experiments.md](cozk_experiments.md)).
+
+1. Both wallets prove `send_order` (~220 ms each) and submit; the chain
+   matches the pair.
+2. Both apps auto-settle: QUIC rendezvous, MPC compare (π_cmp ~4 s
+   wall-clock), `compare_ready` → either app lands
+   `SubmitCompareCoZk2p`; both wait for `Settling` (~2 blocks) and
+   confirm.
+3. The subprocess reveals Bob's (smaller) opening to Alice only now;
+   payout-note keys are exchanged; each app proves its own settle
+   circuit (~0.1 s) and the legs cross in-fabric.
+4. Either app submits `SettlePair`: Bob's order → `Done`, Alice's order
+   relists in place with residual commitments, exactly two payout notes
+   mint. Each wallet persists its incoming note and Alice's wallet
+   replaces her order opening with the residual one.
+
+## 4. Reference
 
 ### 4.1 Source map
 
 | Path | Purpose |
 |---|---|
-| [app/desktop/src/main.rs](../app/desktop/src/main.rs) | Desktop launcher + `App` root |
-| [app/desktop/Dioxus.toml](../app/desktop/Dioxus.toml) | Desktop Dioxus config |
-| [app/mobile/src/main.rs](../app/mobile/src/main.rs) | Mobile launcher + tab navigation |
-| [app/mobile/Dioxus.toml](../app/mobile/Dioxus.toml) | Mobile Dioxus config |
-| [app/ui/src/lib.rs](../app/ui/src/lib.rs) | re-exports `components`, `constants`, `style`, `style_mobile` |
-| [app/ui/src/components/header.rs](../app/ui/src/components/header.rs) | `Header` component |
-| [app/ui/src/components/orderbook.rs](../app/ui/src/components/orderbook.rs) | `OrderBook` component |
-| [app/ui/src/components/trade_form.rs](../app/ui/src/components/trade_form.rs) | `TradeForm` component |
-| [app/ui/src/components/toast.rs](../app/ui/src/components/toast.rs) | `Toast` component |
-| [app/ui/src/constants.rs](../app/ui/src/constants.rs) | `TOKENS` list |
-| [app/ui/src/style.rs](../app/ui/src/style.rs) | Desktop CSS |
-| [app/ui/src/style_mobile.rs](../app/ui/src/style_mobile.rs) | Mobile CSS |
+| [app/desktop/src/main.rs](../app/desktop/src/main.rs) | desktop entry, pollers, settle coroutine, recovery |
+| [app/mobile/src/main.rs](../app/mobile/src/main.rs) | mobile entry (no settlement) |
+| [app/ui/src/settle.rs](../app/ui/src/settle.rs) | two-phase settlement driver + crash recovery |
+| [app/ui/src/components/trade_form.rs](../app/ui/src/components/trade_form.rs) | note-based order placement (`prepare_order`) |
+| [app/ui/src/components/key_import.rs](../app/ui/src/components/key_import.rs) | mnemonic + notes import |
+| [app/ui/tests/settle_e2e.rs](../app/ui/tests/settle_e2e.rs) | full-path e2e + benchmark (run with `--ignored`) |
+| [lib/chain/src/note_store.rs](../lib/chain/src/note_store.rs) | note ledger (`notes.json`) |
+| [lib/chain/src/order_store.rs](../lib/chain/src/order_store.rs) | order-opening ledger (`orders.json`) |
+| [lib/chain/src/note_prover.rs](../lib/chain/src/note_prover.rs) | witness builders + rapidsnark drivers |
+| [lib/chain/src/chain.rs](../lib/chain/src/chain.rs) | `ChainClient` + signing messages (Go lockstep) |
+| [cozk2p/src/bin/settle2p_session.rs](../cozk2p/src/bin/settle2p_session.rs) | the settlement subprocess (stdio protocol) |
 
-### 4.2 Shared state handles
+### 4.2 Subprocess stdio protocol
 
-```rust
-let orders:        Signal<Vec<Order>>                  = use_signal(…);
-let own_order_ids: Signal<HashMap<OrderID, String>>    = use_signal(…);
-let selected:      Signal<Option<usize>>               = use_signal(|| None);
-let expanded:      Signal<Option<usize>>               = use_signal(|| None);
-let message:       Signal<Option<(String, bool)>>      = use_signal(|| None);
-```
-
-The `(String, bool)` shape for `message` is `(text, is_error)`.
-
-### 4.3 Privacy helpers
-
-| Function | Where | Meaning |
+| Direction | Line | Meaning |
 |---|---|---|
-| `encrypt_amount(&str) -> CipherText` | [lib/chain/src/orderbook.rs](../lib/chain/src/orderbook.rs) | Poseidon-BN254 hash of `(amount, random)` on desktop; SHA-256 fallback on Android. Never reversible on chain. |
-| `compute_order_id(&[String]) -> OrderID` | same | SHA-256 of concatenated input cash IDs. Must match `ComputeOrderID` in [chain/core/order.go](../chain/core/order.go). |
-| `sort_orders(&mut [Order])` | same | Descending price, `None` prices last. |
-| `short_id(&str) -> &str` | same | Truncate to 7 chars for display. |
-| `sample_orders()` | same | Seed data for the initial UI state. |
+| out | `{"event":"phase",...}` | progress |
+| out | `{"event":"need_sig","cmp":b}` | request the compare signature |
+| in | `{"sig":"<128-hex>"}` | the signature |
+| out | `{"event":"compare_ready","ready":{...}}` | π_cmp + both sigs; host must land the compare on chain |
+| in | `{"compare_confirmed":true\|false}` | F1 gate; `false` aborts before any reveal |
+| out | `{"event":"result_ready"}` | result.json is on disk; host proves its settle leg |
+| in | `{"settle_leg":{...}}` | the signed leg |
+| out | `{"event":"pair_ready","a":{...},"b":{...}}` | both legs (exchanged over the session fabric) |
+| out | `{"event":"done"}` | end |
 
-### 4.4 External tools & dependencies
+### 4.3 Configuration
 
-- **[Dioxus 0.6](https://dioxuslabs.com/)** — the UI framework. Desktop
-  target uses the Dioxus native desktop renderer; mobile uses
-  `dx serve --platform ios | android` (see project `README`).
-- **[Dioxus CLI (`dx`)](https://dioxuslabs.com/learn/0.6/CLI/installation)** —
-  required only for mobile builds.
-- **[yu-sdk (Rust)](https://github.com/yu-org/yu-sdk)** — RPC client to the
-  yu chain; wrapped by `ChainClient`.
-- **[light-poseidon](https://crates.io/crates/light-poseidon) / ark-bn254** —
-  Poseidon hash used by `encrypt_amount` on non-Android targets.
-- **[sha2](https://crates.io/crates/sha2)** — order-ID hashing and the
-  Android fallback for `encrypt_amount`.
-- **iOS build** — macOS + Xcode + `dx serve --platform ios`.
-- **Android build** — Android SDK + NDK + `dx serve --platform android`.
-  Note: Poseidon is skipped on Android (cfg-gated), so amount ciphertext
-  there is SHA-256 of `(amount ‖ random)`.
+`ClientConfig` ([lib/chain/src/config.rs](../lib/chain/src/config.rs)):
+chain URLs + chain id, `data_dir` (mnemonic, `notes.json`,
+`orders.json`, session dirs), and the `settle2p_session` binary path
+(config field, `INVISIBOOK_SETTLE2P_BIN`, or exe-adjacent lookup).
+Dual-instance dev testing: `scripts/dev-dual.sh` (isolated data dirs for
+Alice and Bob).

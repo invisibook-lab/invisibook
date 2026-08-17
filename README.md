@@ -31,7 +31,7 @@ The chain node listens on:
 
 Configuration files are in `chain/cfg/`:
 - `chain.toml` – yu framework config (ports, consensus, chain_id)
-- `core.toml` – tripod config (DB paths, genesis accounts)
+- `core.toml` – tripod config (DB paths, verifying keys, genesis pool notes)
 
 ### Docker
 
@@ -94,15 +94,18 @@ Use the trade form on the right panel to place orders:
 
 ## Collaborative ZK Settlement (co-zk)
 
-Matched orders settle with a **single proof generated jointly by both
-traders**, so neither ever learns the other's hidden amount. The chain
-verifies the proof, removes the fully-filled order from the book, and updates
-the surviving order's hidden amount commitment in place (keeping its time
-priority). The active path is the **2-party** variant ([cozk2p](cozk2p/):
-malicious-secure SPDZ + collaborative TurboPlonk, no helper node). See
-[docs/cozk2p_design.md](docs/cozk2p_design.md) for the protocol, circuit, and
-threat model, and [docs/cozk_experiments.md](docs/cozk_experiments.md) for
-measurements.
+Matched orders settle in two phases. First the two traders **jointly
+prove the comparison of their hidden quantities** ([cozk2p](cozk2p/):
+malicious-secure SPDZ + collaborative TurboPlonk, no helper node) and
+anchor it on chain — nothing is revealed before that anchor lands. Then
+each side proves its own settlement circuit, the signed legs are
+exchanged, and one **atomic `SettlePair`** writing applies both sides
+together: the fully filled order closes, the surviving order is relisted
+in place with fresh residual commitments (keeping its time priority),
+and both payout notes mint in one step. See
+[docs/cozk2p_design.md](docs/cozk2p_design.md) for the protocol and
+threat model, and [docs/cozk_experiments.md](docs/cozk_experiments.md)
+for measurements.
 
 ```bash
 # unit + satisfiability + 2-party e2e (mock network)
@@ -114,6 +117,14 @@ cargo run --release --bin bench_settle2p -- --runs 5
 # real collaborative proof settled on a running chain
 make test-e2e-cozk2p
 ```
+
+## Documentation
+
+The documentation index is [docs/README.md](docs/README.md). It lists
+every design document with its status, and
+[docs/paper_deviations.md](docs/paper_deviations.md) records each place
+the implementation differs from the protocol paper
+([papers/invisibook.pdf](papers/invisibook.pdf)).
 
 ## License
 
