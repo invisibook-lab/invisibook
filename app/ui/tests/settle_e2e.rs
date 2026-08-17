@@ -43,7 +43,7 @@ use invisibook_lib::{
 };
 use invisibook_ui::{
     components::trade_form::prepare_order,
-    settle::{SettleDeps, SettleOutcome, run_settle},
+    settle::{SettleDeps, SettleMode, SettleOutcome, run_settle},
 };
 
 // ─────────────────────────── Fixed parameters ───────────────────────────
@@ -110,6 +110,7 @@ fn render_config(alice_cm: &str, bob_cm: &str) -> String {
 [orderbook]
 db_path = "data/orders.db"
 settle_cozk2p_vk_path = "vk/settle_cozk2p_vk.bin"
+settle_pair_cozk2p_vk_path = "vk/settle_pair_cozk2p_vk.bin"
 # Explicit dev opt-out: the Groth16 settle VKs are not configured here.
 require_proofs = false
 
@@ -247,8 +248,24 @@ async fn leaf_count(client: &ChainClient) -> u64 {
 /// atomic SettlePair. Both traders' `run_settle` run concurrently; the
 /// cross-quantity match drives the relist path (Bob Done, Alice relisted).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs the chain + settle2p_session prover and ~15 GB RAM; run with --ignored"]
+#[ignore = "needs the chain + settle2p_session prover and ~15 GB RAM; run with --ignored --test-threads=1"]
 async fn settle_e2e_relist() {
+    settle_e2e_scenario(SettleMode::Split).await;
+}
+
+/// The SAME scenario over the MERGED path: one collaborative proof covers
+/// compare + both settle legs (`SettlePairCoZk2p`), no reveal before
+/// settlement finality. Identical assertions — the A/B benchmark twin of
+/// `settle_e2e_relist`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the chain + settle2p_session prover and ~15 GB RAM; run with --ignored --test-threads=1"]
+async fn settle_e2e_relist_merged() {
+    settle_e2e_scenario(SettleMode::Merged).await;
+}
+
+/// The shared scenario body; both tests bind the fixed chain ports, so run
+/// them one at a time (--test-threads=1).
+async fn settle_e2e_scenario(mode: SettleMode) {
     let root = repo_root();
     let chain_dir = root.join("chain");
     let chain_bin = chain_dir.join("invisibook");
@@ -343,12 +360,14 @@ async fn settle_e2e_relist() {
         keys_dir: keys_dir.clone(),
         sessions_dir: sessions_root.join("alice"),
         note_seed: seed_from_hex(ALICE_SEED_HEX),
+        mode,
     };
     let bob_deps = SettleDeps {
         bin: prover_bin.clone(),
         keys_dir: keys_dir.clone(),
         sessions_dir: sessions_root.join("bob"),
         note_seed: seed_from_hex(BOB_SEED_HEX),
+        mode,
     };
 
     // Warm the proving-key cache once so the two concurrent provers don't race
@@ -480,7 +499,7 @@ async fn settle_e2e_relist() {
     let sa = read_stats(&alice_outcome.session_dir);
     let sb = read_stats(&bob_outcome.session_dir);
 
-    eprintln!("\n════════ settle_e2e wall-clock summary (ms) ════════");
+    eprintln!("\n════════ settle_e2e wall-clock summary (ms) [{mode:?}] ════════");
     eprintln!("{:<44} {:>10} {:>10}", "step", "alice", "bob");
     let row = |name: &str, a: f64, b: f64| eprintln!("{name:<44} {a:>10.0} {b:>10.0}");
     row(
@@ -490,11 +509,11 @@ async fn settle_e2e_relist() {
     );
     row("send_order submit → Pending", alice_land_ms, bob_land_ms);
     row("match wait (both Matched)", match_ms, match_ms);
-    row("π_cmp circuit build (MPC)", sa.build_ms, sb.build_ms);
-    row("π_cmp collaborative prove", sa.prove_ms, sb.prove_ms);
-    row("π_cmp proof open", sa.open_ms, sb.open_ms);
+    row("MPC circuit build", sa.build_ms, sb.build_ms);
+    row("collaborative prove", sa.prove_ms, sb.prove_ms);
+    row("proof open", sa.open_ms, sb.open_ms);
     row(
-        "compare on-chain wait (host, NOT crypto)",
+        "on-chain anchor wait (host, NOT crypto)",
         sa.compare_onchain_wait_ms,
         sb.compare_onchain_wait_ms,
     );

@@ -40,12 +40,13 @@ use anyhow::{Context, Result, anyhow, ensure};
 use ark_mpc::{MpcFabric, PARTY0, PARTY1, offline_prep::PartyIDBeaverSource};
 use clap::{Parser, ValueEnum};
 use cozk2p::{
-    default_cache_dir, dev_keys,
+    default_cache_dir, dev_keys, dev_keys_pair,
     net::connect_retry,
     session::{
         CompareReady, NeedSig, SessionConfig, SessionInput, SettleLeg, SigIo, exchange_settle_legs,
         run_session, sanity_check_input,
     },
+    session_pair::{NeedSigPair, PairReady, PairSigIo, run_session_pair},
     stats::peak_rss_bytes,
 };
 use serde_json::json;
@@ -56,6 +57,16 @@ enum RoleArg {
     TraderA,
     /// PARTY1 — the taker; listens for the peer.
     TraderB,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
+enum ModeArg {
+    /// pi_cmp only; settle legs are single-prover Groth16 (the default,
+    /// SubmitCompareCoZk2p + SettlePair on chain).
+    Split,
+    /// ONE collaborative proof covers compare + both settle legs
+    /// (SettlePairCoZk2p on chain; no reveal before settlement finality).
+    Merged,
 }
 
 #[derive(Parser)]
@@ -83,6 +94,10 @@ struct Args {
     /// Generate/load the proving keys into the cache and exit.
     #[arg(long, default_value_t = false)]
     warm_keys: bool,
+    /// Settlement flavor: `split` (compare-only MPC) or `merged` (one
+    /// collaborative proof for compare + both settle legs).
+    #[arg(long, value_enum, default_value_t = ModeArg::Split)]
+    mode: ModeArg,
     /// Connect deadline in seconds for both dialer retries and the
     /// listener accept.
     #[arg(long, default_value_t = 60)]
@@ -175,8 +190,9 @@ async fn main() -> Result<()> {
     let keys_dir = args.keys_dir.unwrap_or_else(default_cache_dir);
 
     if args.warm_keys {
-        emit_phase("keys", "warming the proving-key cache");
+        emit_phase("keys", "warming the proving-key cache (both relations)");
         dev_keys(&keys_dir)?;
+        dev_keys_pair(&keys_dir)?;
         emit_line(json!({"event": "done"}));
         return Ok(());
     }
@@ -206,13 +222,21 @@ async fn main() -> Result<()> {
         "keys",
         "loading proving keys (first run generates them, ~1 min)",
     );
-    let (pk, vk) = dev_keys(&keys_dir)?;
+    let keys = match args.mode {
+        ModeArg::Split => dev_keys(&keys_dir)?,
+        ModeArg::Merged => dev_keys_pair(&keys_dir)?,
+    };
+    let (pk, vk) = keys;
 
     emit_phase("connect", "connecting to the counterparty");
     let total_start = Instant::now();
     let net = connect_retry(party, listen, peer, args.connect_deadline).await?;
     // Mock Beaver source: dev only (see module docs).
     let fabric = MpcFabric::new(net, PartyIDBeaverSource::new(party));
+
+    if args.mode == ModeArg::Merged {
+        return run_merged(fabric, party, &input, &out_dir, &pk, &vk, total_start).await;
+    }
 
     let mut sig_io = StdioSigIo {
         timeout: Duration::from_secs(120),
@@ -268,6 +292,118 @@ async fn main() -> Result<()> {
         // the F1 on-chain compare confirmation and the settle-leg round.
         "compare_onchain_wait_ms": result.onchain_wait_ms,
         "leg_exchange_ms": leg_exchange_ms,
+        "total_ms": total_ms,
+        "peak_rss_bytes": peak_rss_bytes(),
+        "proof_size_bytes_compressed": result.proof_hex.len() / 2,
+    });
+    fs::write(
+        out_dir.join("stats.json"),
+        serde_json::to_string_pretty(&stats)?,
+    )
+    .context("writing stats.json")?;
+
+    emit_line(json!({"event": "done"}));
+    Ok(())
+}
+
+// ────────────────────── Merged mode ──────────────────────
+
+/// Stdio ferry for the merged session: one `need_sig` request (carrying
+/// the full public statement) and one `pair_settle_ready` request that
+/// blocks until the host confirms the settlement is FINAL on chain.
+struct StdioPairSigIo {
+    timeout: Duration,
+    /// Window for the host to land the merged settlement and confirm.
+    settle_timeout: Duration,
+}
+
+impl PairSigIo for StdioPairSigIo {
+    fn request_sig(&mut self, need: &NeedSigPair) -> Result<String> {
+        emit_line(json!({
+            "event": "need_sig",
+            "cmp": need.cmp,
+            "public": need.public,
+        }));
+        let line = read_stdin_line(self.timeout, "a signature")?;
+        #[derive(serde::Deserialize)]
+        struct SigLine {
+            sig: String,
+        }
+        let parsed: SigLine =
+            serde_json::from_str(line.trim()).context("parsing signature line from host")?;
+        Ok(parsed.sig)
+    }
+
+    /// Hand the merged settle artifacts to the host and BLOCK until it
+    /// confirms the settlement landed on chain. Only then does the session
+    /// proceed to the fill reveal — nothing secret has left the process
+    /// before finality.
+    fn confirm_settle_onchain(&mut self, ready: &PairReady) -> Result<()> {
+        emit_line(json!({
+            "event": "pair_settle_ready",
+            "ready": ready,
+        }));
+        let line = read_stdin_line(self.settle_timeout, "the settle on-chain confirmation")?;
+        #[derive(serde::Deserialize)]
+        struct ConfirmLine {
+            settle_confirmed: bool,
+        }
+        let parsed: ConfirmLine = serde_json::from_str(line.trim())
+            .context("parsing settle confirmation line from host")?;
+        ensure!(
+            parsed.settle_confirmed,
+            "host reported the settlement did not land on chain — aborting before any reveal"
+        );
+        Ok(())
+    }
+}
+
+/// The merged-mode session driver: one collaborative proof, one on-chain
+/// writing, post-finality fill reveal, same stats.json key set as the
+/// split mode (`leg_exchange_ms` is structurally 0 here).
+async fn run_merged(
+    fabric: MpcFabric<ark_bn254::G1Projective>,
+    party: u64,
+    input: &SessionInput,
+    out_dir: &PathBuf,
+    pk: &mpc_plonk::proof_system::structs::ProvingKey<ark_bn254::Bn254>,
+    vk: &mpc_plonk::proof_system::structs::VerifyingKey<ark_bn254::Bn254>,
+    total_start: Instant,
+) -> Result<()> {
+    let mut sig_io = StdioPairSigIo {
+        timeout: Duration::from_secs(120),
+        settle_timeout: Duration::from_secs(300),
+    };
+    let result = run_session_pair(
+        fabric,
+        party,
+        input,
+        &mut sig_io,
+        SessionConfig { pk, vk, out_dir },
+        |name, msg| emit_phase(name, msg),
+    )
+    .await?;
+
+    fs::create_dir_all(out_dir)?;
+    fs::write(
+        out_dir.join("result.json"),
+        serde_json::to_string_pretty(&result)?,
+    )
+    .context("writing result.json")?;
+    emit_line(json!({"event": "result_ready"}));
+
+    let total_ms = total_start.elapsed().as_secs_f64() * 1e3;
+    let stats = json!({
+        "role": input.role,
+        "cmp": result.cmp,
+        "build_ms": result.timings.build_ms,
+        "prove_ms": result.timings.prove_ms,
+        "open_ms": result.timings.open_ms,
+        // In merged mode this is the wait for SETTLEMENT finality (the
+        // single on-chain anchor); kept under the same key so benchmark
+        // tables read both modes uniformly.
+        "compare_onchain_wait_ms": result.onchain_wait_ms,
+        "leg_exchange_ms": 0.0,
         "total_ms": total_ms,
         "peak_rss_bytes": peak_rss_bytes(),
         "proof_size_bytes_compressed": result.proof_hex.len() / 2,

@@ -24,6 +24,9 @@ type Config struct {
 // `SettleCoZk2pVKPath` is the ark-compressed PLONK verifying key of the
 // 2-party collaborative settlement (SubmitCompareCoZk2p writing; verification
 // requires a chain binary built with `-tags cozk2p`).
+// `SettlePairCoZk2pVKPath` is the ark-compressed PLONK verifying key of the
+// MERGED settlement statement (SettlePairCoZk2p writing; same `-tags cozk2p`
+// requirement).
 // `RequireProofs` defaults to TRUE: an empty/missing settlement VK path is
 // a startup error instead of silently skipping verification (see LoadVK's
 // fail-open contract). Dev/test configs that intentionally run without
@@ -31,16 +34,17 @@ type Config struct {
 // a config that simply forgets its VK paths refuses to boot.
 // `DBLogLevel` controls GORM SQL logging: "silent", "error", "warn", "info".
 type OrderBookConfig struct {
-	DBPath             string `toml:"db_path"`
-	SettleCoZkVKPath   string `toml:"settle_cozk_vk_path"`
-	SettleCoZk2pVKPath string `toml:"settle_cozk2p_vk_path"`
-	SettleSmallVKPath  string `toml:"settle_small_vk_path"`
-	SettleLargeVKPath  string `toml:"settle_large_vk_path"`
-	SendOrderVKPath    string `toml:"send_order_vk_path"`
-	ClaimFeesVKPath    string `toml:"claim_fees_vk_path"`
-	RequireProofs      bool   `toml:"require_proofs"`
-	DBLogLevel         string `toml:"db_log_level"`
-	ChainID            uint64 `toml:"-"`
+	DBPath                 string `toml:"db_path"`
+	SettleCoZkVKPath       string `toml:"settle_cozk_vk_path"`
+	SettleCoZk2pVKPath     string `toml:"settle_cozk2p_vk_path"`
+	SettlePairCoZk2pVKPath string `toml:"settle_pair_cozk2p_vk_path"`
+	SettleSmallVKPath      string `toml:"settle_small_vk_path"`
+	SettleLargeVKPath      string `toml:"settle_large_vk_path"`
+	SendOrderVKPath        string `toml:"send_order_vk_path"`
+	ClaimFeesVKPath        string `toml:"claim_fees_vk_path"`
+	RequireProofs          bool   `toml:"require_proofs"`
+	DBLogLevel             string `toml:"db_log_level"`
+	ChainID                uint64 `toml:"-"`
 }
 
 // AccountConfig holds configuration for the Account tripod.

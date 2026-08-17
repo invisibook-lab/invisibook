@@ -161,7 +161,7 @@ fn build_mpc_circuit_sat(
 /// `r_i = 0` the product is `0`; otherwise it is `0` with only negligible
 /// probability (Schwartz–Zippel), and the mask hides `S`'s actual value so a
 /// rejection leaks nothing beyond "invalid".
-async fn check_witness_valid(
+pub(crate) async fn check_witness_valid(
     fabric: &MpcFabric<G1Projective>,
     circuit: &MpcPlonkCircuit<G1Projective>,
     sat: &SatisfiabilityWitness,

@@ -54,7 +54,7 @@ pub struct SidePrivate {
 }
 
 /// Serde adapter: Fr as the chain's 64-char big-endian hex string.
-mod fr_hex {
+pub(crate) mod fr_hex {
     use ark_bn254::Fr;
     use ark_ff::PrimeField;
     use serde::{Deserialize, Deserializer, Serializer};
@@ -72,7 +72,7 @@ mod fr_hex {
 
 /// Deserialize `cmp` and reject anything outside {-1, 0, 1} at the trust
 /// boundary (the JSON may come from the counterparty).
-fn de_cmp<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i8, D::Error> {
+pub(crate) fn de_cmp<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i8, D::Error> {
     let v = i8::deserialize(d)?;
     if matches!(v, -1 | 0 | 1) {
         Ok(v)
@@ -131,7 +131,7 @@ impl SettlePublic {
 }
 
 /// Fr of a 32-byte blinding, wallet convention (big-endian reduction).
-fn rand_fr(r: &[u8; 32]) -> Fr {
+pub(crate) fn rand_fr(r: &[u8; 32]) -> Fr {
     use ark_ff::PrimeField;
     Fr::from_be_bytes_mod_order(r)
 }
