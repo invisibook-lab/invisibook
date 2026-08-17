@@ -11,7 +11,7 @@ use invisibook_lib::{
 
 #[cfg(not(target_os = "android"))]
 use invisibook_lib::{
-    chain::{SendOrderParams, TradePairJson},
+    chain::{SendOrderParams, SubmitError, TradePairJson},
     note::{asset_id, fr_from_be_bytes, note_fr_to_hex, npk_from_sk, send_order_bind},
     note_prover::{SendOrderWitness, SpendSlot, prove_send_order, required_collateral},
     note_store::NoteRecord,
@@ -182,6 +182,7 @@ pub fn prepare_order(
         leaf_index: 0,
         status: NOTE_PENDING_MINT,
         nf: String::new(),
+        pending_order: opening.order_id.clone(),
     });
     Ok(PreparedOrder {
         params,
@@ -189,6 +190,76 @@ pub fn prepare_order(
         spent,
         change,
     })
+}
+
+/// Persist the wallet records of a prepared order BEFORE submission
+/// (persist-before-publish): inputs become PENDING_SPEND carrying their
+/// nullifiers and the pending order id, the change note joins as
+/// PENDING_MINT, and the order opening is saved. A crash after this point
+/// loses nothing the chain will later assume the wallet knows.
+#[cfg(not(target_os = "android"))]
+pub fn persist_prepared(
+    notes: &mut NoteStore,
+    orders: &mut OrderStore,
+    prepared: &PreparedOrder,
+) -> Result<(), String> {
+    for (cm, nf) in &prepared.spent {
+        if let Some(rec) = notes.find_mut(cm) {
+            rec.status = NOTE_PENDING_SPEND;
+            rec.nf = nf.clone();
+            rec.pending_order = prepared.opening.order_id.clone();
+        }
+    }
+    if let Some(change) = &prepared.change {
+        notes.upsert(change.clone());
+    }
+    notes.save().map_err(|e| format!("saving notes: {e}"))?;
+    orders.upsert(prepared.opening.clone());
+    orders
+        .save()
+        .map_err(|e| format!("saving order opening: {e}"))
+}
+
+/// Roll the wallet records of a submission back: inputs return to UNSPENT,
+/// the change note and the order opening are dropped. ONLY legal when the
+/// chain PROVABLY did not accept the transaction (an explicit rejection or
+/// a completed reconciliation) — see `apply_submit_failure`.
+#[cfg(not(target_os = "android"))]
+pub fn rollback_prepared(notes: &mut NoteStore, orders: &mut OrderStore, prepared: &PreparedOrder) {
+    for (cm, _) in &prepared.spent {
+        if let Some(rec) = notes.find_mut(cm) {
+            rec.status = NOTE_UNSPENT;
+            rec.nf = String::new();
+            rec.pending_order = String::new();
+        }
+    }
+    if let Some(change) = &prepared.change {
+        let cm = change.cm.clone();
+        notes.retain(|r| r.cm != cm);
+    }
+    let _ = notes.save();
+    orders.remove(&prepared.opening.order_id);
+    let _ = orders.save();
+}
+
+/// React to a submission failure per its classification. Returns true when
+/// the records were rolled back (definite rejection); an UNCERTAIN outcome
+/// keeps every record — the transaction may still land, and the poller's
+/// reconciliation decides later.
+#[cfg(not(target_os = "android"))]
+pub fn apply_submit_failure(
+    notes: &mut NoteStore,
+    orders: &mut OrderStore,
+    prepared: &PreparedOrder,
+    err: &SubmitError,
+) -> bool {
+    match err {
+        SubmitError::Rejected(_) => {
+            rollback_prepared(notes, orders, prepared);
+            true
+        }
+        SubmitError::Uncertain(_) => false,
+    }
 }
 
 /// The trade panel: Buy/Sell tabs, pair selector, price/amount inputs, submit.
@@ -339,13 +410,25 @@ pub fn TradeForm(
                 )
                 .await;
                 match result {
-                    Ok(order_id) => {
+                    Ok((order_id, confirmed)) => {
                         own_order_ids.write().insert(order_id, amount_str);
                         expanded.set(None);
-                        message.set(Some((
-                            format!("✓ {} {}/{} order submitted", trade_type, t1, t2),
-                            false,
-                        )));
+                        if confirmed {
+                            message.set(Some((
+                                format!("✓ {} {}/{} order submitted", trade_type, t1, t2),
+                                false,
+                            )));
+                        } else {
+                            // Uncertain outcome: records are kept; the
+                            // poller reconciles against the chain.
+                            message.set(Some((
+                                format!(
+                                    "⚠ {} {}/{} order submission unconfirmed — reconciling",
+                                    trade_type, t1, t2
+                                ),
+                                true,
+                            )));
+                        }
                     }
                     Err(e) => {
                         message.set(Some((format!("✗ Send order failed: {e}"), true)));
@@ -508,8 +591,11 @@ pub fn TradeForm(
 }
 
 /// Full order submission: sync the pool tree, prove send_order, persist
-/// the wallet records FIRST (persist-before-publish), then submit. Rolls
-/// the wallet records back if the chain rejects the writing.
+/// the wallet records FIRST (persist-before-publish), then submit. Returns
+/// `(order_id, confirmed_submitted)`. A definite rejection rolls the
+/// records back (Err); an UNCERTAIN outcome (timeout, broken connection)
+/// KEEPS them and returns `confirmed_submitted = false` — the transaction
+/// may have landed, and the poller reconciles against the chain.
 #[cfg(not(target_os = "android"))]
 #[allow(clippy::too_many_arguments)]
 async fn submit_order(
@@ -523,7 +609,7 @@ async fn submit_order(
     price: u64,
     q: u64,
     fee: u64,
-) -> Result<OrderID, String> {
+) -> Result<(OrderID, bool), String> {
     // Fresh anchor + Merkle paths from the chain head.
     let tree = client
         .fetch_note_tree()
@@ -545,59 +631,164 @@ async fn submit_order(
         )
     })?;
 
-    // Persist BEFORE publish: inputs pending-spend (with their nullifiers),
-    // the change note pending-mint, and the order opening. A crash after
-    // this point loses nothing the chain will later assume we know.
     {
-        let mut store = note_store.write();
-        for (cm, nf) in &prepared.spent {
-            if let Some(rec) = store.find_mut(cm) {
-                rec.status = NOTE_PENDING_SPEND;
-                rec.nf = nf.clone();
-            }
-        }
-        if let Some(change) = &prepared.change {
-            store.upsert(change.clone());
-        }
-        store.save().map_err(|e| format!("saving notes: {e}"))?;
-    }
-    {
-        let mut store = order_store.write();
-        store.upsert(prepared.opening.clone());
-        store
-            .save()
-            .map_err(|e| format!("saving order opening: {e}"))?;
+        let mut notes = note_store.write();
+        let mut orders = order_store.write();
+        persist_prepared(&mut notes, &mut orders, &prepared)?;
     }
 
     let order_id = prepared.params.id.clone();
-    match client.send_order(prepared.params).await {
+    match client.send_order(prepared.params.clone()).await {
         Ok(()) => {
             eprintln!("[trade] order submitted successfully: {order_id}");
-            Ok(order_id)
+            Ok((order_id, true))
         }
-        Err(e) => {
-            // Rollback: the chain never saw the nullifiers, so the inputs
-            // are still unspent and the new records are stillborn.
-            {
-                let mut store = note_store.write();
-                for (cm, _) in &prepared.spent {
-                    if let Some(rec) = store.find_mut(cm) {
-                        rec.status = NOTE_UNSPENT;
-                        rec.nf = String::new();
-                    }
-                }
-                if let Some(change) = &prepared.change {
-                    let cm = change.cm.clone();
-                    store.retain(|r| r.cm != cm);
-                }
-                let _ = store.save();
+        Err(err) => {
+            let rolled_back = {
+                let mut notes = note_store.write();
+                let mut orders = order_store.write();
+                apply_submit_failure(&mut notes, &mut orders, &prepared, &err)
+            };
+            if rolled_back {
+                Err(err.to_string())
+            } else {
+                // Uncertain: keep everything; the reconciler completes or
+                // rolls back once the chain answers.
+                eprintln!("[trade] submission outcome uncertain for {order_id}: {err}");
+                Ok((order_id, false))
             }
-            {
-                let mut store = order_store.write();
-                store.remove(&order_id);
-                let _ = store.save();
-            }
-            Err(e.to_string())
         }
+    }
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+mod submit_tests {
+    use super::*;
+    use invisibook_lib::note_store::NOTE_PENDING_SPEND;
+
+    fn tmp_stores(tag: &str) -> (NoteStore, OrderStore) {
+        let dir =
+            std::env::temp_dir().join(format!("trade_form_test_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        (
+            NoteStore::load(dir.join("notes.json")),
+            OrderStore::load(dir.join("orders.json")),
+        )
+    }
+
+    fn sample_prepared(order_id: &str, input_cm: &str) -> PreparedOrder {
+        PreparedOrder {
+            params: SendOrderParams {
+                id: order_id.into(),
+                trade_type: 0,
+                subject: TradePairJson {
+                    token1: "ETH".into(),
+                    token2: "USDT".into(),
+                },
+                price: Some(3),
+                amount: "aa".repeat(32),
+                pubkey: String::new(),
+                signature: String::new(),
+                anchor: "bb".repeat(32),
+                input_nullifiers: vec!["cc".repeat(32), "dd".repeat(32)],
+                locked_commitment: "ee".repeat(32),
+                fee: 0,
+                change_commitment: "ff".repeat(32),
+                zk_proof: "{}".into(),
+            },
+            opening: OrderOpening {
+                order_id: order_id.into(),
+                q: 2,
+                r_q: "11".repeat(32),
+                locked_amount: 6,
+                r_locked: "22".repeat(32),
+                lock_token: "USDT".into(),
+            },
+            spent: vec![(input_cm.to_string(), "cc".repeat(32))],
+            change: Some(NoteRecord {
+                cm: "ff".repeat(32),
+                token: "USDT".into(),
+                amount: 4,
+                r: "33".repeat(32),
+                key_index: 0,
+                sk: "44".repeat(32),
+                leaf_index: 0,
+                status: NOTE_PENDING_MINT,
+                nf: String::new(),
+                pending_order: order_id.into(),
+            }),
+        }
+    }
+
+    fn seeded_input(cm: &str) -> NoteRecord {
+        NoteRecord {
+            cm: cm.into(),
+            token: "USDT".into(),
+            amount: 10,
+            r: "55".repeat(32),
+            key_index: 0,
+            sk: "66".repeat(32),
+            leaf_index: 0,
+            status: NOTE_UNSPENT,
+            nf: String::new(),
+            pending_order: String::new(),
+        }
+    }
+
+    /// P1-7 regression: an UNCERTAIN outcome (the server may have received
+    /// the transaction, the client timed out) must keep every wallet
+    /// record — spent markers, change note, and the order opening.
+    #[test]
+    fn uncertain_submit_error_keeps_all_records() {
+        let (mut notes, mut orders) = tmp_stores("uncertain");
+        let input_cm = "ab".repeat(32);
+        notes.upsert(seeded_input(&input_cm));
+        let prepared = sample_prepared("order-x", &input_cm);
+        persist_prepared(&mut notes, &mut orders, &prepared).unwrap();
+
+        let err = SubmitError::Uncertain("operation timed out".into());
+        let rolled = apply_submit_failure(&mut notes, &mut orders, &prepared, &err);
+
+        assert!(!rolled, "uncertain outcomes must never roll back");
+        let input = notes.find(&input_cm).unwrap();
+        assert_eq!(
+            input.status, NOTE_PENDING_SPEND,
+            "input stays pending-spend"
+        );
+        assert!(!input.nf.is_empty(), "nullifier stays recorded");
+        assert_eq!(input.pending_order, "order-x");
+        assert!(
+            notes.find(&"ff".repeat(32)).is_some(),
+            "change note must be kept"
+        );
+        assert!(
+            orders.find("order-x").is_some(),
+            "order opening must be kept"
+        );
+    }
+
+    /// A DEFINITE rejection rolls everything back: the input returns to
+    /// UNSPENT and the stillborn records disappear.
+    #[test]
+    fn rejected_submit_error_rolls_back() {
+        let (mut notes, mut orders) = tmp_stores("rejected");
+        let input_cm = "cd".repeat(32);
+        notes.upsert(seeded_input(&input_cm));
+        let prepared = sample_prepared("order-y", &input_cm);
+        persist_prepared(&mut notes, &mut orders, &prepared).unwrap();
+
+        let err = SubmitError::Rejected("writing failed (400)".into());
+        let rolled = apply_submit_failure(&mut notes, &mut orders, &prepared, &err);
+
+        assert!(rolled);
+        let input = notes.find(&input_cm).unwrap();
+        assert_eq!(input.status, NOTE_UNSPENT);
+        assert!(input.nf.is_empty());
+        assert!(input.pending_order.is_empty());
+        assert!(
+            notes.find(&"ff".repeat(32)).is_none(),
+            "change note dropped"
+        );
+        assert!(orders.find("order-y").is_none(), "order opening dropped");
     }
 }

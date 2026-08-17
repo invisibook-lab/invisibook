@@ -43,6 +43,12 @@ pub struct NoteRecord {
     /// empty until a spend is attempted.
     #[serde(default)]
     pub nf: String,
+    /// The SendOrder id this record is PENDING under: set on the inputs a
+    /// submission spends and on the change note it mints, while the
+    /// submission outcome is unknown (see `chain::SubmitError::Uncertain`).
+    /// Cleared once the order is confirmed on chain or rolled back.
+    #[serde(default)]
+    pub pending_order: String,
 }
 
 /// Persistent JSON store for owned notes. Backed by one file on disk;
@@ -115,6 +121,11 @@ impl NoteStore {
     /// Mutable lookup by commitment.
     pub fn find_mut(&mut self, cm: &str) -> Option<&mut NoteRecord> {
         self.records.iter_mut().find(|r| r.cm == cm)
+    }
+
+    /// Mutable access to every record (bulk status/marker updates).
+    pub fn records_mut(&mut self) -> &mut Vec<NoteRecord> {
+        &mut self.records
     }
 
     /// Keep only the records matching `f` (rollback of stillborn records).
@@ -190,6 +201,7 @@ mod tests {
             leaf_index: 0,
             status: NOTE_UNSPENT,
             nf: String::new(),
+            pending_order: String::new(),
         });
         store.upsert(NoteRecord {
             cm: "bb".into(),
@@ -201,6 +213,7 @@ mod tests {
             leaf_index: 2,
             status: NOTE_UNSPENT,
             nf: String::new(),
+            pending_order: String::new(),
         });
         store.save().unwrap();
 
@@ -228,6 +241,7 @@ mod tests {
                 leaf_index: 0,
                 status: NOTE_UNSPENT,
                 nf: String::new(),
+                pending_order: String::new(),
             });
         }
         let exact = store.select_unspent("ETH", 5).unwrap();
@@ -261,6 +275,7 @@ mod tests {
             leaf_index: 0,
             status: NOTE_PENDING_SPEND,
             nf: "deadbeef".into(),
+            pending_order: String::new(),
         });
         assert_eq!(store.mark_spent(&["deadbeef".to_string()]), 1);
         assert_eq!(store.balance("ETH"), 0);
