@@ -57,7 +57,7 @@ run-desktop: build-settle2p
 run-chain:
 	cd chain && go run .
 
-# Launch Alice + Bob dual desktop for testing (resets cash each time).
+# Launch Alice + Bob dual desktop for testing (resets note ledgers each time).
 run-test:
 	@./scripts/dev-dual.sh clean
 	@./scripts/dev-dual.sh

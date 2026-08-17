@@ -2,7 +2,7 @@
 #
 # Usage:
 #   CLI:     invisibook --config tests/bob.toml
-#   Desktop: Import mnemonic below, then import tests/bob_cash.json
+#   Desktop: Import mnemonic below, then import tests/bob_notes.json
 #
 # Mnemonic: abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about
 # Derived path: m/44'/60'/0'/0'/0'

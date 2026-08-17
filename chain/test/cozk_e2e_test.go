@@ -2,7 +2,6 @@ package test
 
 import (
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"os/exec"
@@ -12,12 +11,6 @@ import (
 
 	"github.com/invisibook-lab/invisibook/core"
 )
-
-// cashID mirrors core.computeCashID: hex(SHA256(pubkey || token || amount)).
-func cashID(pubkey, token, amountHex string) string {
-	h := sha256.Sum256([]byte(pubkey + token + amountHex))
-	return hex.EncodeToString(h[:])
-}
 
 // hexCommit builds a deterministic 64-char hex commitment placeholder for
 // test mode (ZK verification skipped). The leading zero byte keeps it a
@@ -75,19 +68,8 @@ func runCompareSettleLifecycle(
 	time.Sleep(6 * time.Second)
 
 	// --- Match a pair: alice sells (maker, earlier block), bob buys ---
-	aliceETH := getAccount(t, alicePubkey, "ETH")
-	if len(aliceETH) != 1 {
-		t.Fatalf("expected 1 genesis ETH cash for alice, got %d", len(aliceETH))
-	}
-	aliceETHCashID := aliceETH[0].ID
-	bobUSDT := getAccount(t, bobPubkey, "USDT")
-	if len(bobUSDT) != 1 {
-		t.Fatalf("expected 1 genesis USDT cash for bob, got %d", len(bobUSDT))
-	}
-	bobUSDTCashID := bobUSDT[0].ID
-
 	sellReq := signedSendOrder(alicePriv, core.Sell, "ETH", "USDT",
-		3500, hexCommit(0xAA), alicePubkey, []string{aliceETHCashID})
+		3500, hexCommit(0xAA), alicePubkey, []string{"alice-eth-note"})
 	sellOrderID := sellReq.ID
 	if err := wrCall("orderbook", "SendOrder", sellReq); err != nil {
 		t.Fatalf("SendOrder (sell) failed: %v", err)
@@ -95,7 +77,7 @@ func runCompareSettleLifecycle(
 	waitBlock()
 
 	buyReq := signedSendOrder(bobPriv, core.Buy, "ETH", "USDT",
-		3500, hexCommit(0xBB), bobPubkey, []string{bobUSDTCashID})
+		3500, hexCommit(0xBB), bobPubkey, []string{"bob-usdt-note"})
 	buyOrderID := buyReq.ID
 	if err := wrCall("orderbook", "SendOrder", buyReq); err != nil {
 		t.Fatalf("SendOrder (buy) failed: %v", err)

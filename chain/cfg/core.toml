@@ -7,13 +7,11 @@ chain_id = 1926
 [orderbook]
 db_path      = "data/orders.db"
 db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
-# Verification keys for the OrderBook tripod's circuits. Split is for
-# SendOrder's split branch.
+# Verification keys for the OrderBook tripod's circuits.
 # settle_cozk is the joint settlement circuit whose single Groth16 proof is
-# generated collaboratively by both traders (SettleOrdersCoZk writing).
-# settle_cozk2p is the 2-party PLONK variant (SettleOrdersCoZk2p writing);
+# generated collaboratively by both traders (SubmitCompareCoZk writing).
+# settle_cozk2p is the 2-party PLONK variant (SubmitCompareCoZk2p writing);
 # its verification additionally needs a chain built with `-tags cozk2p`.
-split_vk_path         = "vk/split_vk.json"
 settle_cozk_vk_path   = "vk/settle_cozk_vk.json"
 settle_small_vk_path  = "vk/settle_small_vk.json"
 settle_large_vk_path  = "vk/settle_large_vk.json"
@@ -24,11 +22,6 @@ settle_cozk2p_vk_path = "vk/settle_cozk2p_vk.bin"
 [account]
 db_path      = "data/accounts.db"
 db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
-# Deposit / Withdraw verification keys — produced by `snarkjs zkey export verificationkey`
-# (or by re-running the corresponding `dev_setup_snarkjs` test). Paths are
-# relative to wherever you launch the chain from.
-deposit_vk_path  = "vk/deposit_vk.json"
-withdraw_vk_path = "vk/withdraw_vk.json"
 # Shielded-pool circuits (note model).
 note_deposit_vk_path   = "vk/note_deposit_vk.json"
 spend_withdraw_vk_path = "vk/spend_withdraw_vk.json"
@@ -38,34 +31,25 @@ spend_withdraw_vk_path = "vk/spend_withdraw_vk.json"
 # network must set it.
 bridge_operator_pubkey = ""
 
-# Genesis cash: explicit Cash records inserted at chain startup.
-# IDs and ciphertexts must match cfg/tests/alice_cash.json and bob_cash.json.
-# amount = poseidon(plaintext, random) — computed by genesis_encrypt() in Rust.
+# Genesis pool notes: shielded leaves seeded at chain startup (listing
+# order = leaf indices 0..n-1). Regenerate with
+# `cargo run -p invisibook-lib --example dump_dev_notes` — the fixed dev
+# secrets live in that example and in cfg/tests/{alice,bob}_notes.json.
 # alice mnemonic: "test test test test test test test test test test test junk"
-#   → pubkey (m/44'/60'/0'/0'/0'): 3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb
-# bob mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
-#   → pubkey (m/44'/60'/0'/0'/0'): 175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b
+# bob mnemonic:   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 
-[[account.genesis_cash]]
-id     = "f8c0ea0222c6acba512cc9ed613b64e3"
-pubkey = "3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb"  # alice
-token  = "ETH"
-amount = "067dcf69a72312493e98a059d4f3b68035fc4b1c096a87d557b7de6df8d4362d"  # 2000
+[[account.genesis_note]]
+cm   = "2af50a182c82755bea8bf285ba443a9fa3c5924583e9a27134a793cd0d1e6f7b"
+memo = "alice 2000 ETH"
 
-[[account.genesis_cash]]
-id     = "68ff80c3b73a39798be67087fb9f97ed"
-pubkey = "3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb"  # alice
-token  = "USDT"
-amount = "0ad0dcac78d801a291089d043d1627a04004e760c3b791637d40807486557f9a"  # 800000
+[[account.genesis_note]]
+cm   = "0adbbcc4897a5575a5473de27b48da3be7d6a9c2a85461e0f096e6afd0508770"
+memo = "alice 800000 USDT"
 
-[[account.genesis_cash]]
-id     = "4e88dd94be4154a37da7dd5b9d06a4a1"
-pubkey = "175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b"  # bob
-token  = "ETH"
-amount = "08ad5f1147b02de6de96ef4d694628a7c6f0dc1e61b9a5d7d56a3817caf2d125"  # 1500
+[[account.genesis_note]]
+cm   = "1022f2ae7edcd58f75069dfbe4518a6a0a10101c1a6e8dcc4342bd3402cd107e"
+memo = "bob 1500 ETH"
 
-[[account.genesis_cash]]
-id     = "ddada5eb9484fa322a931d53bb945431"
-pubkey = "175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b"  # bob
-token  = "USDT"
-amount = "08dc6ec7efa5cb39b1ed533b754eae8e76b99d1c8cb1a867caa954ce0b082c9b"  # 600000
+[[account.genesis_note]]
+cm   = "1d90aa6dcac21e53918a2299e581008b2d7ffffe36b55ecfd2b82aa7958a69bc"
+memo = "bob 600000 USDT"

@@ -4,10 +4,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
+	"os"
 	"sync"
+	"time"
 
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // ────────────────────── SQL models ──────────────────────
@@ -64,6 +69,29 @@ type BridgeSeenScheme struct {
 }
 
 func (BridgeSeenScheme) TableName() string { return "bridge_seen" }
+
+// ────────────────────── DB Initialization ──────────────────────
+
+// InitAccountDB opens a SQLite database and auto-migrates the shielded-pool
+// tables. `logLevel` controls GORM SQL logging verbosity.
+func InitAccountDB(dsn string, logLevel logger.LogLevel) *gorm.DB {
+	gormLogger := logger.New(
+		log.New(os.Stdout, "\n", log.LstdFlags),
+		logger.Config{
+			SlowThreshold: 200 * time.Millisecond,
+			LogLevel:      logLevel,
+		},
+	)
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: gormLogger})
+	if err != nil {
+		panic(fmt.Sprintf("failed to open accounts database: %v", err))
+	}
+	if err := db.AutoMigrate(&NoteScheme{}, &NullifierScheme{},
+		&AnchorScheme{}, &TreeStateScheme{}, &BridgeSeenScheme{}); err != nil {
+		panic(fmt.Sprintf("failed to migrate pool tables: %v", err))
+	}
+	return db
+}
 
 // ────────────────────── Pool store ──────────────────────
 

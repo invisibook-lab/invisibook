@@ -7,7 +7,7 @@
 #   ./scripts/dev-dual.sh bob      # launch Bob only
 #   ./scripts/dev-dual.sh clean    # wipe both data dirs and start fresh
 #
-# Each instance uses --data-dir to isolate mnemonic, cash.json, etc.
+# Each instance uses --data-dir to isolate mnemonic, notes.json, etc.
 # Both connect to the same local chain (localhost:7999 / ws:8999).
 #
 # Prerequisites:
@@ -31,14 +31,16 @@ BOB_DIR="$DATA_ROOT/bob"
 ALICE_MNEMONIC="test test test test test test test test test test test junk"
 BOB_MNEMONIC="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 
-# Seed a user's data directory: write mnemonic, always reset cash.json to genesis.
+# Seed a user's data directory: write mnemonic, always reset the note and
+# order ledgers to the genesis state.
 setup_user() {
-    local dir="$1" name="$2" mnemonic="$3" cash_json="$4"
+    local dir="$1" name="$2" mnemonic="$3" notes_json="$4"
 
     mkdir -p "$dir"
     echo "$mnemonic" > "$dir/mnemonic"
-    cp "$cash_json" "$dir/cash.json"
-    echo "[$name] data dir ready (cash reset): $dir"
+    cp "$notes_json" "$dir/notes.json"
+    echo "[]" > "$dir/orders.json"
+    echo "[$name] data dir ready (notes reset): $dir"
 }
 
 # Launch a desktop instance with isolated --data-dir.
@@ -58,18 +60,18 @@ case "${1:-both}" in
         exit 0
         ;;
     alice)
-        setup_user "$ALICE_DIR" "alice" "$ALICE_MNEMONIC" "$TEST_DATA/alice_cash.json"
+        setup_user "$ALICE_DIR" "alice" "$ALICE_MNEMONIC" "$TEST_DATA/alice_notes.json"
         launch "$ALICE_DIR" "alice"
         wait
         ;;
     bob)
-        setup_user "$BOB_DIR" "bob" "$BOB_MNEMONIC" "$TEST_DATA/bob_cash.json"
+        setup_user "$BOB_DIR" "bob" "$BOB_MNEMONIC" "$TEST_DATA/bob_notes.json"
         launch "$BOB_DIR" "bob"
         wait
         ;;
     both)
-        setup_user "$ALICE_DIR" "alice" "$ALICE_MNEMONIC" "$TEST_DATA/alice_cash.json"
-        setup_user "$BOB_DIR" "bob" "$BOB_MNEMONIC" "$TEST_DATA/bob_cash.json"
+        setup_user "$ALICE_DIR" "alice" "$ALICE_MNEMONIC" "$TEST_DATA/alice_notes.json"
+        setup_user "$BOB_DIR" "bob" "$BOB_MNEMONIC" "$TEST_DATA/bob_notes.json"
         launch "$ALICE_DIR" "alice"
         launch "$BOB_DIR" "bob"
         echo "Both instances launched. Press Ctrl+C to stop all."
