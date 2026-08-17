@@ -10,5 +10,6 @@ pub mod note_prover;
 pub mod note_store;
 #[cfg(not(target_os = "android"))]
 pub mod note_tree;
+pub mod order_store;
 pub mod orderbook;
 pub mod types;
