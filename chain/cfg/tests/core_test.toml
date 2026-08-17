@@ -1,14 +1,17 @@
 # Core Tripod Configuration — test mode (no ZK verification)
-# VK paths are left empty so VerifyGroth16 is skipped. Chain tests derive
+# require_proofs = false is the EXPLICIT dev opt-out: VK paths are left
+# empty so VerifyGroth16 is skipped. Chain tests derive
 # placeholder nullifiers from tag strings, so no genesis funding is needed;
 # the genesis notes below only serve wallet-level tests that want spendable
 # leaves (fixed dev secrets — see lib/chain/examples/dump_dev_notes.rs).
 
 [orderbook]
 db_path = "data/orders.db"
+require_proofs = false
 
 [account]
 db_path = "data/accounts.db"
+require_proofs = false
 
 [[account.genesis_note]]
 cm   = "2af50a182c82755bea8bf285ba443a9fa3c5924583e9a27134a793cd0d1e6f7b"

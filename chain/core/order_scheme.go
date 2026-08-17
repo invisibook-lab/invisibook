@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -88,10 +89,49 @@ func InitOrderDB(dsn string, logLevel logger.LogLevel) *gorm.DB {
 	if err != nil {
 		panic(fmt.Sprintf("failed to open orders database: %v", err))
 	}
-	if err := db.AutoMigrate(&OrderScheme{}, &SettleAddrScheme{}, &CompareResultScheme{}, &FeeCounterScheme{}); err != nil {
+	if err := db.AutoMigrate(&OrderScheme{}, &SettleAddrScheme{}, &CompareResultScheme{},
+		&FeeCounterScheme{}, &SettlementJournalScheme{}); err != nil {
 		panic(fmt.Sprintf("failed to migrate orders table: %v", err))
 	}
 	return db
+}
+
+// ────────────────────── Settlement Journal SQL Model ──────────────────────
+
+// Journal states: a settlement is PENDING from the moment its legs verify
+// until the order-side updates commit, then DONE.
+const (
+	SettlementPending = 0
+	SettlementDone    = 1
+)
+
+// SettlementJournalScheme is the durable intent record of one atomic
+// settlement (crash consistency). It is written to orders.db BEFORE the
+// payout notes are minted in accounts.db and carries everything the
+// order-side updates need, so a crash between the two databases can be
+// completed idempotently — by a resubmission of the same SettlePair or by
+// the startup recovery (`recoverPendingSettlements`). Rows are keyed by
+// the settlement id (`orderA:orderB` — a pair settles at most once: the
+// smaller side ends Done and can never be Matched again).
+type SettlementJournalScheme struct {
+	SettlementID   string `gorm:"primaryKey;column:settlement_id"`
+	OrderAID       string `gorm:"column:order_a_id;not null"`
+	OrderBID       string `gorm:"column:order_b_id;not null"`
+	CmNoteA        string `gorm:"column:cm_note_a;not null"`
+	CmNoteB        string `gorm:"column:cm_note_b;not null"`
+	ALarge         bool   `gorm:"column:a_large"`
+	BLarge         bool   `gorm:"column:b_large"`
+	CmQResidualA   string `gorm:"column:cm_q_residual_a"`
+	CmLockedResidA string `gorm:"column:cm_locked_residual_a"`
+	CmQResidualB   string `gorm:"column:cm_q_residual_b"`
+	CmLockedResidB string `gorm:"column:cm_locked_residual_b"`
+	State          int    `gorm:"column:state;index"`
+	Height         uint64 `gorm:"column:height"`
+}
+
+// TableName returns the SQL table name for SettlementJournalScheme rows.
+func (SettlementJournalScheme) TableName() string {
+	return "settlement_journal"
 }
 
 // ────────────────────── CRUD Operations ──────────────────────
@@ -325,4 +365,37 @@ func (ot *OrderBook) DeleteCompareResult(x, y OrderID) error {
 		Where("(order_a_id = ? AND order_b_id = ?) OR (order_a_id = ? AND order_b_id = ?)",
 			string(x), string(y), string(y), string(x)).
 		Delete(&CompareResultScheme{}).Error
+}
+
+// ────────────────────── Settlement Journal CRUD ──────────────────────
+
+// UpsertSettlementJournal inserts or replaces the journal row of one
+// settlement. Called BEFORE the payout mint; a retry after a crash simply
+// rewrites the same row.
+func (ot *OrderBook) UpsertSettlementJournal(row *SettlementJournalScheme) error {
+	return ot.db.Save(row).Error
+}
+
+// GetSettlementJournal returns the journal row of `settlementID`, or nil
+// when this settlement never started.
+func (ot *OrderBook) GetSettlementJournal(settlementID string) (*SettlementJournalScheme, error) {
+	var row SettlementJournalScheme
+	err := ot.db.First(&row, "settlement_id = ?", settlementID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+// PendingSettlementJournals returns every journal row still in the PENDING
+// state (crash-recovery scan).
+func (ot *OrderBook) PendingSettlementJournals() ([]SettlementJournalScheme, error) {
+	var rows []SettlementJournalScheme
+	if err := ot.db.Where("state = ?", SettlementPending).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }

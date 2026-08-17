@@ -70,6 +70,23 @@ type BridgeSeenScheme struct {
 
 func (BridgeSeenScheme) TableName() string { return "bridge_seen" }
 
+// SettlementSeenScheme makes payout minting IDEMPOTENT per settlement: the
+// row is created in the SAME transaction as the two payout notes, keyed by
+// the settlement id. A retry (crash between the mint and the order-side
+// updates, then resubmission or restart) finds the row and skips the mint
+// instead of minting again. The note commitments are recorded so a retry
+// carrying DIFFERENT legs is rejected instead of silently skipped.
+type SettlementSeenScheme struct {
+	SettlementID string `gorm:"primaryKey;column:settlement_id"`
+	CmNoteA      string `gorm:"column:cm_note_a;not null"`
+	CmNoteB      string `gorm:"column:cm_note_b;not null"`
+	ALeafIndex   uint64 `gorm:"column:a_leaf_index"`
+	BLeafIndex   uint64 `gorm:"column:b_leaf_index"`
+	Height       uint64 `gorm:"column:height"`
+}
+
+func (SettlementSeenScheme) TableName() string { return "settlement_seen" }
+
 // ────────────────────── DB Initialization ──────────────────────
 
 // InitAccountDB opens a SQLite database and auto-migrates the shielded-pool
@@ -87,7 +104,8 @@ func InitAccountDB(dsn string, logLevel logger.LogLevel) *gorm.DB {
 		panic(fmt.Sprintf("failed to open accounts database: %v", err))
 	}
 	if err := db.AutoMigrate(&NoteScheme{}, &NullifierScheme{},
-		&AnchorScheme{}, &TreeStateScheme{}, &BridgeSeenScheme{}); err != nil {
+		&AnchorScheme{}, &TreeStateScheme{}, &BridgeSeenScheme{},
+		&SettlementSeenScheme{}); err != nil {
 		panic(fmt.Sprintf("failed to migrate pool tables: %v", err))
 	}
 	return db
@@ -259,6 +277,84 @@ func (a *Account) AnchorKnown(root string) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// SettlementMinted returns the mint record of `settlementID`, or nil when
+// this settlement has not minted its payout notes yet.
+func (a *Account) SettlementMinted(settlementID string) (*SettlementSeenScheme, error) {
+	var row SettlementSeenScheme
+	err := a.db.First(&row, "settlement_id = ?", settlementID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+// MintSettlementNotes mints the two payout notes of one settlement EXACTLY
+// ONCE. The first call appends both notes and records the settlement id in
+// the same transaction; every later call with the same id returns the
+// recorded leaf indices with `already = true` and appends nothing. A retry
+// whose note commitments differ from the recorded ones is an error — a
+// diverging resubmission must never mint a second pair.
+// `cmAHex`/`cmBHex` must be canonical 64-char field-element hexes.
+func (a *Account) MintSettlementNotes(
+	settlementID, cmAHex, cmBHex string, height uint64, by string,
+) (indices []uint64, already bool, err error) {
+	check := func(row *SettlementSeenScheme) ([]uint64, bool, error) {
+		if row.CmNoteA != cmAHex || row.CmNoteB != cmBHex {
+			return nil, false, fmt.Errorf(
+				"settlement %s already minted different payout notes", settlementID)
+		}
+		return []uint64{row.ALeafIndex, row.BLeafIndex}, true, nil
+	}
+	if row, rerr := a.SettlementMinted(settlementID); rerr != nil {
+		return nil, false, rerr
+	} else if row != nil {
+		return check(row)
+	}
+	cmA, err := ParseFrHex(cmAHex)
+	if err != nil {
+		return nil, false, fmt.Errorf("cm_note_a: %w", err)
+	}
+	cmB, err := ParseFrHex(cmBHex)
+	if err != nil {
+		return nil, false, fmt.Errorf("cm_note_b: %w", err)
+	}
+	minted, err := a.ApplyPoolMutation(PoolMutation{
+		NoteCms: []*big.Int{cmA, cmB},
+		Height:  height,
+		Source:  "settle",
+		By:      by,
+		Extra: func(tx *gorm.DB) error {
+			return tx.Create(&SettlementSeenScheme{
+				SettlementID: settlementID,
+				CmNoteA:      cmAHex,
+				CmNoteB:      cmBHex,
+				ALeafIndex:   0, // placeholder, set below
+				BLeafIndex:   0,
+				Height:       height,
+			}).Error
+		},
+	})
+	if err != nil {
+		// A concurrent/duplicate insert lost the race on the primary key:
+		// fall back to the recorded row.
+		if row, rerr := a.SettlementMinted(settlementID); rerr == nil && row != nil {
+			return check(row)
+		}
+		return nil, false, err
+	}
+	// Record the leaf indices (informational; the same transaction already
+	// holds the id + commitments that gate idempotency).
+	if err := a.db.Model(&SettlementSeenScheme{}).
+		Where("settlement_id = ?", settlementID).
+		Updates(map[string]any{"a_leaf_index": minted[0], "b_leaf_index": minted[1]}).Error; err != nil {
+		return nil, false, err
+	}
+	return minted, false, nil
 }
 
 // BridgeSeen reports whether a bridge commitment was already consumed.

@@ -187,7 +187,7 @@ func loadPoolE2EFixture(t *testing.T) poolE2EFixture {
 // fixture's genesis notes (no genesis cash, no legacy VKs).
 func writePoolTestConfig(t *testing.T, fx poolE2EFixture) string {
 	t.Helper()
-	cfg := fmt.Sprintf("chain_id = %d\n\n[orderbook]\ndb_path = \"data/orders.db\"\n\n[account]\ndb_path = \"data/accounts.db\"\nnote_deposit_vk_path   = \"vk/note_deposit_vk.json\"\nspend_withdraw_vk_path = \"vk/spend_withdraw_vk.json\"\n", fx.ChainID)
+	cfg := fmt.Sprintf("chain_id = %d\n\n[orderbook]\ndb_path = \"data/orders.db\"\nrequire_proofs = false\n\n[account]\ndb_path = \"data/accounts.db\"\nnote_deposit_vk_path   = \"vk/note_deposit_vk.json\"\nspend_withdraw_vk_path = \"vk/spend_withdraw_vk.json\"\n", fx.ChainID)
 	for i, cm := range fx.GenesisNotes {
 		cfg += fmt.Sprintf("\n[[account.genesis_note]]\ncm = %q\nmemo = \"golden leaf %d\"\n", cm, i)
 	}

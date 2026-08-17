@@ -55,6 +55,14 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	if err != nil {
 		panic(fmt.Sprintf("loading settle_cozk2p VK: %v", err))
 	}
+	// A node configured for collaborative settlement must be able to verify
+	// it. Booting a stub binary here would accept orders that can never
+	// settle ("starts but cannot settle") — refuse instead.
+	if settleCoZk2pVK != nil && !PlonkVerifierAvailable() {
+		panic("settle_cozk2p_vk_path is configured but this binary was built " +
+			"without the cozk2p PLONK verifier; build with `make build-chain` " +
+			"(go build -tags cozk2p) or remove the PLONK VK from the config")
+	}
 	settleSmallVK, err := LoadVK("settle_small", cfg.SettleSmallVKPath)
 	if err != nil {
 		panic(fmt.Sprintf("loading settle_small VK: %v", err))
@@ -99,8 +107,12 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 		sendOrderVK:    sendOrderVK,
 		claimFeesVK:    claimFeesVK,
 	}
+	// Settlement is EXCLUSIVELY the atomic SettlePair (F2): the unilateral
+	// SettleSmall/SettleLarge writings are not registered, so a party that
+	// holds only the counterparty's signed leg cannot collect its payout
+	// alone. The per-leg verify helpers remain internal to SettlePair.
 	ot.SetWritings(ot.SendOrder, ot.SubmitCompareCoZk, ot.SubmitCompareCoZk2p,
-		ot.SettleSmall, ot.SettleLarge, ot.SettlePair, ot.ClaimFees, ot.RegisterSettleAddr)
+		ot.SettlePair, ot.ClaimFees, ot.RegisterSettleAddr)
 	ot.SetReadings(ot.QueryOrders, ot.QuerySettleAddr, ot.QueryFees)
 	return ot
 }
@@ -479,14 +491,25 @@ func (ot *OrderBook) QueryOrders(ctx *context.ReadContext) {
 
 // ────────────────────── Matching Logic ──────────────────────
 
-// matchOrder finds the best counterparty for the incoming order using three
-// priority levels:
+// matchOrder finds the counterparty for the incoming order.
 //
-//  1. Price Priority: best price first (lowest sell for buyer, highest buy for seller)
-//  2. Block Height Priority: earlier block (lower height) wins when prices tie
-//  3. Gas Fee Priority: higher handling fee wins when prices and block heights tie
+// EQUAL-PRICE RULE: only candidates whose limit price EQUALS the incoming
+// order's price are considered. The settle circuits lock collateral at the
+// order's own price and equate it with the execution price, so a crossing
+// pair with different prices could match but never settle — and a Matched
+// pair has no cancel path, so it would be locked forever. Crossing but
+// unequal orders therefore stay Pending until an equal-price counterparty
+// arrives (price improvement is future work; see docs/paper_deviations.md
+// D6).
 //
-// If matched, both orders' Status is set to Matched and MatchOrder is set to each other.
+// Priority among equal-price candidates:
+//
+//  1. Block Height: earlier block (lower height) wins
+//  2. Fee: higher fee wins
+//  3. Intra-block index: earlier transaction wins
+//
+// If matched, both orders' Status is set to Matched and MatchOrder is set
+// to each other.
 func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
 	if order.Price == nil {
 		return nil, nil // cannot match without a price
@@ -509,12 +532,9 @@ func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
 			continue
 		}
 
-		// Price compatibility check
-		if order.Type == Buy && candidate.Price.Cmp(order.Price) > 0 {
-			continue // sell price > buy price → incompatible
-		}
-		if order.Type == Sell && candidate.Price.Cmp(order.Price) < 0 {
-			continue // buy price < sell price → incompatible
+		// Equal-price rule: settlement requires it (see above).
+		if candidate.Price.Cmp(order.Price) != 0 {
+			continue
 		}
 
 		if bestMatch == nil {
@@ -522,27 +542,7 @@ func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
 			continue
 		}
 
-		// ── Priority 1: Price ──
-		priceCmp := candidate.Price.Cmp(bestMatch.Price)
-		if order.Type == Buy {
-			// Buying: lower sell price is better
-			if priceCmp < 0 {
-				bestMatch = candidate
-				continue
-			} else if priceCmp > 0 {
-				continue
-			}
-		} else {
-			// Selling: higher buy price is better
-			if priceCmp > 0 {
-				bestMatch = candidate
-				continue
-			} else if priceCmp < 0 {
-				continue
-			}
-		}
-
-		// ── Priority 2: Block Height (lower = earlier = better) ──
+		// ── Priority 1: Block Height (lower = earlier = better) ──
 		if candidate.BlockHeight < bestMatch.BlockHeight {
 			bestMatch = candidate
 			continue
@@ -550,7 +550,7 @@ func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
 			continue
 		}
 
-		// ── Priority 3: Fee (higher = better) ──
+		// ── Priority 2: Fee (higher = better) ──
 		if candidate.Fee > bestMatch.Fee {
 			bestMatch = candidate
 			continue
@@ -558,7 +558,7 @@ func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
 			continue
 		}
 
-		// ── Priority 4: Intra-block transaction index (smaller = earlier) ──
+		// ── Priority 3: Intra-block transaction index (smaller = earlier) ──
 		if candidate.IntraBlockIndex < bestMatch.IntraBlockIndex {
 			bestMatch = candidate
 		}

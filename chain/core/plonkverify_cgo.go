@@ -41,3 +41,7 @@ func plonkVerifySettle2p(vkBytes, publicJSON, proofBytes []byte) error {
 	}
 	return fmt.Errorf("cozk2p verifier returned %d: %s", int32(code), msg)
 }
+
+// PlonkVerifierAvailable reports whether this binary carries the cozk2p
+// PLONK verifier (true: built with `-tags cozk2p`).
+func PlonkVerifierAvailable() bool { return true }

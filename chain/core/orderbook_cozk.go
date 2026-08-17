@@ -5,12 +5,15 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"math/big"
 	"strconv"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
+	"gorm.io/gorm"
 
 	"github.com/yu-org/yu/core/context"
+	"github.com/yu-org/yu/core/types"
 )
 
 // Settlement per the paper (§V-C/VI, plan rev. 3 Phase 3):
@@ -328,16 +331,6 @@ type SettleLargeRequest struct {
 	ZkProof          string  `json:"zk_proof"           validate:"required"`
 }
 
-// SettleEvent is emitted after a settle submission lands. `NoteLeafIndex`
-// tells the counterparty where its payout note sits (no probing needed).
-type SettleEvent struct {
-	EventType     string  `json:"event_type"` // "settle_small" | "settle_large"
-	Order         OrderID `json:"order"`
-	NoteLeafIndex uint64  `json:"note_leaf_index"`
-	Relisted      *Order  `json:"relisted,omitempty"`
-	Matched       *Order  `json:"matched,omitempty"`
-}
-
 // settleSigMessage builds the canonical length-prefixed message an order's
 // owner signs for its settle submission.
 func settleSigMessage(domain string, fields ...string) []byte {
@@ -550,147 +543,6 @@ func (ot *OrderBook) verifyLargeLeg(
 	return ParseFrHex(cmNoteOut)
 }
 
-// SettleSmall applies the fully filled side's settlement: verifies the
-// owner's signature and π_A, spends the collateral, appends the payout note
-// to the pool, and closes the order.
-func (ot *OrderBook) SettleSmall(ctx *context.WriteContext) error {
-	ctx.SetLei(100)
-
-	req := new(SettleSmallRequest)
-	if err := ctx.BindJson(req); err != nil {
-		return err
-	}
-	if err := Validator.Struct(req); err != nil {
-		return err
-	}
-
-	mine, match, cmp, err := ot.loadSettlingOrder(req.OrderID, req.MatchOrderID)
-	if err != nil {
-		return err
-	}
-	// SettleSmall is for the smaller side — or both sides on equality.
-	if cmp > 0 {
-		return fmt.Errorf("order %s is the larger side; submit SettleLarge", req.OrderID)
-	}
-	cmNote, err := ot.verifySmallLeg(mine, match, req.CmNoteOut, req.Signature, req.ZkProof)
-	if err != nil {
-		return err
-	}
-
-	// Mutate: the collateral commitment lives only on the order row (it
-	// leaves the book when the order closes), so settlement mints the payout
-	// note and closes the order — no cash to spend.
-	settleBy := fmt.Sprintf("settle-small:%s", req.OrderID[:8])
-	indices, err := ot.Account.ApplyPoolMutation(PoolMutation{
-		NoteCms: []*big.Int{cmNote},
-		Height:  uint64(ctx.Block.Height),
-		Source:  "settle",
-		By:      settleBy,
-	})
-	if err != nil {
-		return fmt.Errorf("minting payout note: %w", err)
-	}
-	if err := ot.UpdateOrderStatus(mine.ID, Done); err != nil {
-		return fmt.Errorf("closing order: %w", err)
-	}
-	_ = ot.DeleteSettleAddr(mine.ID)
-
-	return ctx.EmitJsonEvent(&SettleEvent{
-		EventType:     "settle_small",
-		Order:         mine.ID,
-		NoteLeafIndex: indices[0],
-	})
-}
-
-// SettleLarge applies the partially filled side's settlement: verifies the
-// owner's signature and π_B, spends the collateral, appends the fill note
-// to the pool, and relists the residual order under fresh commitments
-// (keeping its block height, i.e. its time priority).
-func (ot *OrderBook) SettleLarge(ctx *context.WriteContext) error {
-	ctx.SetLei(100)
-
-	req := new(SettleLargeRequest)
-	if err := ctx.BindJson(req); err != nil {
-		return err
-	}
-	if err := Validator.Struct(req); err != nil {
-		return err
-	}
-
-	mine, match, cmp, err := ot.loadSettlingOrder(req.OrderID, req.MatchOrderID)
-	if err != nil {
-		return err
-	}
-	if cmp <= 0 {
-		return fmt.Errorf("order %s is not the larger side; submit SettleSmall", req.OrderID)
-	}
-	cmNote, err := ot.verifyLargeLeg(
-		mine, match, req.CmQResidual, req.CmLockedResidual, req.CmNoteOut, req.Signature, req.ZkProof)
-	if err != nil {
-		return err
-	}
-
-	// Mutate: mint the fill note, relist the residual (the collateral
-	// commitment is order-bound, so relisting just swaps it — no cash).
-	settleBy := fmt.Sprintf("settle-large:%s", req.OrderID[:8])
-	indices, err := ot.Account.ApplyPoolMutation(PoolMutation{
-		NoteCms: []*big.Int{cmNote},
-		Height:  uint64(ctx.Block.Height),
-		Source:  "settle",
-		By:      settleBy,
-	})
-	if err != nil {
-		return fmt.Errorf("minting fill note: %w", err)
-	}
-	relisted, rematched, err := ot.relistWithRemainder(
-		mine, CipherText(req.CmQResidual), CipherText(req.CmLockedResidual), req.ZkProof)
-	if err != nil {
-		return err
-	}
-	_ = ot.DeleteSettleAddr(mine.ID)
-
-	return ctx.EmitJsonEvent(&SettleEvent{
-		EventType:     "settle_large",
-		Order:         mine.ID,
-		NoteLeafIndex: indices[0],
-		Relisted:      relisted,
-		Matched:       rematched,
-	})
-}
-
-// relistWithRemainder keeps the surviving larger order on the book: swaps
-// its quantity and collateral commitments to the residual, clears the match
-// linkage, and returns it to Pending (retaining its original block height,
-// i.e. its time priority). It then immediately attempts a re-match against
-// the book. Returns the updated order and the counter order it re-matched
-// with (nil if none).
-func (ot *OrderBook) relistWithRemainder(
-	ord *Order, newOrderCommitment, newLockedCommitment CipherText, zkProof string,
-) (*Order, *Order, error) {
-	if err := ot.UpdateOrderAmount(ord.ID, newOrderCommitment); err != nil {
-		return nil, nil, fmt.Errorf("failed to update order amount: %w", err)
-	}
-	if err := ot.UpdateOrderLockedCommitment(ord.ID, string(newLockedCommitment)); err != nil {
-		return nil, nil, fmt.Errorf("failed to update order collateral: %w", err)
-	}
-	if err := ot.UpdateOrderMatchOrder(ord.ID, ""); err != nil {
-		return nil, nil, fmt.Errorf("failed to clear match order: %w", err)
-	}
-	if err := ot.UpdateOrderStatus(ord.ID, Pending); err != nil {
-		return nil, nil, fmt.Errorf("failed to relist order: %w", err)
-	}
-
-	updated, err := ot.GetOrder(ord.ID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("re-reading relisted order: %w", err)
-	}
-	rematched, err := ot.matchOrder(updated)
-	if err != nil {
-		return nil, nil, fmt.Errorf("re-matching relisted order: %w", err)
-	}
-	return updated, rematched, nil
-}
-
 // ────────────────────── Writing: SettlePair (atomic) ──────────────────────
 
 // SettlePairLeg carries one side's settle artifacts inside a SettlePair.
@@ -767,12 +619,24 @@ func (ot *OrderBook) verifyPairLeg(mine, match *Order, isLarge bool, leg SettleP
 	return ot.verifySmallLeg(mine, match, leg.CmNoteOut, leg.Signature, leg.ZkProof)
 }
 
+// settlePairFailpoint, when non-nil, runs between the payout mint and the
+// order-side updates. TESTS ONLY: failure injection for the crash-
+// consistency regression tests. Production code never sets it.
+var settlePairFailpoint func() error
+
+// settlementID keys one settlement of a matched pair. A pair settles at
+// most once (the fully filled side ends Done and can never be Matched
+// again), so `orderA:orderB` is unique per settlement.
+func settlementID(a, b OrderID) string {
+	return string(a) + ":" + string(b)
+}
+
 // SettlePair verifies both sides' settle proofs and applies both settlements
 // atomically: both payout notes are minted in ONE pool mutation, then the
 // fully filled side(s) close and the larger side (if any) relists its
 // residual. Either the whole pair settles or nothing does — closing the
-// "one leg lands, the other does not" fair-exchange gap of the separate
-// SettleSmall/SettleLarge writings.
+// "one leg lands, the other does not" fair-exchange gap. This is the ONLY
+// registered settlement writing.
 func (ot *OrderBook) SettlePair(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
 
@@ -783,10 +647,36 @@ func (ot *OrderBook) SettlePair(ctx *context.WriteContext) error {
 	if err := Validator.Struct(req); err != nil {
 		return err
 	}
-
-	orderA, orderB, cmpA, err := ot.loadSettlingPair(req.OrderAID, req.OrderBID)
+	evt, err := ot.executeSettlePair(req, uint64(ctx.Block.Height))
 	if err != nil {
 		return err
+	}
+	return ctx.EmitJsonEvent(evt)
+}
+
+// executeSettlePair is the crash-consistent settlement pipeline. The
+// orderbook and pool state live in DIFFERENT SQLite databases, so one
+// shared transaction is impossible; instead the pipeline is journaled and
+// idempotent, so a crash at ANY point is completed by a resubmission of
+// the same request or by the startup recovery:
+//
+//  1. Verify both legs (pure checks, no state).
+//  2. Write the settlement journal row (orders.db, PENDING) — the durable
+//     intent, carrying everything the order-side updates need.
+//  3. Mint both payout notes AT MOST ONCE (accounts.db: one transaction
+//     appends the notes and records the settlement id; a retry finds the
+//     id and skips the mint).
+//  4. Apply the order-side updates and mark the journal DONE in ONE
+//     orders.db transaction.
+//  5. Post-commit: re-match relisted orders, drop rendezvous rows.
+//
+// Crash between 3 and 4: the orders stay Settling, so the pair is still
+// submittable; the retry skips the mint (step 3 idempotency) and completes
+// step 4. `recoverPendingSettlements` runs the same completion on boot.
+func (ot *OrderBook) executeSettlePair(req *SettlePairRequest, height uint64) (*SettlePairEvent, error) {
+	orderA, orderB, cmpA, err := ot.loadSettlingPair(req.OrderAID, req.OrderBID)
+	if err != nil {
+		return nil, err
 	}
 
 	// cmpA > 0: A larger, B smaller. cmpA < 0: A smaller, B larger.
@@ -795,26 +685,57 @@ func (ot *OrderBook) SettlePair(ctx *context.WriteContext) error {
 	bIsLarge := cmpA < 0
 
 	// Verify BOTH legs before touching any state (all-or-nothing).
-	cmNoteA, err := ot.verifyPairLeg(orderA, orderB, aIsLarge, req.A)
-	if err != nil {
-		return fmt.Errorf("side A: %w", err)
+	if _, err := ot.verifyPairLeg(orderA, orderB, aIsLarge, req.A); err != nil {
+		return nil, fmt.Errorf("side A: %w", err)
 	}
-	cmNoteB, err := ot.verifyPairLeg(orderB, orderA, bIsLarge, req.B)
-	if err != nil {
-		return fmt.Errorf("side B: %w", err)
+	if _, err := ot.verifyPairLeg(orderB, orderA, bIsLarge, req.B); err != nil {
+		return nil, fmt.Errorf("side B: %w", err)
 	}
 
-	// Mint BOTH payout notes in a single pool mutation — the atomicity that
-	// makes settlement fair (both paid or neither). cmNoteA is what A mints
-	// to B (B's incoming note); cmNoteB is what B mints to A.
-	indices, err := ot.Account.ApplyPoolMutation(PoolMutation{
-		NoteCms: []*big.Int{cmNoteA, cmNoteB},
-		Height:  uint64(ctx.Block.Height),
-		Source:  "settle",
-		By:      fmt.Sprintf("settle-pair:%s", req.OrderAID[:8]),
-	})
+	// Durable intent FIRST (orders.db): everything the order-side updates
+	// need survives a crash between the two databases.
+	id := settlementID(orderA.ID, orderB.ID)
+	journal := &SettlementJournalScheme{
+		SettlementID:   id,
+		OrderAID:       string(orderA.ID),
+		OrderBID:       string(orderB.ID),
+		CmNoteA:        req.A.CmNoteOut,
+		CmNoteB:        req.B.CmNoteOut,
+		ALarge:         aIsLarge,
+		BLarge:         bIsLarge,
+		CmQResidualA:   req.A.CmQResidual,
+		CmLockedResidA: req.A.CmLockedResidual,
+		CmQResidualB:   req.B.CmQResidual,
+		CmLockedResidB: req.B.CmLockedResidual,
+		State:          SettlementPending,
+		Height:         height,
+	}
+	if err := ot.UpsertSettlementJournal(journal); err != nil {
+		return nil, fmt.Errorf("writing settlement journal: %w", err)
+	}
+
+	// Mint BOTH payout notes AT MOST ONCE (accounts.db transaction).
+	// cmNoteA is what A mints to B (B's incoming note) and vice versa.
+	indices, already, err := ot.Account.MintSettlementNotes(
+		id, req.A.CmNoteOut, req.B.CmNoteOut, height,
+		fmt.Sprintf("settle-pair:%s", req.OrderAID[:8]))
 	if err != nil {
-		return fmt.Errorf("minting payout notes: %w", err)
+		return nil, fmt.Errorf("minting payout notes: %w", err)
+	}
+	if already {
+		log.Printf("[settle] %s: payout notes already minted, resuming order updates", id[:16])
+	}
+
+	// TESTS ONLY: injected crash between the two databases.
+	if settlePairFailpoint != nil {
+		if ferr := settlePairFailpoint(); ferr != nil {
+			return nil, ferr
+		}
+	}
+
+	// Order-side updates + journal DONE in ONE orders.db transaction.
+	if err := ot.finishSettlementOrders(journal); err != nil {
+		return nil, fmt.Errorf("applying order updates: %w", err)
 	}
 
 	evt := &SettlePairEvent{
@@ -824,31 +745,115 @@ func (ot *OrderBook) SettlePair(ctx *context.WriteContext) error {
 		ALeafIndex: indices[1], // A's incoming note = the one B minted
 		BLeafIndex: indices[0], // B's incoming note = the one A minted
 	}
+	ot.postSettlementCleanup(journal, evt)
+	return evt, nil
+}
 
-	// Order transitions: relist the larger side, close each fully filled one.
-	applyLeg := func(mine, match *Order, isLarge bool, leg SettlePairLeg) (*Order, *Order, error) {
-		if isLarge {
-			relisted, rematched, err := ot.relistWithRemainder(
-				mine, CipherText(leg.CmQResidual), CipherText(leg.CmLockedResidual), leg.ZkProof)
-			if err != nil {
-				return nil, nil, err
+// finishSettlementOrders applies both order-side transitions of a minted
+// settlement and marks its journal DONE — in ONE orders.db transaction, so
+// a crash never leaves one leg updated and the other not. Idempotent: it
+// only acts on a PENDING journal.
+func (ot *OrderBook) finishSettlementOrders(j *SettlementJournalScheme) error {
+	return ot.db.Transaction(func(tx *gorm.DB) error {
+		applyLeg := func(orderID string, isLarge bool, cmQRes, cmLockedRes string) error {
+			if isLarge {
+				// Relist in place with the residual commitments (fresh
+				// blindings), clearing the match link and keeping the
+				// original block height (time priority).
+				return tx.Model(&OrderScheme{}).Where("id = ?", orderID).
+					Updates(map[string]any{
+						"amount":            cmQRes,
+						"locked_commitment": cmLockedRes,
+						"match_order":       "",
+						"status":            int(Pending),
+					}).Error
 			}
-			_ = ot.DeleteSettleAddr(mine.ID)
-			return relisted, rematched, nil
+			return tx.Model(&OrderScheme{}).Where("id = ?", orderID).
+				Update("status", int(Done)).Error
 		}
-		if err := ot.UpdateOrderStatus(mine.ID, Done); err != nil {
-			return nil, nil, fmt.Errorf("closing order %s: %w", mine.ID, err)
+		if err := applyLeg(j.OrderAID, j.ALarge, j.CmQResidualA, j.CmLockedResidA); err != nil {
+			return fmt.Errorf("side A order update: %w", err)
 		}
-		_ = ot.DeleteSettleAddr(mine.ID)
-		return nil, nil, nil
-	}
+		if err := applyLeg(j.OrderBID, j.BLarge, j.CmQResidualB, j.CmLockedResidB); err != nil {
+			return fmt.Errorf("side B order update: %w", err)
+		}
+		return tx.Model(&SettlementJournalScheme{}).
+			Where("settlement_id = ?", j.SettlementID).
+			Update("state", SettlementDone).Error
+	})
+}
 
-	if evt.RelistedA, evt.RematchedA, err = applyLeg(orderA, orderB, aIsLarge, req.A); err != nil {
-		return err
+// postSettlementCleanup runs the non-critical steps after the settlement
+// committed: re-match relisted orders (fills evt when non-nil) and drop the
+// rendezvous rows. Failures here never undo the settlement.
+func (ot *OrderBook) postSettlementCleanup(j *SettlementJournalScheme, evt *SettlePairEvent) {
+	rematch := func(orderID string, isLarge bool) (*Order, *Order) {
+		if !isLarge {
+			return nil, nil
+		}
+		relisted, err := ot.GetOrder(OrderID(orderID))
+		if err != nil {
+			log.Printf("[settle] re-reading relisted order %s: %v", orderID, err)
+			return nil, nil
+		}
+		rematched, err := ot.matchOrder(relisted)
+		if err != nil {
+			log.Printf("[settle] re-matching relisted order %s: %v", orderID, err)
+			return relisted, nil
+		}
+		return relisted, rematched
 	}
-	if evt.RelistedB, evt.RematchedB, err = applyLeg(orderB, orderA, bIsLarge, req.B); err != nil {
-		return err
+	ra, ma := rematch(j.OrderAID, j.ALarge)
+	rb, mb := rematch(j.OrderBID, j.BLarge)
+	if evt != nil {
+		evt.RelistedA, evt.RematchedA = ra, ma
+		evt.RelistedB, evt.RematchedB = rb, mb
 	}
+	_ = ot.DeleteSettleAddr(OrderID(j.OrderAID))
+	_ = ot.DeleteSettleAddr(OrderID(j.OrderBID))
+}
 
-	return ctx.EmitJsonEvent(evt)
+// recoverPendingSettlements completes settlements interrupted between the
+// payout mint (accounts.db) and the order-side updates (orders.db): for
+// every PENDING journal row whose notes are minted, it applies the order
+// updates; a PENDING row whose notes never minted is dropped (nothing
+// happened — the pair is still Settling and can be resubmitted).
+func (ot *OrderBook) recoverPendingSettlements() {
+	if ot.Account == nil {
+		log.Printf("[settle] recovery skipped: account tripod not wired yet")
+		return
+	}
+	rows, err := ot.PendingSettlementJournals()
+	if err != nil {
+		log.Printf("[settle] recovery scan failed: %v", err)
+		return
+	}
+	for i := range rows {
+		j := rows[i]
+		seen, err := ot.Account.SettlementMinted(j.SettlementID)
+		if err != nil {
+			log.Printf("[settle] recovery: reading mint record of %s: %v", j.SettlementID, err)
+			continue
+		}
+		if seen == nil {
+			// The crash happened before the mint: nothing to complete.
+			if err := ot.db.Delete(&SettlementJournalScheme{},
+				"settlement_id = ?", j.SettlementID).Error; err != nil {
+				log.Printf("[settle] recovery: dropping stale journal %s: %v", j.SettlementID, err)
+			}
+			continue
+		}
+		if err := ot.finishSettlementOrders(&j); err != nil {
+			log.Printf("[settle] recovery: completing %s: %v", j.SettlementID, err)
+			continue
+		}
+		ot.postSettlementCleanup(&j, nil)
+		log.Printf("[settle] recovered settlement %s after crash", j.SettlementID)
+	}
+}
+
+// InitChain runs on every boot (yu behavior): complete any settlement that
+// crashed between the pool mint and the order-side updates.
+func (ot *OrderBook) InitChain(block *types.Block) {
+	ot.recoverPendingSettlements()
 }
