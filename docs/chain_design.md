@@ -39,10 +39,14 @@ Design invariants:
    uncollateralized order.
 3. **Deterministic order ids.** `order_id = SHA-256(nf_0 ‖ nf_1)` over
    the two input nullifiers; the chain recomputes and rejects mismatches.
-4. **Matching is public and on-chain.** Prices are plaintext, so
-   `matchOrder` runs a deterministic priority rule (price → block height
-   → fee → intra-block index) with no cryptography. Matching is strictly
-   pairwise; all quantity work is deferred to settlement.
+4. **Matching is public, on-chain, and EQUAL-PRICE only.** Prices are
+   plaintext, so `matchOrder` runs a deterministic rule with no
+   cryptography: it pairs only orders with exactly equal prices (the
+   settle circuits require the execution price to equal the collateral
+   price, and a Matched pair has no cancel path), then block height →
+   fee → intra-block index. Crossing but unequal orders stay Pending.
+   Matching is strictly pairwise; all quantity work is deferred to
+   settlement.
 5. **Anchored disclosure (F1).** The smaller trader's quantity is
    revealed to the counterparty only after the pair is `Settling` on
    chain — the compare writing is the anchor.
@@ -117,9 +121,10 @@ over the whole request, mints the change note, accrues the plaintext fee
 to the block producer, stores the order
 (`Amount = cm_q`, `LockedCommitment`), and runs `matchOrder`.
 
-**Matching** — price priority, then block height, then fee, then
-intra-block index. A match links exactly two orders and sets both to
-`Matched`. Matched pairs are locked (no cancel path).
+**Matching** — equal price required, then block height, then fee, then
+intra-block index ([paper_deviations.md](paper_deviations.md) D6). A
+match links exactly two orders and sets both to `Matched`. Matched pairs
+are locked (no cancel path).
 
 **`SubmitCompareCoZk2p`** ([orderbook_cozk.go](../chain/core/orderbook_cozk.go),
 [orderbook_cozk2p.go](../chain/core/orderbook_cozk2p.go)) — records the
@@ -130,18 +135,24 @@ canonical compare message and the collaborative PLONK π_cmp (3 publics:
 `SubmitCompareCoZk` is the Groth16 single-prover variant of the same
 gate (fixtures/tests).
 
-**`SettlePair`** — the atomic settlement (F2). Verifies BOTH legs
-before touching state: each leg's owner signature plus its
-`settle_small` (π_A) or `settle_large` (π_B) proof, with publics rebuilt
-from the order rows (`cm_q`, the 2-slot collateral
+**`SettlePair`** — the ONLY settlement writing (F2; the unilateral
+`SettleSmall`/`SettleLarge` writings are not registered, so one signed
+leg alone can never pay out — [paper_deviations.md](paper_deviations.md)
+D3). It verifies BOTH legs before touching state: each leg's owner
+signature plus its `settle_small` (π_A) or `settle_large` (π_B) proof,
+with publics rebuilt from the order rows (`cm_q`, the 2-slot collateral
 `[LockedCommitment, Poseidon(0,0)]`, price, side, pay asset, outputs,
-bind). Then it mints both payout notes in ONE pool mutation, closes the
-fully filled side(s), and relists the larger side **in place**: same
-order id, `Amount`/`LockedCommitment` swapped to the residual
-commitments, match link cleared, status back to `Pending`, block height
-(time priority) retained, immediate re-match attempted.
-`SettleSmall`/`SettleLarge` remain as independent writings but the pair
-path is the default (see [paper_deviations.md](paper_deviations.md) D3).
+bind). The pipeline is journaled for crash consistency across the two
+databases: a settlement-journal row (orders.db) records the intent, the
+payout mint is idempotent per settlement id (accounts.db, one
+transaction with a settlement-seen row), and the order-side transitions
+commit in one orders.db transaction with the journal — a crash between
+the databases is completed exactly once by a retry or by the boot-time
+recovery (`recoverPendingSettlements`). The fully filled side closes;
+the larger side relists **in place**: same order id,
+`Amount`/`LockedCommitment` swapped to the residual commitments, match
+link cleared, status back to `Pending`, block height (time priority)
+retained, immediate re-match attempted.
 
 **`ClaimFees`** ([fees.go](../chain/core/fees.go)) — a block producer
 mints its accrued plaintext fees as a pool note with a `claim_fees`
@@ -158,9 +169,12 @@ anonymous overlay, see [paper_deviations.md](paper_deviations.md) D9).
 [zkverify.go](../chain/core/zkverify.go) wraps `go-rapidsnark` for the
 Groth16 circuits; [plonkverify.go](../chain/core/plonkverify.go) calls
 the cozk2p Rust staticlib over cgo for π_cmp. Every VK path comes from
-`core.toml`; an empty path skips verification (test mode). Set
-`require_proofs = true` so a production node refuses to boot with a
-missing VK instead of failing open.
+`core.toml`. The posture is FAIL-CLOSED: `require_proofs` defaults to
+true, so a missing VK path refuses to boot; dev/test configs must opt
+out explicitly with `require_proofs = false`. A missing or malformed
+core.toml is fatal (no default fallback), and a binary built without
+the cozk2p verifier refuses to boot on a config that sets
+`settle_cozk2p_vk_path`.
 
 ### 2.4 Consensus — [chain/consensus/](../chain/consensus/)
 
@@ -226,8 +240,7 @@ type Order struct {
 | orderbook | writing | `SendOrder` | admit + match an order (spends pool notes) |
 | orderbook | writing | `SubmitCompareCoZk2p` | record the dual-signed 2-party comparison (PLONK) |
 | orderbook | writing | `SubmitCompareCoZk` | Groth16 variant of the compare gate |
-| orderbook | writing | `SettlePair` | **atomic** two-leg settlement (default path) |
-| orderbook | writing | `SettleSmall` / `SettleLarge` | independent per-side settlement (non-default) |
+| orderbook | writing | `SettlePair` | **atomic** two-leg settlement (the ONLY settle writing) |
 | orderbook | writing | `ClaimFees` | producer mints accrued fees as a note |
 | orderbook | writing | `RegisterSettleAddr` | QUIC rendezvous (dev) |
 | orderbook | reading | `QueryOrders`, `QuerySettleAddr`, `QueryFees` | |

@@ -25,12 +25,12 @@ Legend for the **Effect** column:
 |---|---|---|---|---|
 | D1 | Compare submission | Two-step on-chain share assembly of π_cmp and `b` (§VI-B) | One `SubmitCompareCoZk2p` writing: the MPC opens the full π_cmp (MAC-checked), both traders sign `(order_a, order_b, cmp)`, either submits | Equal for integrity; **Weaker** for the `cmp` trit timing (see D1) |
 | D2 | Reveal ordering | Reveal after the chain publishes `b` (§VI-C) | Reveal only after `SubmitCompareCoZk2p` is confirmed and both orders are `Settling` (F1 gate) | Equal |
-| D3 | Settlement updates | Two independent per-side updates (§V-C, §VI-C) | One atomic `SettlePair` writing verifies both legs and mints both payout notes together (F2). Separate `SettleSmall`/`SettleLarge` writings still exist | **Stronger** (fair exchange) |
+| D3 | Settlement updates | Two independent per-side updates (§V-C, §VI-C) | One atomic `SettlePair` writing verifies both legs and mints both payout notes together (F2). The unilateral `SettleSmall`/`SettleLarge` writings are NOT registered — a party holding only the counterparty's signed leg cannot collect alone | **Stronger** (fair exchange) |
 | D4 | Liveness / challenge | Deadlines, freeze penalty, encrypted on-chain reveal challenge, adjudication (§VI-D) | Not implemented. Design only (hardening plan Phase C). `Frozen`/`Cancelled` states exist but are not wired | **Missing** |
 | D5 | Collateral shape | Order spends notes worth `p·q + f`; collateral stays in the shielded layer (§V-B) | Side-dependent collateral (`q` of token1 for a sell, `q·p` of token2 for a buy) carried as a `LockedCommitment` on the order row; fee paid from the same notes | Equal (concretization) |
-| D6 | Execution price | Crossing prices match; the executed price is not pinned (§V-C) | Only equal-price pairs settle (`co-zk settlement requires equal order prices`); cross-price matches are rejected at settle time | **Weaker** (scope restriction) |
+| D6 | Execution price | Crossing prices match; the executed price is not pinned (§V-C) | The MATCHER only pairs equal-price orders (crossing-but-unequal orders stay Pending), because the settle circuits require the execution price to equal the collateral price and a Matched pair has no cancel path | **Weaker** (scope restriction) |
 | D7 | Partial-fill relist | The residual becomes a **new** order `o'_B` (§V-C) | The chain relists the **same** order id in place with residual commitments; block height (time priority) is retained | **Stronger** (keeps priority; same privacy: fresh blindings) |
-| D8 | Matching rule | Price → block height → fee → intra-block index; pairwise (§V-C) | Identical | Equal |
+| D8 | Matching rule | Price → block height → fee → intra-block index; pairwise (§V-C) | Same priority chain, but the price dimension is an EQUALITY filter (D6): only equal-price candidates compete on height → fee → index | Equal (within D6's scope) |
 | D9 | P2P transport | Anonymous network (Tor) required (§III-A) | Direct QUIC; peer addresses exchanged in plaintext on chain (`RegisterSettleAddr`) | **Dev-only** |
 | D10 | MPC offline phase | SPDZ with a real preprocessing phase (§VI-A) | `PartyIDBeaverSource` mock triples: predictable masks, **no input privacy, no proof zero-knowledge** | **Dev-only** |
 | D11 | SNARK setup | Black-box collaborative zk-SNARK (§IV-B) | mpc-jellyfish TurboPlonk over a **fixed-seed dev SRS**: anyone can forge proofs | **Dev-only** |
@@ -87,13 +87,20 @@ session blocks in `confirm_compare_onchain` until both orders are
 In the paper each side submits its own update, so one leg can land while
 the other never does ("collected the payment, withheld its own"). The
 implementation adds a `SettlePair` writing that verifies both legs and
-applies both state changes in one transaction: both payout notes mint in
-a single pool mutation, or nothing changes. The traders exchange their
-single-prover legs over the still-open session channel, so either party
-can submit the pair. This closes the fair-exchange gap the paper leaves
-between the two independent updates; a party that withholds its leg only
-griefs symmetrically (both orders stay `Settling`), which is exactly the
-case D4's freeze mechanism is designed to price.
+applies both state changes together: both payout notes mint in a single
+pool mutation, or nothing changes. The unilateral `SettleSmall`/
+`SettleLarge` writings are not registered on the chain, so a party
+holding only the counterparty's signed leg cannot collect its payout
+alone. The traders exchange their single-prover legs over the still-open
+session channel, so either party can submit the pair. Because the order
+book and the note pool live in different databases, the writing is
+journaled: the payout mint is idempotent per settlement id, and the
+order-side updates commit in one transaction with the journal, so a
+crash between the two databases is completed exactly once by a retry or
+by the startup recovery. This closes the fair-exchange gap the paper
+leaves between the two independent updates; a party that withholds its
+leg only griefs symmetrically (both orders stay `Settling`), which is
+exactly the case D4's freeze mechanism is designed to price.
 
 ### D4 — Liveness and the challenge mechanism (not implemented)
 
@@ -121,8 +128,11 @@ The settle circuits open this commitment in a fixed 2-slot shape
 
 Because collateral is locked at the order's own price and the settle
 circuits equate that price with the execution price, only equal-price
-pairs can settle today. The paper's model (any crossing pair matches)
-would need a price-improvement change output in the settle circuits.
+pairs can settle today — so the MATCHER itself only pairs orders with
+exactly equal prices. Crossing but unequal orders stay Pending (a
+Matched pair has no cancel path; matching it would lock both sides
+forever). The paper's model (any crossing pair matches) needs a
+price-improvement change output in the settle circuits first.
 
 ### D7 — In-place relist
 
