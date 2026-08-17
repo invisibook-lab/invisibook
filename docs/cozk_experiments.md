@@ -247,3 +247,52 @@ verification ON on chain; 3 s block interval):
 Block waits (~2 blocks per on-chain step) dominate the end-to-end time;
 the cryptographic cost of the whole settlement is ~4 s of MPC/PLONK plus
 ~0.5 s of rapidsnark proofs per side.
+
+### Merged vs split settlement (A/B, `settle_e2e_relist` twins)
+
+The merged path ([cozk2p_design.md](cozk2p_design.md) §8) proves the
+comparison AND both settle legs in ONE collaborative proof
+(`relation_pair`, 16 384 gates vs the compare's 2 048). Same trade, same
+machine (24 cores, 29 GB, otherwise idle), same chain (3 s blocks), both
+flavors verified on chain. Numbers from one run of each e2e twin
+(2026-08-17, branch `cozk-merged-settle`):
+
+| step (ms) | split alice | split bob | merged alice | merged bob |
+|---|---|---|---|---|
+| MPC circuit build | 82 | 81 | 240 | 240 |
+| collaborative prove | 920 | 955 | 7078 | 6601 |
+| proof open (SPDZ MAC reveal) | 2647 | 2613 | 60540 | 61017 |
+| on-chain anchor wait (host) | 6014 | 6014 | 6065 | 6065 |
+| settle-leg exchange | 1 | 123 | — | — |
+| session subprocess total | 10112 | 10114 | 74336 | 74336 |
+| run_settle total (concurrent) | 20239 | 20239 | 80751 | 80751 |
+
+Reading of the numbers:
+
+- **Cryptographic wall clock: ~3.7 s split vs ~68 s merged (~18x).**
+  8x the gates cost far more than 8x: the open phase (which drains the
+  lazy dataflow, so it carries most Beaver-triple network rounds) grows
+  23x — the merged prove over QUIC is network-round bound, not
+  CPU bound. The in-process mock (memory channels) proves the same
+  merged relation in ~40 s less; see `tests/settle_pair_2p.rs`.
+- **On-chain interaction halves.** The merged flow needs ONE writing
+  (`SettlePairCoZk2p`) where the split flow needs two (compare +
+  SettlePair), which removes one block wait and the settle-leg
+  exchange. End to end the merged flow is still ~4x slower (80.8 s vs
+  20.2 s) because the MPC dominates.
+- **Proof size is identical** (769 B compressed — PLONK proofs are
+  constant size), so on-chain verification cost is flat; the chain
+  verified `settle_pair_cozk2p` in ~40 ms.
+- **Privacy is strictly stronger in the merged flow**: no quantity is
+  revealed to anyone before the settlement is final, and the post-
+  finality reveal shrinks from the smaller side's `(q, r)` opening to
+  the fill value alone.
+- Peak RSS per merged party: ~10 GB (vs ~1.7 GB split) — the 16 384-gate
+  MPC witness and the SRS-sized FFTs dominate.
+
+CAVEAT: one run per flavor on a dev SRS with mock Beaver triples; the
+relative shape (open-phase dominance, network-round scaling) is the
+robust signal, not the absolute milliseconds. A run under heavy CPU
+contention (load ~49 on 24 cores) did not finish the merged prove
+inside 15 minutes — the app watchdog for the merged mode is therefore
+60 minutes.
