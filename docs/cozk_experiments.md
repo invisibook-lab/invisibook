@@ -188,3 +188,55 @@ run on fresh ports. The per-process numbers above (witness ~670 ms, prove
 ~87 ms, RSS ~109 MB, proof 720 B) are from clean completed runs. In-memory
 3-party numbers are deterministic and are the primary compute-overhead
 measurement; they run in CI (`cargo test -p cozk`).
+
+## Hardened note-flow measurements (2026-08-16)
+
+Setup: 24-core WSL2 host, warm key/circuit caches, mock Beaver triples
+(PartyIDBeaverSource — DEV ONLY). Compare circuit: 2048 gates, PLONK
+proof 769 B compressed.
+
+### Groth16 circuits (rapidsnark, warm keys, mean of 3)
+
+| circuit | prove (ms) |
+|---|---|
+| note_deposit | 86 |
+| spend_withdraw | 185 |
+| send_order | 203 |
+| settle_small | 90 |
+| settle_large | 96 |
+| claim_fees | 86 |
+
+### Full 2-party session (`bench_settle2p`, mean of 3)
+
+| mode | total (ms) | build | prove | open | leg exchange |
+|---|---|---|---|---|---|
+| single-prover baseline | 385 | — | — | — | — |
+| mock in-process session | 3207 | 15 | 1093 | 2079 | ~0 |
+| QUIC 2-process (per party) | ~4300 | 64 | ~1040 | ~3020 | 1 |
+
+Peak RSS per QUIC party: ~1.7 GB. The F1 on-chain confirmation and the
+settle-leg round are host/chain waits; the bench reports them separately
+(`onchain_wait_ms`, `leg_exchange_ms`) so they never contaminate the
+cryptographic phases.
+
+### End-to-end settlement (`settle_e2e`, real chain + 2 real provers)
+
+One full trade (Alice sells 2 ETH @ 3, Bob buys 1 ETH; PLONK compare
+verification ON on chain; 3 s block interval):
+
+| step | alice (ms) | bob (ms) |
+|---|---|---|
+| send_order prove (rapidsnark) | 218 | 220 |
+| send_order submit → landed | 4009 | 6015 |
+| match wait (both Matched) | 4006 | 4006 |
+| π_cmp circuit build (MPC) | 74 | 74 |
+| π_cmp collaborative prove | 975 | 1003 |
+| π_cmp proof open | 2636 | 2612 |
+| compare on-chain wait (host, NOT crypto) | 6010 | 6009 |
+| settle-leg exchange (incl. peer prove wait) | 1 | 97 |
+| session subprocess total | 10026 | 12029 |
+| run_settle total (both, concurrent) | 24191 | 24191 |
+
+Block waits (~2 blocks per on-chain step) dominate the end-to-end time;
+the cryptographic cost of the whole settlement is ~4 s of MPC/PLONK plus
+~0.5 s of rapidsnark proofs per side.
