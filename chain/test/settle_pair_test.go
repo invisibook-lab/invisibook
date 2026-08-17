@@ -41,17 +41,8 @@ func TestSettlePairAtomic(t *testing.T) {
 	time.Sleep(6 * time.Second)
 
 	// --- Match: alice sells (maker, earlier block), bob buys ---
-	aliceETH := getAccount(t, alicePubkey, "ETH")
-	if len(aliceETH) != 1 {
-		t.Fatalf("expected 1 genesis ETH cash for alice, got %d", len(aliceETH))
-	}
-	bobUSDT := getAccount(t, bobPubkey, "USDT")
-	if len(bobUSDT) != 1 {
-		t.Fatalf("expected 1 genesis USDT cash for bob, got %d", len(bobUSDT))
-	}
-
 	sellReq := signedSendOrder(alicePriv, core.Sell, "ETH", "USDT",
-		3500, hexCommit(0xAA), alicePubkey, []string{aliceETH[0].ID})
+		3500, hexCommit(0xAA), alicePubkey, []string{"alice-eth-note"})
 	sellOrderID := sellReq.ID
 	if err := wrCall("orderbook", "SendOrder", sellReq); err != nil {
 		t.Fatalf("SendOrder (sell) failed: %v", err)
@@ -59,7 +50,7 @@ func TestSettlePairAtomic(t *testing.T) {
 	waitBlock()
 
 	buyReq := signedSendOrder(bobPriv, core.Buy, "ETH", "USDT",
-		3500, hexCommit(0xBB), bobPubkey, []string{bobUSDT[0].ID})
+		3500, hexCommit(0xBB), bobPubkey, []string{"bob-usdt-note"})
 	buyOrderID := buyReq.ID
 	if err := wrCall("orderbook", "SendOrder", buyReq); err != nil {
 		t.Fatalf("SendOrder (buy) failed: %v", err)

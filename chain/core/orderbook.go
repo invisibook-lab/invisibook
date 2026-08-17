@@ -34,7 +34,6 @@ type OrderBook struct {
 	Account        *Account `tripod:"account"`
 	db             *gorm.DB
 	chainID        uint64
-	splitVK        *CircuitVK
 	settleCoZkVK   *CircuitVK
 	settleCoZk2pVK *PlonkVK
 	settleSmallVK  *CircuitVK
@@ -48,10 +47,6 @@ type OrderBook struct {
 // DB init and VK loading panic on failure.
 func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	tri := tripod.NewTripodWithName("orderbook")
-	splitVK, err := LoadVK("split", cfg.SplitVKPath)
-	if err != nil {
-		panic(fmt.Sprintf("loading split VK: %v", err))
-	}
 	settleCoZkVK, err := LoadVK("settle_cozk", cfg.SettleCoZkVKPath)
 	if err != nil {
 		panic(fmt.Sprintf("loading settle_cozk VK: %v", err))
@@ -81,7 +76,6 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	// so a misconfigured node never accepts unverified settlements.
 	if cfg.RequireProofs {
 		for name, missing := range map[string]bool{
-			"split":         splitVK == nil,
 			"settle_cozk":   settleCoZkVK == nil,
 			"settle_cozk2p": settleCoZk2pVK == nil,
 			"settle_small":  settleSmallVK == nil,
@@ -98,7 +92,6 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 		Tripod:         tri,
 		db:             InitOrderDB(cfg.DBPath, ParseGormLogLevel(cfg.DBLogLevel)),
 		chainID:        cfg.ChainID,
-		splitVK:        splitVK,
 		settleCoZkVK:   settleCoZkVK,
 		settleCoZk2pVK: settleCoZk2pVK,
 		settleSmallVK:  settleSmallVK,

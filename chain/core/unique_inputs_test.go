@@ -40,28 +40,3 @@ func TestSendOrderNullifierShapeValidates(t *testing.T) {
 		t.Fatal("a request without two nullifier slots must fail validation")
 	}
 }
-
-// validWithdrawRequest returns a legacy cash withdraw passing validation.
-func validWithdrawRequest() *WithdrawRequest {
-	return &WithdrawRequest{
-		Pubkey:              "alice-pk",
-		Token:               "ETH",
-		Inputs:              []string{"cash-a", "cash-b"},
-		BridgeOutCommitment: strings.Repeat("a", 64),
-		OutputCommitments:   []string{strings.Repeat("b", 64), strings.Repeat("c", 64)},
-		ZkProof:             "proof",
-	}
-}
-
-// Duplicate inputs on the legacy withdraw path would let a client withdraw
-// twice the value of a single cash; the `unique` validator tag rejects it.
-func TestDuplicateWithdrawInputsRejected(t *testing.T) {
-	if err := Validator.Struct(validWithdrawRequest()); err != nil {
-		t.Fatalf("distinct withdraw inputs must validate, got: %v", err)
-	}
-	dup := validWithdrawRequest()
-	dup.Inputs = []string{"cash-a", "cash-a"}
-	if err := Validator.Struct(dup); err == nil {
-		t.Fatal("duplicate withdraw inputs must fail validation")
-	}
-}

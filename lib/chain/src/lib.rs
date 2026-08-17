@@ -1,6 +1,4 @@
-pub mod cash_store;
 pub mod chain;
-pub mod command;
 pub mod config;
 pub mod hd;
 #[cfg(not(target_os = "android"))]

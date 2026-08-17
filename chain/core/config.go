@@ -19,11 +19,10 @@ type Config struct {
 
 // OrderBookConfig holds configuration for the OrderBook tripod.
 //
-// `SplitVKPath` is the snarkjs `vk.json` for the split circuit (SendOrder).
 // `SettleCoZkVKPath` is the joint settle_cozk circuit whose single proof is
-// generated collaboratively by both traders (SettleOrdersCoZk writing).
+// generated collaboratively by both traders (SubmitCompareCoZk writing).
 // `SettleCoZk2pVKPath` is the ark-compressed PLONK verifying key of the
-// 2-party collaborative settlement (SettleOrdersCoZk2p writing; verification
+// 2-party collaborative settlement (SubmitCompareCoZk2p writing; verification
 // requires a chain binary built with `-tags cozk2p`).
 // `RequireProofs`, when true, makes an empty/missing settlement VK path a
 // startup error instead of silently skipping verification (see LoadVK's
@@ -33,7 +32,6 @@ type Config struct {
 // `DBLogLevel` controls GORM SQL logging: "silent", "error", "warn", "info".
 type OrderBookConfig struct {
 	DBPath             string `toml:"db_path"`
-	SplitVKPath        string `toml:"split_vk_path"`
 	SettleCoZkVKPath   string `toml:"settle_cozk_vk_path"`
 	SettleCoZk2pVKPath string `toml:"settle_cozk2p_vk_path"`
 	SettleSmallVKPath  string `toml:"settle_small_vk_path"`
@@ -47,9 +45,8 @@ type OrderBookConfig struct {
 
 // AccountConfig holds configuration for the Account tripod.
 //
-// `DepositVKPath`/`WithdrawVKPath` are the legacy cash circuits;
-// `NoteDepositVKPath`/`SpendWithdrawVKPath` are the shielded-pool circuits.
-// All point at snarkjs `vk.json` files.
+// `NoteDepositVKPath`/`SpendWithdrawVKPath` are the shielded-pool circuits
+// (snarkjs `vk.json` files).
 // `BridgeOperatorPubkey` (64-char ed25519 hex) gates NoteDeposit until the
 // real bridge inclusion proof lands: when set, every deposit must carry the
 // operator's signature; when empty, the check is skipped (dev only — a
@@ -60,25 +57,13 @@ type OrderBookConfig struct {
 // `ChainID` is copied from the top-level config by LoadConfig.
 type AccountConfig struct {
 	DBPath               string        `toml:"db_path"`
-	DepositVKPath        string        `toml:"deposit_vk_path"`
-	WithdrawVKPath       string        `toml:"withdraw_vk_path"`
 	NoteDepositVKPath    string        `toml:"note_deposit_vk_path"`
 	SpendWithdrawVKPath  string        `toml:"spend_withdraw_vk_path"`
 	BridgeOperatorPubkey string        `toml:"bridge_operator_pubkey"`
 	RequireProofs        bool          `toml:"require_proofs"`
 	DBLogLevel           string        `toml:"db_log_level"`
-	GenesisCash          []GenesisCash `toml:"genesis_cash"`
 	GenesisNote          []GenesisNote `toml:"genesis_note"`
 	ChainID              uint64        `toml:"-"`
-}
-
-// GenesisCash defines a Cash record to be inserted at chain initialization.
-// The ID is explicit — no derivation happens on-chain.
-type GenesisCash struct {
-	ID     string `toml:"id"`
-	Pubkey string `toml:"pubkey"`
-	Token  string `toml:"token"`
-	Amount string `toml:"amount"`
 }
 
 // GenesisNote defines one shielded-pool leaf seeded at chain init. Leaves

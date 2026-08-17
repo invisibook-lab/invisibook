@@ -2,7 +2,7 @@
 #
 # Usage:
 #   CLI:     invisibook --config tests/alice.toml
-#   Desktop: Import mnemonic below, then import tests/alice_cash.json
+#   Desktop: Import mnemonic below, then import tests/alice_notes.json
 #
 # Mnemonic: test test test test test test test test test test test junk
 # Derived path: m/44'/60'/0'/0'/0'

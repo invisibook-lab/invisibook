@@ -237,30 +237,18 @@ func TestFullOrderLifecycle(t *testing.T) {
 		}()
 	}
 
-	// ═══════════════════ Step 1: Query genesis accounts ═══════════════════
-	t.Log("=== Step 1: Query genesis accounts ===")
-
-	aliceETH := getAccount(t, alicePubkey, "ETH")
-	t.Logf("Alice ETH cash: %d items", len(aliceETH))
-	if len(aliceETH) != 1 {
-		t.Fatalf("expected 1 ETH cash for alice, got %d", len(aliceETH))
-	}
-	aliceETHCashID := aliceETH[0].ID
-	t.Logf("  cash_id=%s amount=%s", aliceETHCashID, aliceETH[0].Amount)
-
-	bobUSDT := getAccount(t, bobPubkey, "USDT")
-	t.Logf("Bob USDT cash: %d items", len(bobUSDT))
-	if len(bobUSDT) != 1 {
-		t.Fatalf("expected 1 USDT cash for bob, got %d", len(bobUSDT))
-	}
-	bobUSDTCashID := bobUSDT[0].ID
-	t.Logf("  cash_id=%s amount=%s", bobUSDTCashID, bobUSDT[0].Amount)
+	// ═══════════════════ Step 1: Note-model funding ═══════════════════
+	// v2 orders spend pool notes by nullifier; in test mode (proof checks
+	// skipped) the nullifiers are derived from per-trader tag strings.
+	t.Log("=== Step 1: Note-model funding (nullifier tags) ===")
+	aliceTag := "alice-eth-note"
+	bobTag := "bob-usdt-note"
 
 	// ═══════════════════ Step 2: Alice sells 1 ETH at price 3500 ═══════════════════
 	t.Log("=== Step 2: Alice sells ETH/USDT at price 3500 ===")
 
 	sellReq := signedSendOrder(alicePriv, core.Sell, "ETH", "USDT",
-		3500, "1000", alicePubkey, []string{aliceETHCashID})
+		3500, "1000", alicePubkey, []string{aliceTag})
 	sellOrderID := sellReq.ID
 	t.Logf("  sell order ID: %s", sellOrderID)
 
@@ -289,7 +277,7 @@ func TestFullOrderLifecycle(t *testing.T) {
 	t.Log("=== Step 3: Bob buys ETH/USDT at price 3500 (should match) ===")
 
 	buyReq := signedSendOrder(bobPriv, core.Buy, "ETH", "USDT",
-		3500, "500000", bobPubkey, []string{bobUSDTCashID})
+		3500, "500000", bobPubkey, []string{bobTag})
 	buyOrderID := buyReq.ID
 	t.Logf("  buy order ID: %s", buyOrderID)
 
@@ -362,43 +350,11 @@ func TestFullOrderLifecycle(t *testing.T) {
 		t.Fatalf("expected bob addr '127.0.0.1:9002', got %q", bobAddr)
 	}
 
-	t.Log("=== All steps passed: deposit, split, SendOrder, matching, rendezvous. ===")
+	t.Log("=== All steps passed: SendOrder (note model), matching, rendezvous. ===")
 	t.Log("Settlement coverage lives in cozk_e2e_test.go and cozk2p_real_proof_test.go.")
 }
 
 // ────────────────────── Helpers ──────────────────────
-
-type CashItem struct {
-	ID      string `json:"id"`
-	Pubkey  string `json:"pubkey"`
-	Token   string `json:"token"`
-	Amount  string `json:"amount"`
-	ZkProof string `json:"zk_proof"`
-	Status  int    `json:"status"`
-	By      string `json:"by"`
-}
-
-type AccountResp struct {
-	Pubkey string     `json:"pubkey"`
-	Token  string     `json:"token"`
-	Cash   []CashItem `json:"cash"`
-}
-
-func getAccount(t *testing.T, pubkey, token string) []CashItem {
-	t.Helper()
-	data, err := rdCall("account", "GetAccount", map[string]string{
-		"pubkey": pubkey,
-		"token":  token,
-	})
-	if err != nil {
-		t.Fatalf("GetAccount failed: %v", err)
-	}
-	var resp AccountResp
-	if err := json.Unmarshal(data, &resp); err != nil {
-		t.Fatalf("parse GetAccount response failed: %v\nraw: %s", err, string(data))
-	}
-	return resp.Cash
-}
 
 type OrderItem struct {
 	ID               string `json:"id"`

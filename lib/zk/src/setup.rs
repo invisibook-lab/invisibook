@@ -176,8 +176,8 @@ fn snarkjs(args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn deposit_dev_setup_produces_zkey_and_vk() {
-        let setup = super::dev_setup_snarkjs("deposit").expect("snarkjs setup must succeed");
+    fn note_deposit_dev_setup_produces_zkey_and_vk() {
+        let setup = super::dev_setup_snarkjs("note_deposit").expect("snarkjs setup must succeed");
         assert!(setup.zkey.exists(), "zkey should exist at {:?}", setup.zkey);
         assert!(
             setup.vk_json.exists(),
@@ -190,8 +190,9 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&setup.vk_json).unwrap()).unwrap();
         assert_eq!(vk["protocol"], "groth16");
         assert_eq!(vk["curve"], "bn128");
-        // deposit.circom has 3 public signals (bridge_commitment + 2 output_hashes)
-        assert_eq!(vk["nPublic"].as_u64(), Some(3));
+        // note_deposit.circom has 4 public signals:
+        // [bridge_commitment, asset_id, cm_out, bind].
+        assert_eq!(vk["nPublic"].as_u64(), Some(4));
         assert!(vk["IC"].is_array(), "IC array required for verification");
     }
 }
