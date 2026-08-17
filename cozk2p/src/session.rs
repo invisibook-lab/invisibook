@@ -52,18 +52,12 @@ use crate::{
     relation::{SettlePublic, SidePrivate},
 };
 
-/// Maximum locked collateral cashes per side (2-slot shape on chain).
+/// Locked collateral slots per side (2-slot circuit shape; slot 1 is
+/// always the zero-commitment pad in the note model).
 pub const MAX_LOCKED: usize = 2;
 
-/// One locked collateral cash of this trader: plaintext amount + blinding.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct LockedCash {
-    pub amount: u64,
-    /// 64-char hex of the 32-byte blinding factor.
-    pub random: String,
-}
-
-/// This trader's private witness material.
+/// This trader's private witness material (note model): the openings of
+/// its on-chain `Order.Amount` (cm_q) and `Order.LockedCommitment` rows.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MyPrivate {
     /// Hidden order amount (token1 quantity), the value `Order.Amount`
@@ -71,8 +65,11 @@ pub struct MyPrivate {
     pub order_amount: u64,
     /// 64-char hex blinding of the on-chain order commitment.
     pub r_order: String,
-    /// Locked collateral cashes, 1..=2 entries.
-    pub locked: Vec<LockedCash>,
+    /// Hidden collateral value the on-chain `Order.LockedCommitment`
+    /// commits to (= q for a sell, q·price for a buy).
+    pub locked_amount: u64,
+    /// 64-char hex blinding of the on-chain collateral commitment.
+    pub r_locked: String,
 }
 
 /// Everything the app hands the session binary. Public fields must be
@@ -88,7 +85,6 @@ pub struct SessionInput {
     pub order_a_id: String,
     pub order_b_id: String,
     pub my_order_id: String,
-    pub my_input_cash_ids: Vec<String>,
     pub my_lock_token: String,
     pub my_recv_token: String,
     pub price: u64,
@@ -96,7 +92,8 @@ pub struct SessionInput {
     /// On-chain `Order.Amount` commitment hexes of the two orders.
     pub order_a: String,
     pub order_b: String,
-    /// On-chain locked cash commitment hexes, zero-commitment padded to 2.
+    /// Each order's collateral in the 2-slot circuit shape:
+    /// `[Order.LockedCommitment, Poseidon(0,0) pad]`.
     pub locked_a: [String; 2],
     pub locked_b: [String; 2],
     /// 64-char hex Fr: this wallet's fresh receiving key for its payout
@@ -154,7 +151,6 @@ pub struct SessionWitness {
     pub order_a_id: String,
     pub order_b_id: String,
     pub my_order_id: String,
-    pub my_input_cash_ids: Vec<String>,
     pub my_lock_token: String,
     pub my_recv_token: String,
     pub cmp: i8,
@@ -175,6 +171,11 @@ pub struct SessionResult {
     pub sig_b: String,
     pub my: MyOutcome,
     pub timings: ProveTimings,
+    /// Wall-clock the session spent BLOCKED in the host's
+    /// `confirm_compare_onchain` hook (chain latency, NOT cryptography —
+    /// report it separately from the MPC/prove phases).
+    #[serde(default)]
+    pub onchain_wait_ms: f64,
 }
 
 /// The payload the host app must sign: just the comparison result (the
@@ -240,20 +241,23 @@ fn commitment_fr(s: &str, what: &str) -> Result<Fr> {
     Ok(Fr::from_be_bytes_mod_order(&hex32(s, what)?))
 }
 
+/// The zero-commitment pad `Poseidon(0, 0)` in the 64-char hex form the
+/// chain stores. Slot 1 of every collateral pair must equal it.
+pub fn poseidon_zero_commitment_hex() -> String {
+    fr_to_hex(&commit(0, &[0u8; 32]))
+}
+
 /// Local pre-network sanity: this trader's witness must open its own side
-/// of the chain-sourced public inputs, and the collateral must exactly back
-/// the order at the execution price. Distinct error strings keep failures
-/// attributable (corrupt local records vs stale chain reads).
+/// of the chain-sourced public inputs (the order commitment and the
+/// order-bound collateral commitment), and the collateral must exactly
+/// back the order at the execution price. Distinct error strings keep
+/// failures attributable (corrupt local records vs stale chain reads).
 pub fn sanity_check_input(input: &SessionInput) -> Result<()> {
     ensure!(
         input.role == "trader-a" || input.role == "trader-b",
         "role must be trader-a or trader-b"
     );
     let i_am_a = input.role == "trader-a";
-    ensure!(
-        !input.my.locked.is_empty() && input.my.locked.len() <= MAX_LOCKED,
-        "locked cash count must be 1..={MAX_LOCKED}"
-    );
     // The recv npk must be a well-formed field element hex.
     commitment_fr(&input.my_recv_npk, "my_recv_npk")?;
 
@@ -267,37 +271,36 @@ pub fn sanity_check_input(input: &SessionInput) -> Result<()> {
     let opened = fr_to_hex(&commit(input.my.order_amount, &r_order));
     ensure!(
         &opened == my_order_hex,
-        "corrupt local cash records: witness does not open the on-chain order commitment"
+        "corrupt local order records: witness does not open the on-chain order commitment"
     );
 
-    // Each locked slot must open its chain hex (zero-pad slots included).
+    // Slot 0 must open the order's collateral commitment; slot 1 must be
+    // the zero pad (note model: exactly one real collateral slot).
     let my_locked_hex = if i_am_a {
         &input.locked_a
     } else {
         &input.locked_b
     };
-    for (slot, hex_expected) in my_locked_hex.iter().enumerate() {
-        let (amount, random) = match input.my.locked.get(slot) {
-            Some(l) => (l.amount, hex32(&l.random, "locked random")?),
-            None => (0, [0u8; 32]),
-        };
-        let opened = fr_to_hex(&commit(amount, &random));
-        ensure!(
-            &opened == hex_expected,
-            "corrupt local cash records: locked slot {slot} does not open its on-chain commitment"
-        );
-    }
+    let r_locked = hex32(&input.my.r_locked, "r_locked")?;
+    let opened_locked = fr_to_hex(&commit(input.my.locked_amount, &r_locked));
+    ensure!(
+        opened_locked == my_locked_hex[0],
+        "corrupt local order records: witness does not open the on-chain collateral commitment"
+    );
+    ensure!(
+        my_locked_hex[1] == poseidon_zero_commitment_hex(),
+        "collateral slot 1 must be the zero-commitment pad"
+    );
 
     // Collateral backing at the execution price (equal-price limitation).
     let i_am_seller = i_am_a == input.a_is_seller;
-    let locked_sum: u128 = input.my.locked.iter().map(|l| l.amount as u128).sum();
     let needed: u128 = if i_am_seller {
         input.my.order_amount as u128
     } else {
         input.my.order_amount as u128 * input.price as u128
     };
     ensure!(
-        locked_sum == needed,
+        input.my.locked_amount as u128 == needed,
         "collateral does not back the order at the execution price"
     );
     Ok(())
@@ -528,7 +531,9 @@ where
         "compare-onchain",
         "landing the comparison on chain before any reveal",
     );
+    let onchain_start = std::time::Instant::now();
     tokio::task::block_in_place(|| sig_io.confirm_compare_onchain(&ready))?;
+    let onchain_wait_ms = onchain_start.elapsed().as_secs_f64() * 1e3;
 
     // ── The smaller party reveals its opening (compare is now ON-CHAIN;
     //    the larger side's π_B must open the smaller's commitment) ──
@@ -639,7 +644,6 @@ where
             order_a_id: input.order_a_id.clone(),
             order_b_id: input.order_b_id.clone(),
             my_order_id: input.my_order_id.clone(),
-            my_input_cash_ids: input.my_input_cash_ids.clone(),
             my_lock_token: input.my_lock_token.clone(),
             my_recv_token: input.my_recv_token.clone(),
             cmp,
@@ -690,7 +694,145 @@ where
         sig_b,
         my: my_outcome,
         timings,
+        onchain_wait_ms,
     })
+}
+
+// ────────────────────── Settle-leg exchange (SettlePair) ──────────────────────
+
+/// One side's settle artifacts for the atomic `SettlePair` writing, as the
+/// host app assembles them AFTER the session (its own single-prover settle
+/// proof + owner signature). Residual fields are empty for a fully filled
+/// leg. Mirrors the chain's `SettlePairLeg` JSON.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SettleLeg {
+    /// True when this leg belongs to order A (the maker side).
+    pub is_a: bool,
+    pub cm_note_out: String,
+    pub signature: String,
+    pub zk_proof: String,
+    #[serde(default)]
+    pub cm_q_residual: String,
+    #[serde(default)]
+    pub cm_locked_residual: String,
+}
+
+/// Chunk arbitrary bytes into 16-byte big-endian scalars (each far below
+/// the BN254 modulus, so the round-trip is exact). The final chunk is
+/// zero-padded; the true length travels separately.
+fn bytes_to_scalars(bytes: &[u8]) -> Vec<Scalar<G1Projective>> {
+    bytes
+        .chunks(16)
+        .map(|c| {
+            let mut buf = [0u8; 16];
+            buf[..c.len()].copy_from_slice(c);
+            Scalar::from_be_bytes_mod_order(&buf)
+        })
+        .collect()
+}
+
+/// Reassemble bytes from 16-byte scalar limbs, truncating to `len`. Each
+/// limb must fit 16 bytes (its high half zero) or the peer sent garbage.
+fn scalars_to_bytes(limbs: &[Scalar<G1Projective>], len: usize) -> Result<Vec<u8>> {
+    ensure!(
+        len <= limbs.len() * 16,
+        "peer-announced length exceeds the transported payload"
+    );
+    let mut raw = Vec::with_capacity(limbs.len() * 16);
+    for limb in limbs {
+        let be = limb.to_bytes_be();
+        ensure!(be.len() == 32, "unexpected scalar encoding length");
+        ensure!(
+            be[..16].iter().all(|b| *b == 0),
+            "payload limb exceeds 16 bytes"
+        );
+        raw.extend_from_slice(&be[16..]);
+    }
+    raw.truncate(len);
+    Ok(raw)
+}
+
+/// Exchange one arbitrary byte payload per party over the fabric: two
+/// plaintext rounds (lengths, then 16-byte-chunked payloads). Both parties
+/// must call it with the same round structure; returns (A's, B's) bytes.
+async fn exchange_bytes(
+    fabric: &MpcFabric<G1Projective>,
+    my_party: u64,
+    mine: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let i_am_a = my_party == PARTY0;
+    let zero = Scalar::from(0u64);
+    // Round 1: lengths.
+    let my_len = Scalar::from(mine.len() as u64);
+    let pick_len = |owner_is_a: bool| if owner_is_a == i_am_a { my_len } else { zero };
+    let len_a = fabric.share_plaintext(pick_len(true), PARTY0);
+    let len_b = fabric.share_plaintext(pick_len(false), PARTY1);
+    let (len_a, len_b) = (len_a.await, len_b.await);
+    let len_a = scalar_to_u64(&len_a, "A payload length")? as usize;
+    let len_b = scalar_to_u64(&len_b, "B payload length")? as usize;
+    // Cap: a settle leg (proof JSON + signature) is a few KB; 1 MB is
+    // already far beyond any legitimate payload.
+    ensure!(
+        len_a <= 1 << 20 && len_b <= 1 << 20,
+        "peer announced an oversized payload"
+    );
+
+    // Round 2: payloads, dummy-padded so both parties enqueue identical
+    // network ops (the fabric requires aligned op streams).
+    let my_limbs = bytes_to_scalars(mine);
+    let (my_len_bytes, ctr_len_bytes) = if i_am_a {
+        (len_a, len_b)
+    } else {
+        (len_b, len_a)
+    };
+    ensure!(
+        my_len_bytes == mine.len(),
+        "own length did not round-trip through the fabric"
+    );
+    let dummy = vec![zero; ctr_len_bytes.div_ceil(16)];
+    let pick_limbs = |owner_is_a: bool| {
+        if owner_is_a == i_am_a {
+            my_limbs.clone()
+        } else {
+            dummy.clone()
+        }
+    };
+    let limbs_a: Vec<Scalar<G1Projective>> = fabric.share_plaintext(pick_limbs(true), PARTY0).await;
+    let limbs_b: Vec<Scalar<G1Projective>> =
+        fabric.share_plaintext(pick_limbs(false), PARTY1).await;
+    let bytes_a = scalars_to_bytes(&limbs_a, len_a)?;
+    let bytes_b = scalars_to_bytes(&limbs_b, len_b)?;
+    let mine_echo = if i_am_a { &bytes_a } else { &bytes_b };
+    ensure!(
+        mine_echo.as_slice() == mine,
+        "own payload did not round-trip through the fabric"
+    );
+    Ok((bytes_a, bytes_b))
+}
+
+/// Exchange the two settle legs over the still-open session fabric so
+/// EITHER party can submit the atomic `SettlePair`. `my_leg.is_a` must
+/// match this party's role (PARTY0 = A). Returns (leg_a, leg_b).
+pub async fn exchange_settle_legs(
+    fabric: &MpcFabric<G1Projective>,
+    my_party: u64,
+    my_leg: &SettleLeg,
+) -> Result<(SettleLeg, SettleLeg)> {
+    ensure!(
+        my_leg.is_a == (my_party == PARTY0),
+        "leg role does not match fabric party id"
+    );
+    let mine = serde_json::to_vec(my_leg).context("serializing settle leg")?;
+    let (bytes_a, bytes_b) = exchange_bytes(fabric, my_party, &mine).await?;
+    let leg_a: SettleLeg =
+        serde_json::from_slice(&bytes_a).context("parsing A's settle leg from peer")?;
+    let leg_b: SettleLeg =
+        serde_json::from_slice(&bytes_b).context("parsing B's settle leg from peer")?;
+    ensure!(
+        leg_a.is_a && !leg_b.is_a,
+        "exchanged legs carry inconsistent roles"
+    );
+    Ok((leg_a, leg_b))
 }
 
 #[cfg(test)]

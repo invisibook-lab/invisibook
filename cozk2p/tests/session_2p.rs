@@ -13,8 +13,8 @@ use cozk2p::{
     dev_keys,
     poseidon::{commit, fr_to_hex},
     session::{
-        CompareReady, LockedCash, MyPrivate, NeedSig, SessionConfig, SessionInput, SigIo,
-        run_session,
+        CompareReady, MyPrivate, NeedSig, SessionConfig, SessionInput, SettleLeg, SigIo,
+        exchange_settle_legs, run_session,
     },
     verify_settle,
 };
@@ -66,7 +66,6 @@ fn inputs() -> (SessionInput, SessionInput) {
         } else {
             "order-b".into()
         },
-        my_input_cash_ids: vec![format!("{role}-cash")],
         my_lock_token: if role == "trader-a" { "ETH" } else { "USDT" }.into(),
         my_recv_token: if role == "trader-a" { "USDT" } else { "ETH" }.into(),
         price,
@@ -83,10 +82,8 @@ fn inputs() -> (SessionInput, SessionInput) {
         MyPrivate {
             order_amount: 80,
             r_order: hex::encode([0xA1u8; 32]),
-            locked: vec![LockedCash {
-                amount: 80,
-                random: hex::encode([0xA3u8; 32]),
-            }],
+            locked_amount: 80,
+            r_locked: hex::encode([0xA3u8; 32]),
         },
     );
     let b = base(
@@ -94,10 +91,8 @@ fn inputs() -> (SessionInput, SessionInput) {
         MyPrivate {
             order_amount: 60,
             r_order: hex::encode([0xB1u8; 32]),
-            locked: vec![LockedCash {
-                amount: 180,
-                random: hex::encode([0xB3u8; 32]),
-            }],
+            locked_amount: 180,
+            r_locked: hex::encode([0xB3u8; 32]),
         },
     );
     (a, b)
@@ -125,7 +120,8 @@ async fn session_happy_path() {
         let (dir_a, dir_b) = (dir_a.clone(), dir_b.clone());
         async move {
             let party = fabric.party_id();
-            let (input, dir, sig) = if party == PARTY0 {
+            let i_am_a = party == PARTY0;
+            let (input, dir, sig) = if i_am_a {
                 (input_a, dir_a, SIG_A)
             } else {
                 (input_b, dir_b, SIG_B)
@@ -145,12 +141,26 @@ async fn session_happy_path() {
             )
             .await
             .expect("session must succeed on the honest sample trade");
-            (result, sig_io.seen)
+            // Post-session settle-leg exchange over the SAME fabric (the
+            // SettlePair path): each party contributes its own leg and must
+            // receive both, identically ordered.
+            let my_leg = SettleLeg {
+                is_a: i_am_a,
+                cm_note_out: result.my.recv_commitment.clone(),
+                signature: sig.to_string(),
+                zk_proof: format!("proof-of-{}", input.role),
+                cm_q_residual: result.my.new_order_commitment.clone(),
+                cm_locked_residual: result.my.new_locked_commitment.clone(),
+            };
+            let legs = exchange_settle_legs(&fabric, party, &my_leg)
+                .await
+                .expect("leg exchange must succeed");
+            (result, sig_io.seen, legs)
         }
     })
     .await;
-    let (result_a, need_a) = res_a;
-    let (result_b, need_b) = res_b;
+    let (result_a, need_a, legs_a) = res_a;
+    let (result_b, need_b, legs_b) = res_b;
 
     // Identical public statement, proof, and signatures on both sides.
     assert_eq!(result_a.cmp, 1);
@@ -223,6 +233,24 @@ async fn session_happy_path() {
     assert_eq!(result_b.my.ctr_recv_npk, result_a.my.recv_npk);
     assert_eq!(result_b.my.ctr_r_recv, result_a.my.r_recv);
 
+    // Both parties hold the SAME (leg_a, leg_b) pair, each leg authored by
+    // its own side — either party can now submit the atomic SettlePair.
+    for legs in [&legs_a, &legs_b] {
+        assert!(legs.0.is_a && !legs.1.is_a);
+        assert_eq!(legs.0.zk_proof, "proof-of-trader-a");
+        assert_eq!(legs.1.zk_proof, "proof-of-trader-b");
+        assert_eq!(legs.0.cm_note_out, result_a.my.recv_commitment);
+        assert_eq!(legs.1.cm_note_out, result_b.my.recv_commitment);
+    }
+    assert_eq!(
+        serde_json::to_string(&legs_a.0).unwrap(),
+        serde_json::to_string(&legs_b.0).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_string(&legs_a.1).unwrap(),
+        serde_json::to_string(&legs_b.1).unwrap()
+    );
+
     // The witness WAL landed on disk for both parties, consistent with the
     // final result.
     for (dir, result) in [(&dir_a, &result_a), (&dir_b, &result_b)] {
@@ -235,6 +263,78 @@ async fn session_happy_path() {
         );
     }
 
+    let _ = fs::remove_dir_all(&dir_a);
+    let _ = fs::remove_dir_all(&dir_b);
+}
+
+/// SigIo whose on-chain confirm always fails: models a compare that never
+/// lands (chain down, counterparty griefing, host abort).
+struct AbortingSigIo {
+    sig: &'static str,
+}
+
+impl SigIo for AbortingSigIo {
+    fn request_sig(&mut self, _need: &NeedSig) -> Result<String> {
+        Ok(self.sig.to_string())
+    }
+
+    fn confirm_compare_onchain(&mut self, _ready: &CompareReady) -> Result<()> {
+        Err(anyhow::anyhow!("compare did not land on chain"))
+    }
+}
+
+/// F1 ordering: when the compare cannot be confirmed on chain, the session
+/// aborts BEFORE the smaller side reveals — no payout-note material is
+/// derived and no witness WAL is written (nothing secret left the process).
+#[tokio::test(flavor = "multi_thread")]
+async fn compare_abort_precedes_any_reveal() {
+    let (input_a, input_b) = inputs();
+    let (pk, vk) = dev_keys(&cozk2p::default_cache_dir()).unwrap();
+    let dir_a = out_dir("abort-a");
+    let dir_b = out_dir("abort-b");
+
+    let (err_a, err_b) = execute_mock_mpc(|fabric| {
+        let (input_a, input_b, pk, vk) = (input_a.clone(), input_b.clone(), pk.clone(), vk.clone());
+        let (dir_a, dir_b) = (dir_a.clone(), dir_b.clone());
+        async move {
+            let party = fabric.party_id();
+            let (input, dir, sig) = if party == PARTY0 {
+                (input_a, dir_a, SIG_A)
+            } else {
+                (input_b, dir_b, SIG_B)
+            };
+            let mut sig_io = AbortingSigIo { sig };
+            run_session(
+                fabric.clone(),
+                party,
+                &input,
+                &mut sig_io,
+                SessionConfig {
+                    pk: &pk,
+                    vk: &vk,
+                    out_dir: &dir,
+                },
+                |_, _| {},
+            )
+            .await
+            .err()
+            .map(|e| e.to_string())
+        }
+    })
+    .await;
+
+    for err in [err_a, err_b] {
+        let msg = err.expect("both parties must abort when the compare cannot land");
+        assert!(
+            msg.contains("compare did not land on chain"),
+            "unexpected error: {msg}"
+        );
+    }
+    // No WAL: the reveal (and everything after it) never ran.
+    assert!(
+        !dir_a.join("witness.json").exists() && !dir_b.join("witness.json").exists(),
+        "an aborted compare must leave no witness WAL"
+    );
     let _ = fs::remove_dir_all(&dir_a);
     let _ = fs::remove_dir_all(&dir_b);
 }

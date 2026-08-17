@@ -5,11 +5,16 @@
 //! The host app drives this binary over piped stdio:
 //! - stdout: JSON lines — `{"event":"phase",...}` progress, one
 //!   `{"event":"need_sig",...}` request, one `{"event":"compare_ready",...}`
-//!   request (carries π_cmp + both sigs), and a final `{"event":"done"}`.
-//! - stdin: one line `{"sig":"<128-hex>"}` answering `need_sig`, then one
-//!   line `{"compare_confirmed":true}` after the host lands the compare on
-//!   chain. The reveal happens ONLY after that confirmation, so no secret
-//!   precedes the on-chain anchor.
+//!   request (carries π_cmp + both sigs), one `{"event":"result_ready"}`
+//!   (result.json is on disk; the host proves its own settle leg), one
+//!   `{"event":"pair_ready","a":...,"b":...}` (both legs exchanged over the
+//!   still-open QUIC fabric, ready for an atomic SettlePair), and a final
+//!   `{"event":"done"}`.
+//! - stdin: one line `{"sig":"<128-hex>"}` answering `need_sig`, one line
+//!   `{"compare_confirmed":true}` after the host lands the compare on
+//!   chain (the reveal happens ONLY after that confirmation, so no secret
+//!   precedes the on-chain anchor), and one line `{"settle_leg":{...}}`
+//!   answering `result_ready`.
 //!
 //! Files written to --out-dir: `witness.json` (crash-recovery record,
 //! written BEFORE the signature leaves this process), `result.json` (the
@@ -38,7 +43,8 @@ use cozk2p::{
     default_cache_dir, dev_keys,
     net::connect_retry,
     session::{
-        CompareReady, NeedSig, SessionConfig, SessionInput, SigIo, run_session, sanity_check_input,
+        CompareReady, NeedSig, SessionConfig, SessionInput, SettleLeg, SigIo, exchange_settle_legs,
+        run_session, sanity_check_input,
     },
     stats::peak_rss_bytes,
 };
@@ -213,7 +219,7 @@ async fn main() -> Result<()> {
         compare_timeout: Duration::from_secs(300),
     };
     let result = run_session(
-        fabric,
+        fabric.clone(),
         party,
         &input,
         &mut sig_io,
@@ -225,7 +231,6 @@ async fn main() -> Result<()> {
         |name, msg| emit_phase(name, msg),
     )
     .await?;
-    let total_ms = total_start.elapsed().as_secs_f64() * 1e3;
 
     fs::create_dir_all(&out_dir)?;
     fs::write(
@@ -233,12 +238,36 @@ async fn main() -> Result<()> {
         serde_json::to_string_pretty(&result)?,
     )
     .context("writing result.json")?;
+
+    // ── Settle-leg exchange over the still-open fabric: the host reads
+    //    result.json, proves ITS settle circuit, and hands the leg back;
+    //    both parties then hold both legs, so either can submit the atomic
+    //    SettlePair. ──
+    emit_line(json!({"event": "result_ready"}));
+    let leg_line = read_stdin_line(Duration::from_secs(600), "the settle leg")?;
+    #[derive(serde::Deserialize)]
+    struct LegLine {
+        settle_leg: SettleLeg,
+    }
+    let parsed: LegLine =
+        serde_json::from_str(leg_line.trim()).context("parsing settle leg line from host")?;
+    emit_phase("leg-exchange", "exchanging settle legs with the peer");
+    let leg_start = Instant::now();
+    let (leg_a, leg_b) = exchange_settle_legs(&fabric, party, &parsed.settle_leg).await?;
+    let leg_exchange_ms = leg_start.elapsed().as_secs_f64() * 1e3;
+    emit_line(json!({"event": "pair_ready", "a": leg_a, "b": leg_b}));
+
+    let total_ms = total_start.elapsed().as_secs_f64() * 1e3;
     let stats = json!({
         "role": input.role,
         "cmp": result.cmp,
         "build_ms": result.timings.build_ms,
         "prove_ms": result.timings.prove_ms,
         "open_ms": result.timings.open_ms,
+        // Chain/host latencies, kept OUT of the cryptographic phases above:
+        // the F1 on-chain compare confirmation and the settle-leg round.
+        "compare_onchain_wait_ms": result.onchain_wait_ms,
+        "leg_exchange_ms": leg_exchange_ms,
         "total_ms": total_ms,
         "peak_rss_bytes": peak_rss_bytes(),
         "proof_size_bytes_compressed": result.proof_hex.len() / 2,
