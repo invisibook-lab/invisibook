@@ -117,6 +117,11 @@ impl NoteStore {
         self.records.iter_mut().find(|r| r.cm == cm)
     }
 
+    /// Keep only the records matching `f` (rollback of stillborn records).
+    pub fn retain(&mut self, f: impl FnMut(&NoteRecord) -> bool) {
+        self.records.retain(f);
+    }
+
     /// All unspent notes of `token`, largest first (coin selection order).
     pub fn unspent(&self, token: &str) -> Vec<&NoteRecord> {
         let mut out: Vec<&NoteRecord> = self

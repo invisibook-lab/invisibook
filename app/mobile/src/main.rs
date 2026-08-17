@@ -6,7 +6,8 @@ use std::{
 use dioxus::prelude::*;
 
 use invisibook_lib::{
-    cash_store::CashStore, chain::ChainClient, config::ClientConfig, orderbook, types::*,
+    chain::ChainClient, config::ClientConfig, note_store::NoteStore, order_store::OrderStore,
+    orderbook, types::*,
 };
 use invisibook_ui::{
     components::{Header, OrderBook, Toast, TradeForm},
@@ -44,7 +45,9 @@ fn App() -> Element {
     };
     let client: Signal<Option<Arc<ChainClient>>> = use_signal(|| initial_client);
     let my_address: Signal<String> = use_signal(|| initial_address);
-    let cash_store: Signal<CashStore> = use_signal(|| CashStore::load(CashStore::default_path()));
+    let cfg_paths = ClientConfig::load(None);
+    let note_store: Signal<NoteStore> = use_signal(|| NoteStore::load(cfg_paths.notes_path()));
+    let order_store: Signal<OrderStore> = use_signal(|| OrderStore::load(cfg_paths.orders_path()));
 
     let mut orders = use_signal(Vec::<Order>::new);
     let own_order_ids = use_signal(HashMap::<OrderID, String>::new);
@@ -111,7 +114,7 @@ fn App() -> Element {
                         on_settle: move |_order_id: OrderID| {},
                     }
                 } else {
-                    TradeForm { orders, own_order_ids, expanded, message, chain_client: client, my_address, cash_store }
+                    TradeForm { orders, own_order_ids, expanded, message, chain_client: client, my_address, note_store, order_store }
                 }
             }
 

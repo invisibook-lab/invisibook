@@ -19,6 +19,7 @@ serde_json = "1"
 # NOT ark-mpc, so it does not reintroduce a second ark-mpc.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 zk = { path = "../../lib/zk" }
+rand = "0.9"
 
 # Dev-only: the headless settle_e2e integration test needs the tokio test
 # macro and a multi-thread runtime. Features unify with the normal `tokio`
