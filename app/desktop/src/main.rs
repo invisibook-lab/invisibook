@@ -40,6 +40,128 @@ fn main() {
         .launch(App);
 }
 
+/// Consecutive polls an uncertain submission may stay invisible on chain
+/// before the reconciler rolls its records back (~5 × 3 s ≈ 15 s, several
+/// blocks past the submission).
+const RECONCILE_MISS_LIMIT: u32 = 5;
+
+/// Settle the fate of submissions whose outcome was UNCERTAIN (network
+/// error during send_order): records carrying a `pending_order` marker are
+/// resolved against the chain. An order observed on chain (or any of its
+/// input nullifiers published) confirms the submission — the markers are
+/// cleared and the normal pending-note sync finishes the job. An order
+/// that stays invisible AND unspent for `RECONCILE_MISS_LIMIT` consecutive
+/// polls provably never landed: its records are rolled back (inputs to
+/// UNSPENT, change note and order opening dropped).
+async fn reconcile_uncertain_submissions(
+    client: &ChainClient,
+    note_store: &mut Signal<NoteStore>,
+    order_store: &mut Signal<OrderStore>,
+    chain_orders: &[Order],
+    misses: &mut HashMap<String, u32>,
+) {
+    let pending_ids: HashSet<String> = note_store
+        .read()
+        .records()
+        .iter()
+        .filter(|r| !r.pending_order.is_empty())
+        .map(|r| r.pending_order.clone())
+        .collect();
+    for order_id in pending_ids {
+        // Seen in the bulk poll or by direct id query → the tx landed.
+        let mut on_chain = chain_orders.iter().any(|o| o.id == order_id);
+        if !on_chain {
+            if let Ok(found) = client
+                .query_orders(
+                    Some(order_id.clone()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(1),
+                    Some(0),
+                )
+                .await
+            {
+                on_chain = found.iter().any(|o| o.id == order_id);
+            } else {
+                continue; // chain unreachable: decide nothing this round
+            }
+        }
+        if !on_chain {
+            // Not visible as an order; a published input nullifier still
+            // proves the tx landed (the order query may lag).
+            let nfs: Vec<String> = note_store
+                .read()
+                .records()
+                .iter()
+                .filter(|r| r.pending_order == order_id && !r.nf.is_empty())
+                .map(|r| r.nf.clone())
+                .collect();
+            if !nfs.is_empty() {
+                match client.get_nullifiers(&nfs).await {
+                    Ok(spent) if spent.iter().any(|s| *s) => on_chain = true,
+                    Ok(_) => {}
+                    Err(_) => continue, // chain unreachable: keep waiting
+                }
+            }
+        }
+
+        if on_chain {
+            // Confirmed: clear the uncertainty markers; sync_note_statuses
+            // resolves the pending spend/mint states from here.
+            misses.remove(&order_id);
+            let mut store = note_store.write();
+            let mut changed = false;
+            for rec in store.records_mut() {
+                if rec.pending_order == order_id {
+                    rec.pending_order = String::new();
+                    changed = true;
+                }
+            }
+            if changed {
+                let _ = store.save();
+            }
+            continue;
+        }
+
+        let n = misses.entry(order_id.clone()).or_insert(0);
+        *n += 1;
+        if *n < RECONCILE_MISS_LIMIT {
+            continue;
+        }
+        // Provably never landed: order invisible and inputs unspent for
+        // several consecutive polls — roll the wallet records back.
+        misses.remove(&order_id);
+        eprintln!("[trade] submission {order_id} never landed; rolling back local records");
+        {
+            let mut store = note_store.write();
+            let mut drop_cms = Vec::new();
+            for rec in store.records_mut() {
+                if rec.pending_order != order_id {
+                    continue;
+                }
+                match rec.status {
+                    NOTE_PENDING_SPEND => {
+                        rec.status = NOTE_UNSPENT;
+                        rec.nf = String::new();
+                        rec.pending_order = String::new();
+                    }
+                    NOTE_PENDING_MINT => drop_cms.push(rec.cm.clone()),
+                    _ => rec.pending_order = String::new(),
+                }
+            }
+            store.retain(|r| !drop_cms.contains(&r.cm));
+            let _ = store.save();
+        }
+        {
+            let mut store = order_store.write();
+            store.remove(&order_id);
+            let _ = store.save();
+        }
+    }
+}
+
 /// Resolve pending note states against the chain: a PENDING_MINT note gets
 /// its leaf index once its commitment is in the pool tree; a PENDING_SPEND
 /// note becomes SPENT once its nullifier is published. Saves when changed.
@@ -261,6 +383,7 @@ fn App() -> Element {
                                         leaf_index: 0,
                                         status: NOTE_PENDING_MINT,
                                         nf: String::new(),
+                                        pending_order: String::new(),
                                     });
                                     let _ = nstore.save();
                                 }
@@ -331,6 +454,8 @@ fn App() -> Element {
 
     // ── Poll order list from chain every 3 seconds (≈ 1 block) ──
     use_coroutine(move |_: UnboundedReceiver<()>| async move {
+        // Miss counters for uncertain submissions (see the reconciler).
+        let mut reconcile_misses: HashMap<String, u32> = HashMap::new();
         loop {
             let c = client.read().clone();
             if let Some(c) = c {
@@ -364,6 +489,16 @@ fn App() -> Element {
                 }
                 // Resolve pending note mints/spends against the chain.
                 sync_note_statuses(&c, &mut note_store).await;
+                // Settle the fate of uncertain submissions (P1-7).
+                let snapshot = orders.read().clone();
+                reconcile_uncertain_submissions(
+                    &c,
+                    &mut note_store,
+                    &mut order_store,
+                    &snapshot,
+                    &mut reconcile_misses,
+                )
+                .await;
             }
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }

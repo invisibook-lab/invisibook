@@ -110,9 +110,12 @@ fn render_config(alice_cm: &str, bob_cm: &str) -> String {
 [orderbook]
 db_path = "data/orders.db"
 settle_cozk2p_vk_path = "vk/settle_cozk2p_vk.bin"
+# Explicit dev opt-out: the Groth16 settle VKs are not configured here.
+require_proofs = false
 
 [account]
 db_path = "data/accounts.db"
+require_proofs = false
 
 [[account.genesis_note]]
 cm   = "{alice_cm}"
@@ -181,6 +184,7 @@ fn genesis_note(sk_byte: u8, r_byte: u8, token: &str, amount: u64, leaf: u64) ->
         leaf_index: leaf,
         status: NOTE_UNSPENT,
         nf: String::new(),
+        pending_order: String::new(),
     }
 }
 

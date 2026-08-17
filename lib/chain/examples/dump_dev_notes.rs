@@ -75,6 +75,7 @@ fn record(spec: &Spec, leaf: u64) -> NoteRecord {
         leaf_index: leaf,
         status: NOTE_UNSPENT,
         nf: String::new(),
+        pending_order: String::new(),
     }
 }
 

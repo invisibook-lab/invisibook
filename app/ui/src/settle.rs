@@ -1015,10 +1015,11 @@ mod inner {
         pub dir: PathBuf,
     }
 
-    /// Inspect every session dir and decide, per the recovery predicate
-    /// (payout-note existence in the pool tree), whether it LANDED
-    /// (materialize its records) or did not (delete it). Session dirs whose
-    /// settlement has not yet finished (no witness.json) are left untouched.
+    /// Inspect every session dir and decide, per the recovery rules below,
+    /// whether it LANDED (materialize its records), is provably DEAD
+    /// (delete it), is CORRUPT (quarantine for diagnosis), or must be KEPT.
+    /// Session dirs whose settlement has not yet finished (no witness.json)
+    /// and quarantined `.corrupt` dirs are left untouched.
     pub async fn recover_all_sessions(
         client: &ChainClient,
         note_seed: &[u8; 32],
@@ -1034,10 +1035,20 @@ mod inner {
             if !dir.is_dir() {
                 continue;
             }
+            if dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".corrupt"))
+            {
+                continue; // already quarantined for diagnosis
+            }
             match try_recover_session(client, note_seed, &dir).await {
                 Recovery::Landed(rec) => out.push(rec),
                 Recovery::Deleted => {
                     let _ = fs::remove_dir_all(&dir);
+                }
+                Recovery::Corrupt => {
+                    quarantine_session_dir(&dir);
                 }
                 Recovery::InProgress => {}
             }
@@ -1049,16 +1060,56 @@ mod inner {
     pub enum Recovery {
         /// Landed on chain — records in the payload should be materialized.
         Landed(Recovered),
-        /// Did not land — the dir is stale and should be removed.
+        /// PROVABLY dead (the on-chain order state rules the settlement
+        /// out) — the dir is stale and should be removed.
         Deleted,
-        /// No witness yet (mid-flight or never started) — leave it alone.
+        /// The witness cannot be parsed — keep it, but move it aside so it
+        /// stays diagnosable and does not block future scans.
+        Corrupt,
+        /// Anything not decidable yet (no witness, chain unreachable, note
+        /// not on chain but the pair can still settle) — leave it alone.
         InProgress,
     }
 
-    /// Recovery predicate for one session dir: read `witness.json` and ask
-    /// the chain whether this side's payout note commitment is in the pool
-    /// tree. The note's spending secret is re-derived from the wallet seed
-    /// and the order id — nothing beyond the witness file is needed.
+    /// Move a session dir with an unreadable witness to `<dir>.corrupt`.
+    /// The money-critical secrets stay on disk for manual diagnosis; a
+    /// stale quarantine from an earlier run is replaced.
+    fn quarantine_session_dir(dir: &std::path::Path) {
+        let mut target = dir.as_os_str().to_owned();
+        target.push(".corrupt");
+        let target = std::path::PathBuf::from(target);
+        let _ = fs::remove_dir_all(&target);
+        if let Err(e) = fs::rename(dir, &target) {
+            eprintln!("[settle] quarantining corrupt session {dir:?}: {e}");
+        }
+    }
+
+    /// The pure recovery decision for a witness whose payout note is NOT
+    /// in the pool tree yet.
+    ///
+    /// The peer may hold both settle legs and submit the SettlePair at any
+    /// time while the pair is still Matched/Settling on chain, so the
+    /// witness (which holds the ONLY copy of the payout-note blinding) must
+    /// be kept in every uncertain state. Deleting is allowed only when the
+    /// on-chain order state PROVES this settlement can never land: the
+    /// order left Matched/Settling (Done, relisted Pending, Cancelled, or
+    /// Frozen) without minting this witness's note — the pair can never be
+    /// Settling again, so the note can never mint.
+    fn undecided_witness_action(my_status: Option<OrderStatus>) -> Recovery {
+        match my_status {
+            // Chain unreachable / order unknown: keep — never destroy the
+            // only copy of a blinding on uncertainty.
+            None => Recovery::InProgress,
+            Some(OrderStatus::Matched) | Some(OrderStatus::Settling) => Recovery::InProgress,
+            Some(_) => Recovery::Deleted,
+        }
+    }
+
+    /// Recovery predicate for one session dir: read `witness.json`, ask the
+    /// chain whether this side's payout note commitment is in the pool
+    /// tree, and — when it is not — decide from the order state whether the
+    /// settlement can still land. The note's spending secret is re-derived
+    /// from the wallet seed and the order id.
     pub async fn try_recover_session(
         client: &ChainClient,
         note_seed: &[u8; 32],
@@ -1070,14 +1121,21 @@ mod inner {
         };
         let witness: SessionWitnessWire = match serde_json::from_slice(&witness_bytes) {
             Ok(w) => w,
-            Err(_) => return Recovery::Deleted,
+            // Unreadable witness: quarantine, never delete (it may still
+            // hold the only copy of a payout blinding).
+            Err(_) => return Recovery::Corrupt,
         };
         let leaf_index = match client.get_note_by_cm(&witness.my.recv_commitment).await {
             Ok(idx) => idx,
             Err(_) => return Recovery::InProgress, // can't decide now; retry later
         };
         if leaf_index < 0 {
-            return Recovery::Deleted; // never landed; blindings are stale
+            // Note not on chain (yet): the peer may still submit the
+            // SettlePair. Only a provably dead order state allows cleanup.
+            let my_status = query_one(client, &witness.my_order_id)
+                .await
+                .map(|o| o.status);
+            return undecided_witness_action(my_status);
         }
         let sk_hex = hex::encode(note_sk_bytes(note_seed, &witness.my_order_id));
         let note = NoteRecord {
@@ -1090,6 +1148,7 @@ mod inner {
             leaf_index: leaf_index as u64,
             status: 0, // NOTE_UNSPENT
             nf: String::new(),
+            pending_order: String::new(),
         };
         // Rebuild the residual order opening from the witness.
         let remainder = if witness.my.new_order_amount > 0 {
@@ -1111,6 +1170,71 @@ mod inner {
             remainder,
             dir: dir.to_path_buf(),
         })
+    }
+
+    #[cfg(test)]
+    mod recovery_tests {
+        use super::*;
+
+        /// P1-6 regression: while the payout note is absent, every
+        /// uncertain state KEEPS the witness — the peer may still submit
+        /// the exchanged SettlePair later. Only a provably dead order
+        /// state deletes.
+        #[test]
+        fn witness_kept_while_settlement_can_still_land() {
+            // Chain unreachable / order unknown → keep.
+            assert!(matches!(
+                undecided_witness_action(None),
+                Recovery::InProgress
+            ));
+            // The pair can still settle → keep.
+            assert!(matches!(
+                undecided_witness_action(Some(OrderStatus::Settling)),
+                Recovery::InProgress
+            ));
+            assert!(matches!(
+                undecided_witness_action(Some(OrderStatus::Matched)),
+                Recovery::InProgress
+            ));
+        }
+
+        /// Deletion needs PROOF: the order left the settling states without
+        /// this witness's note — that settlement can never land anymore.
+        #[test]
+        fn witness_deleted_only_when_provably_dead() {
+            for status in [
+                OrderStatus::Pending, // relisted via a different settlement
+                OrderStatus::Done,    // settled via a different leg set
+                OrderStatus::Cancelled,
+                OrderStatus::Frozen,
+            ] {
+                assert!(
+                    matches!(undecided_witness_action(Some(status)), Recovery::Deleted),
+                    "{status} must allow cleanup"
+                );
+            }
+        }
+
+        /// A corrupt witness is quarantined (renamed), never deleted: the
+        /// bytes stay on disk for diagnosis.
+        #[test]
+        fn corrupt_witness_is_quarantined_not_deleted() {
+            let base =
+                std::env::temp_dir().join(format!("settle_corrupt_test_{}", std::process::id()));
+            let dir = base.join("session-1");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("witness.json"), b"{not json").unwrap();
+
+            quarantine_session_dir(&dir);
+
+            let quarantined = base.join("session-1.corrupt");
+            assert!(!dir.exists(), "original dir must be moved");
+            assert!(
+                quarantined.join("witness.json").exists(),
+                "witness bytes must survive quarantine"
+            );
+            let _ = fs::remove_dir_all(&base);
+        }
     }
 }
 

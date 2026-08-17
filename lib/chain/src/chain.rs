@@ -8,6 +8,73 @@ use crate::types::*;
 // Re-export KeyPair so consumers don't need to depend on yu-sdk directly.
 pub use yu_sdk::KeyPair as YuKeyPair;
 
+// ────────────────────── Submission outcome ──────────────────────
+
+/// Why a writing submission did not return success. The two variants demand
+/// OPPOSITE wallet reactions, so the distinction is part of the API:
+///
+/// - `Rejected`: the node processed the request and refused it — the
+///   transaction will not land, local records may be rolled back.
+/// - `Uncertain`: the transport failed (timeout, broken connection…) — the
+///   transaction MAY have reached the node and may still land. Local
+///   records (spent-note markers, order openings) MUST be kept until the
+///   chain is queried and the outcome is known.
+#[derive(Debug)]
+pub enum SubmitError {
+    Rejected(String),
+    Uncertain(String),
+}
+
+impl std::fmt::Display for SubmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubmitError::Rejected(m) => write!(f, "rejected by the node: {m}"),
+            SubmitError::Uncertain(m) => write!(f, "submission outcome uncertain: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for SubmitError {}
+
+/// Classify a transport-layer error message. Conservative by design: only
+/// an error that PROVES the node processed and refused the request is
+/// `Rejected`; every network-shaped or unknown failure is `Uncertain`
+/// (never destroy wallet records on an unknown outcome).
+pub fn classify_submit_error(msg: &str) -> SubmitError {
+    let lower = msg.to_lowercase();
+    // Transport failures: the request may or may not have arrived.
+    const UNCERTAIN: &[&str] = &[
+        "timed out",
+        "timeout",
+        "connection",
+        "connect",
+        "broken pipe",
+        "reset by peer",
+        "unexpected eof",
+        "error sending request",
+        "dns",
+        "channel closed",
+        "temporarily unavailable",
+        "incomplete message",
+    ];
+    if UNCERTAIN.iter().any(|p| lower.contains(p)) {
+        return SubmitError::Uncertain(msg.to_string());
+    }
+    // A completed HTTP exchange whose body the node filled with an error:
+    // the node saw the request and refused it.
+    const REJECTED: &[&str] = &[
+        "writing failed",
+        "status code",
+        "bad request",
+        "rejected",
+        "invalid",
+    ];
+    if REJECTED.iter().any(|p| lower.contains(p)) {
+        return SubmitError::Rejected(msg.to_string());
+    }
+    SubmitError::Uncertain(msg.to_string())
+}
+
 // ────────────────────── Request/Response Types ──────────────────────
 
 /// Mirror of chain Go `SendOrderRequest` (v2): spend two pool notes, commit
@@ -146,8 +213,9 @@ pub fn verify_compare_cozk2p_sig(params: &CompareParams, pubkey_hex: &str, sig_h
         .is_ok()
 }
 
-/// Mirror of chain Go `SettleSmallRequest` — the fully filled side's own
-/// settlement update (paper π_A).
+/// The fully filled side's settle-leg fields (paper π_A). There is no
+/// standalone writing for it — the signed message authenticates one leg
+/// of the atomic `SettlePair`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SettleSmallParams {
     pub order_id: OrderID,
@@ -157,8 +225,9 @@ pub struct SettleSmallParams {
     pub zk_proof: String,
 }
 
-/// Mirror of chain Go `SettleLargeRequest` — the partially filled side's
-/// own update (paper π_B).
+/// The partially filled side's settle-leg fields (paper π_B). There is no
+/// standalone writing for it — the signed message authenticates one leg
+/// of the atomic `SettlePair`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SettleLargeParams {
     pub order_id: OrderID,
@@ -496,15 +565,16 @@ impl ChainClient {
     /// Submits a SendOrder v2 request. The caller assembles `params`
     /// (nullifiers, cm_q, locked commitment, fee, change commitment) and the
     /// send_order proof; this method signs the canonical message and submits.
-    pub async fn send_order(
-        &self,
-        mut params: SendOrderParams,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    /// The error is CLASSIFIED (see `SubmitError`): the caller must keep its
+    /// wallet records on an `Uncertain` outcome — the transaction may have
+    /// landed despite the transport failure.
+    pub async fn send_order(&self, mut params: SendOrderParams) -> Result<(), SubmitError> {
         params.pubkey = self.pubkey_hex.clone();
         params.signature = self.sign(&send_order_signing_message(&params));
         self.client
             .write_chain("orderbook", "SendOrder", &params, self.chain_id, 100, 0)
             .await
+            .map_err(|e| classify_submit_error(&e.to_string()))
     }
 
     /// ed25519-signs the canonical 2-party compare message with this
@@ -537,39 +607,17 @@ impl ChainClient {
         self.sign(&settle_small_message(params))
     }
 
-    /// Submits this side's fully-filled settlement update (paper π_A).
-    /// Persist-before-publish: the payout note the counterparty will
-    /// receive was already committed to by their wallet; MY submission must
-    /// come after MY WAL holds everything needed to re-submit.
-    pub async fn settle_small(
-        &self,
-        params: &SettleSmallParams,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        self.client
-            .write_chain("orderbook", "SettleSmall", params, self.chain_id, 100, 0)
-            .await
-    }
-
     /// ed25519-signs the SettleLarge message with this client's key.
     pub fn sign_settle_large(&self, params: &SettleLargeParams) -> String {
         self.sign(&settle_large_message(params))
     }
 
-    /// Submits this side's partially-filled settlement update (paper π_B).
-    pub async fn settle_large(
-        &self,
-        params: &SettleLargeParams,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        self.client
-            .write_chain("orderbook", "SettleLarge", params, self.chain_id, 100, 0)
-            .await
-    }
-
     /// Submits BOTH sides' settlements as one atomic `SettlePair` writing —
     /// either the whole pair settles or nothing does. The two legs' proofs
-    /// and per-leg signatures are exchanged over the settlement channel, then
-    /// either party submits the pair. Use in place of the separate
-    /// settle_small / settle_large writings to close the fair-exchange gap.
+    /// and per-leg signatures are exchanged over the settlement channel,
+    /// then either party submits the pair. This is the ONLY settlement
+    /// writing the chain registers (the unilateral variants were removed to
+    /// close the fair-exchange gap).
     pub async fn settle_pair(
         &self,
         params: &SettlePairParams,
@@ -1106,6 +1154,42 @@ mod tests {
             &params,
             client.pubkey_hex(),
             "zz"
+        ));
+    }
+
+    /// P1-7 regression: transport-shaped failures classify as Uncertain
+    /// (records must be kept), completed-exchange refusals as Rejected,
+    /// and UNKNOWN messages default to Uncertain (fail-safe).
+    #[test]
+    fn submit_error_classification_is_conservative() {
+        let uncertain = [
+            "operation timed out",
+            "error sending request for url (http://x): connection refused",
+            "Connection reset by peer",
+            "unexpected EOF during handshake",
+            "request timeout after 30s",
+        ];
+        for msg in uncertain {
+            assert!(
+                matches!(classify_submit_error(msg), SubmitError::Uncertain(_)),
+                "{msg:?} must classify as Uncertain"
+            );
+        }
+        let rejected = [
+            "writing failed (400): duplicate nullifier in request",
+            "bad request: signature verification failed",
+            "invalid pubkey: must be 32-byte ed25519 key",
+        ];
+        for msg in rejected {
+            assert!(
+                matches!(classify_submit_error(msg), SubmitError::Rejected(_)),
+                "{msg:?} must classify as Rejected"
+            );
+        }
+        // Unknown shapes NEVER roll back wallet records.
+        assert!(matches!(
+            classify_submit_error("some completely novel failure"),
+            SubmitError::Uncertain(_)
         ));
     }
 
