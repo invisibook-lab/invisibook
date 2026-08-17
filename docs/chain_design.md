@@ -1,5 +1,12 @@
 # Chain Design
 
+> **NOTE (2026-08-16):** This document shows the legacy cash model. Phase 5
+> removed the cash model from the code. The chain now keeps value only in
+> the shielded note pool. Orders spend pool notes and lock collateral as a
+> commitment on the order row. Read
+> [settlement_hardening_plan_zh.md](settlement_hardening_plan_zh.md) for the
+> current design. Do not use this document as a reference for new code.
+
 ## 1. Overview
 
 The `chain/` component is Invisibook's L2 chain. It is built on the
