@@ -133,6 +133,25 @@ impl NoteStore {
         self.unspent(token).iter().map(|r| r.amount).sum()
     }
 
+    /// Pick at most two unspent notes of `token` covering `need` (the
+    /// spend circuits' 2-slot shape). Preference order: one exact note,
+    /// the smallest single note that covers, then the two largest notes
+    /// combined. Returns `None` when the balance cannot cover `need`.
+    pub fn select_unspent(&self, token: &str, need: u64) -> Option<Vec<NoteRecord>> {
+        let unspent = self.unspent(token); // largest first
+        if let Some(exact) = unspent.iter().find(|r| r.amount == need) {
+            return Some(vec![(*exact).clone()]);
+        }
+        // Smallest single note that still covers (minimizes change).
+        if let Some(single) = unspent.iter().rev().find(|r| r.amount >= need) {
+            return Some(vec![(*single).clone()]);
+        }
+        if unspent.len() >= 2 && unspent[0].amount + unspent[1].amount >= need {
+            return Some(vec![unspent[0].clone(), unspent[1].clone()]);
+        }
+        None
+    }
+
     /// Mark the notes behind `nfs` spent once their nullifiers appear on
     /// chain; returns how many records changed.
     pub fn mark_spent(&mut self, nfs: &[String]) -> usize {
@@ -184,6 +203,42 @@ mod tests {
         assert_eq!(reloaded.records().len(), 2);
         assert_eq!(reloaded.balance("ETH"), 12);
         assert_eq!(reloaded.unspent("ETH")[0].amount, 7, "largest first");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Note selection: exact single, then smallest covering single, then
+    /// the two largest, then insufficient.
+    #[test]
+    fn select_unspent_prefers_exact_then_smallest_cover() {
+        let dir = std::env::temp_dir().join(format!("note_store_sel_{}", std::process::id()));
+        let mut store = NoteStore::load(dir.join("notes.json"));
+        for (cm, amount) in [("aa", 7u64), ("bb", 5), ("cc", 12)] {
+            store.upsert(NoteRecord {
+                cm: cm.into(),
+                token: "ETH".into(),
+                amount,
+                r: "33".into(),
+                key_index: 0,
+                sk: String::new(),
+                leaf_index: 0,
+                status: NOTE_UNSPENT,
+                nf: String::new(),
+            });
+        }
+        let exact = store.select_unspent("ETH", 5).unwrap();
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].amount, 5, "exact match wins");
+
+        let cover = store.select_unspent("ETH", 6).unwrap();
+        assert_eq!(cover.len(), 1);
+        assert_eq!(cover[0].amount, 7, "smallest covering single");
+
+        let pair = store.select_unspent("ETH", 15).unwrap();
+        assert_eq!(pair.len(), 2);
+        assert_eq!(pair[0].amount + pair[1].amount, 19, "two largest");
+
+        assert!(store.select_unspent("ETH", 25).is_none(), "insufficient");
+        assert!(store.select_unspent("BTC", 1).is_none(), "wrong token");
         let _ = fs::remove_dir_all(dir);
     }
 

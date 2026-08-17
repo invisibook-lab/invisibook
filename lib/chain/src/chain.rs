@@ -994,6 +994,50 @@ impl ChainClient {
         Ok(serde_json::from_value(value)?)
     }
 
+    /// Fetches every pool leaf and rebuilds the note tree locally,
+    /// cross-checking the rebuilt root against the chain's reported head.
+    /// The returned tree's `root()` is a valid anchor for new spends and
+    /// `path(i)` yields Merkle paths for the spend circuits.
+    #[cfg(not(target_os = "android"))]
+    pub async fn fetch_note_tree(
+        &self,
+    ) -> Result<crate::note_tree::NoteTree, Box<dyn std::error::Error>> {
+        use crate::note::note_fr_to_hex;
+        use ark_ff::PrimeField;
+
+        let resp = self.get_notes(0, 0).await?;
+        let mut tree = crate::note_tree::NoteTree::new();
+        for leaf in &resp.notes {
+            if leaf.leaf_index != tree.len() {
+                return Err(format!(
+                    "pool leaves out of order: got index {} at position {}",
+                    leaf.leaf_index,
+                    tree.len()
+                )
+                .into());
+            }
+            let raw = hex::decode(&leaf.cm)?;
+            tree.append(ark_bn254::Fr::from_be_bytes_mod_order(&raw));
+        }
+        if tree.len() != resp.leaf_count {
+            return Err(format!(
+                "pool returned {} leaves but reports leaf_count {}",
+                tree.len(),
+                resp.leaf_count
+            )
+            .into());
+        }
+        let root_hex = note_fr_to_hex(&tree.root());
+        if root_hex != resp.latest_root {
+            return Err(format!(
+                "rebuilt tree root {root_hex} does not match the chain head {}",
+                resp.latest_root
+            )
+            .into());
+        }
+        Ok(tree)
+    }
+
     /// Reads the pool's current leaf count and root.
     pub async fn get_pool_info(&self) -> Result<PoolInfoResponse, Box<dyn std::error::Error>> {
         let value: Value = self
@@ -1245,7 +1289,10 @@ mod tests {
     fn settle_pair_leg_json_lockstep() {
         let small = SettlePairLegParams::small("11".repeat(32), "sig-b".into(), "pf".into());
         let sj = serde_json::to_value(&small).unwrap();
-        assert!(sj.get("cm_q_residual").is_none(), "small leg must omit residual q");
+        assert!(
+            sj.get("cm_q_residual").is_none(),
+            "small leg must omit residual q"
+        );
         assert!(
             sj.get("cm_locked_residual").is_none(),
             "small leg must omit residual collateral"

@@ -151,6 +151,17 @@ impl ClientConfig {
         self.data_dir.join("cash.json")
     }
 
+    /// Path to the note ledger inside the data directory (this file IS the
+    /// wallet's money — see `note_store`).
+    pub fn notes_path(&self) -> PathBuf {
+        self.data_dir.join("notes.json")
+    }
+
+    /// Path to the order-opening ledger inside the data directory.
+    pub fn orders_path(&self) -> PathBuf {
+        self.data_dir.join("orders.json")
+    }
+
     /// Resolves the 2-party settlement helper binary path, in order:
     /// the `settle2p_bin` config field, the `INVISIBOOK_SETTLE2P_BIN` env
     /// var, then a file named `settle2p_session` next to the current
