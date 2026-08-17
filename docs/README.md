@@ -1,0 +1,67 @@
+# Invisibook Documentation
+
+> **Status:** Current (2026-08-16). This file is the index. Start here.
+
+## Reading order
+
+1. [papers/invisibook.pdf](../papers/invisibook.pdf) — the protocol
+   paper (NDSS 2026 submission). The normative design.
+2. [paper_deviations.md](paper_deviations.md) — **every place the code
+   deviates from the paper**, why, and with what effect. Read this
+   before you trust either the paper or a design doc.
+3. The component designs: [chain_design.md](chain_design.md),
+   [zk_design.md](zk_design.md), [cozk2p_design.md](cozk2p_design.md),
+   [app_design.md](app_design.md).
+
+## Document catalog
+
+| Document | Language | Status | Content |
+|---|---|---|---|
+| [paper_deviations.md](paper_deviations.md) | EN | **Current** | Implementation vs. the paper, item by item (D1–D16) |
+| [chain_design.md](chain_design.md) | EN | **Current** | L2 chain: tripods, note pool, matching, compare gate, atomic `SettlePair` |
+| [zk_design.md](zk_design.md) | EN | **Current** | Note primitives (golden spec), Groth16 circuit catalog, binds, proving/verifying toolchain |
+| [cozk2p_design.md](cozk2p_design.md) | EN | **Current** | 2-party SPDZ + collaborative PLONK compare session, stdio protocol, trust caveats |
+| [app_design.md](app_design.md) | EN | **Current** | Wallet stores, note-based order placement, two-phase settlement driver, crash recovery |
+| [cozk_experiments.md](cozk_experiments.md) | EN | **Current** (record) | Benchmark record: historical 3-party vs 2-party experiments + the current hardened-flow numbers |
+| [settlement_hardening_plan_zh.md](settlement_hardening_plan_zh.md) | ZH | **Current** (plan) | rev.4 hardening plan (F1–F4) with the implementation-status table (§六点五) |
+| [spdz_itmac_theory_zh.md](spdz_itmac_theory_zh.md) | ZH | **Current** (notes) | SPDZ / IT-MAC theory study notes |
+| [cozk_design.md](cozk_design.md) | EN | *Historical* | 3-party co-snarks (REP3) experiment and the old joint settle relation — superseded by cozk2p |
+| [milestones/test_guide_1.md](milestones/test_guide_1.md), [test_guide_2.md](milestones/test_guide_2.md) | EN | *Historical* | Milestone acceptance guides (cash-model era) |
+
+Binary assets: `invisibook_protocol.pdf` (early protocol sketch),
+`invisibook_desktop.png`, `logo.png`.
+
+## Conventions
+
+These rules keep the set consistent; follow them when you add or edit a
+document.
+
+1. **Status banner.** Every document carries a
+   `> **Status:** Current (date) …` or `> **Status:** Historical …`
+   blockquote directly under its H1. Historical documents say what
+   superseded them and must not be used as a reference for new code.
+2. **Language.** Design documents are English. Chinese documents carry
+   the `_zh` suffix and are plans or study notes, not normative
+   designs.
+3. **Paper alignment.** A design document does not restate paper
+   arguments; where it differs from the paper it links the matching
+   `D#` item in [paper_deviations.md](paper_deviations.md). New
+   deviations get a new `D#` entry in the same change.
+4. **Terminology.** One name per concept, everywhere:
+   *note* (a shielded pool UTXO), *note opening* (`(sk, token, v, r)`),
+   *order opening* (`(q, r_q, locked_amount, r_locked)`),
+   *collateral commitment* (`Order.LockedCommitment`, 2-slot padded
+   with `Poseidon(0,0)`), *compare gate* (`SubmitCompareCoZk2p` /
+   `SubmitCompareCoZk`), *two-phase settlement* (compare anchored on
+   chain before any reveal — F1), *settle leg* (one side's signed
+   settle proof), *atomic `SettlePair`* (both legs in one writing —
+   F2). F1/F2/F3/F4 always refer to the rev.4 findings in
+   [settlement_hardening_plan_zh.md](settlement_hardening_plan_zh.md).
+5. **Numbers live in one place.** Benchmark results go into
+   [cozk_experiments.md](cozk_experiments.md) with their setup; other
+   documents cite it instead of embedding numbers.
+6. **Dev caveats are loud.** Anything that voids a security guarantee
+   (mock Beaver, dev SRS, plaintext rendezvous, blind bridge) is
+   labeled dev-only where it is described, and listed centrally in
+   [cozk2p_design.md](cozk2p_design.md) §5 and
+   [paper_deviations.md](paper_deviations.md) §2 (D9–D13).

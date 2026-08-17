@@ -1,5 +1,15 @@
 # Privacy-Preserving Settlement via Collaborative ZK (co-zk)
 
+> **Status:** Historical (July 2026). This document describes the
+> 3-party co-snarks (REP3) experiment and the joint 15-signal settle
+> relation. That path is not on this branch: the production design is
+> the 2-party compare-only session in [cozk2p_design.md](cozk2p_design.md),
+> and the current settle circuits are in [zk_design.md](zk_design.md).
+> The `CompareOrders`/`SettleOrders` writings and `lib/cozk`/`lib/mpc`
+> named below no longer exist. Kept for the experiment record in
+> [cozk_experiments.md](cozk_experiments.md).
+
+
 ## 1. Motivation
 
 The existing settlement path (`CompareOrders` + `SettleOrders`) has three privacy /
