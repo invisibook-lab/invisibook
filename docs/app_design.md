@@ -81,9 +81,16 @@ chain via `GetNoteByCm` / `GetNullifiers`).
    derive the nullifiers → `order_id = SHA-256(nf_0 ‖ nf_1)` → draw
    fresh blindings and a fresh change-note key → compute the `bind` →
    prove `send_order` with rapidsnark.
-5. Persist FIRST: inputs → `PENDING_SPEND` (with their nullifiers), the
-   change note → `PENDING_MINT`, the order opening into `orders.json`.
-6. Submit `SendOrder`. On rejection, roll the wallet records back.
+5. Persist FIRST: inputs → `PENDING_SPEND` (with their nullifiers and a
+   `pending_order` marker), the change note → `PENDING_MINT`, the order
+   opening into `orders.json`.
+6. Submit `SendOrder`. The submission outcome is CLASSIFIED
+   (`SubmitError`): a definite node rejection rolls the records back;
+   an uncertain outcome (timeout, broken connection — the transaction
+   may have landed) KEEPS every record, and the poller's reconciler
+   resolves it: an order (or input nullifier) observed on chain confirms
+   the submission; an order invisible and unspent for several
+   consecutive polls is rolled back.
 
 Android: on-device proving is not wired; the submit handler reports it
 as unsupported.
@@ -124,10 +131,15 @@ permanent (never retried); `Transient` / `OnChainRejected` retry after a
 backoff.
 
 **Crash recovery** (`recover_all_sessions`): on startup the app scans
-session dirs; a `witness.json` whose payout note is in the pool tree is
+session dirs. A `witness.json` whose payout note is in the pool tree is
 materialized into the wallet stores (the note key is re-derived from the
-wallet seed + order id), a session that never landed is deleted, and a
-mid-flight one is left alone.
+wallet seed + order id). When the note is NOT on chain yet, the witness
+is KEPT by default — the peer may hold both settle legs and submit the
+SettlePair at any time; it holds the only copy of the payout blinding.
+Deletion needs proof of death: the order left Matched/Settling without
+this witness's note. An unreadable witness is quarantined to
+`<dir>.corrupt` (never deleted); chain-unreachable and mid-flight
+sessions are left alone.
 
 ### 2.4 Desktop main loop
 

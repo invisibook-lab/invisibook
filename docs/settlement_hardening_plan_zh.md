@@ -154,6 +154,10 @@ SPDZ 交互**,更简单。
 | **Phase A/5** app 两段编排(`compare_ready` → 上链确认 → reveal → leg → `SettlePair`)+ note 下单 | ✅ 已实现,app 全量编译 | `eb24fc5` |
 | **Phase 5c** 全仓删除 cash 模型 + grep-gate 回归闸 | ✅ 已实现 + gate 测试通过 | `f7afde1` |
 | Phase B 对称化 settle_small / Phase C VI-D | ⏸ 延后(仅设计) | — |
+| **B.2 落地**:删除公开的 `SettleSmall`/`SettleLarge` writings(仅 SettlePair) | ✅ 已实现 + 单腿攻击回归测试 | 本轮 |
+| **SettlePair 崩溃一致性**:settlement journal + 幂等铸币 + 启动恢复 | ✅ 已实现 + failure-injection 测试 | 本轮 |
+| **配置 fail-closed**:core.toml 缺失/损坏拒启,`require_proofs` 默认 true | ✅ 已实现 + 回归测试 | 本轮 |
+| **matcher 等价撮合**(不等价交叉单不再锁死) | ✅ 已实现 + 回归测试 | 本轮 |
 
 **F1 abort 语义已有测试钉住:** `compare_abort_precedes_any_reveal`(cozk2p)
 证明 compare 无法上链时会话在 reveal 之前中止、无 WAL 落盘;`SettlePair` 的
