@@ -13,3 +13,8 @@ func plonkVerifySettle2p(_, _, _ []byte) error {
 		"this chain binary was built without the cozk2p PLONK verifier; " +
 			"rebuild with `make build-chain-cozk2p` (go build -tags cozk2p)")
 }
+
+// PlonkVerifierAvailable reports whether this binary carries the cozk2p
+// PLONK verifier. The stub build does NOT: a node configured with a PLONK
+// VK refuses to boot instead of accepting orders it can never settle.
+func PlonkVerifierAvailable() bool { return false }

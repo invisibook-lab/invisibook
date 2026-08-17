@@ -137,104 +137,161 @@ func runCompareSettleLifecycle(
 		t.Fatalf("expected buy order Settling(5), got %d", st)
 	}
 
-	// --- SettleSmall: bob (smaller) pays his whole USDT collateral to
-	// alice as a pool note ---
-	smallReq := &core.SettleSmallRequest{
+	// --- Build both signed legs (bob = smaller, π_A shape; alice = larger,
+	// π_B shape). Proofs are skipped in this config; signatures and the
+	// state machine are enforced. ---
+	smallSig := &core.SettleSmallRequest{
 		OrderID:      buyOrderID,
 		MatchOrderID: sellOrderID,
 		CmNoteOut:    hexCommit(0xC1),
-		ZkProof:      "test-proof-skip",
 	}
-	smallReq.Signature = hex.EncodeToString(
-		ed25519.Sign(bobPriv, core.SettleSmallSigMessage(smallReq)))
-
-	// Negative: the larger side must not be able to use the small path.
-	wrongSide := &core.SettleSmallRequest{
-		OrderID:      sellOrderID,
-		MatchOrderID: buyOrderID,
-		CmNoteOut:    hexCommit(0xC9),
-		ZkProof:      "test-proof-skip",
+	bobLeg := core.SettlePairLeg{
+		CmNoteOut: smallSig.CmNoteOut,
+		ZkProof:   "test-proof-skip",
+		Signature: hex.EncodeToString(
+			ed25519.Sign(bobPriv, core.SettleSmallSigMessage(smallSig))),
 	}
-	wrongSide.Signature = hex.EncodeToString(
-		ed25519.Sign(alicePriv, core.SettleSmallSigMessage(wrongSide)))
-	if err := wrCall("orderbook", "SettleSmall", wrongSide); err != nil {
-		t.Fatalf("submitting wrong-side settle failed at HTTP level: %v", err)
-	}
-	waitBlock()
-	if st := queryOrders(t, sellOrderID)[0].Status; st != 5 {
-		t.Fatalf("larger side using SettleSmall must be rejected, order moved to %d", st)
-	}
-
-	if err := wrCall("orderbook", "SettleSmall", smallReq); err != nil {
-		t.Fatalf("SettleSmall failed: %v", err)
-	}
-	waitBlock()
-
-	// Bob's order is Done; the payout note is a new pool leaf. (Collateral
-	// is order-bound in v2, not a cash row, so it leaves the book with the
-	// order — there is nothing to check on the cash side.)
-	if st := queryOrders(t, buyOrderID)[0].Status; st != 2 {
-		t.Fatalf("expected buy order Done(2), got %d", st)
-	}
-	afterSmall := getPoolInfo(t)
-	if afterSmall.LeafCount != poolBefore.LeafCount+1 {
-		t.Fatalf("SettleSmall must append exactly one pool note, %d → %d",
-			poolBefore.LeafCount, afterSmall.LeafCount)
-	}
-	if getNoteByCm(t, smallReq.CmNoteOut) < 0 {
-		t.Fatalf("alice's payout note %s must be in the tree", smallReq.CmNoteOut)
-	}
-
-	// --- SettleLarge: alice (larger) pays the fill and relists 20 ---
-	largeReq := &core.SettleLargeRequest{
+	largeSig := &core.SettleLargeRequest{
 		OrderID:          sellOrderID,
 		MatchOrderID:     buyOrderID,
 		CmQResidual:      hexCommit(0xA1),
 		CmLockedResidual: hexCommit(0xA2),
 		CmNoteOut:        hexCommit(0xC2),
+	}
+	aliceLeg := core.SettlePairLeg{
+		CmNoteOut:        largeSig.CmNoteOut,
+		CmQResidual:      largeSig.CmQResidual,
+		CmLockedResidual: largeSig.CmLockedResidual,
+		ZkProof:          "test-proof-skip",
+		Signature: hex.EncodeToString(
+			ed25519.Sign(alicePriv, core.SettleLargeSigMessage(largeSig))),
+	}
+
+	// P1-2 regression: the unilateral settle writings are NOT registered.
+	// A party holding only the counterparty's signed leg must not be able
+	// to collect its payout alone.
+	oldSmall := &core.SettleSmallRequest{
+		OrderID:      buyOrderID,
+		MatchOrderID: sellOrderID,
+		CmNoteOut:    smallSig.CmNoteOut,
+		Signature:    bobLeg.Signature,
+		ZkProof:      "test-proof-skip",
+	}
+	_ = wrCall("orderbook", "SettleSmall", oldSmall) // must be a dead endpoint
+	oldLarge := &core.SettleLargeRequest{
+		OrderID:          sellOrderID,
+		MatchOrderID:     buyOrderID,
+		CmQResidual:      largeSig.CmQResidual,
+		CmLockedResidual: largeSig.CmLockedResidual,
+		CmNoteOut:        largeSig.CmNoteOut,
+		Signature:        aliceLeg.Signature,
 		ZkProof:          "test-proof-skip",
 	}
-	largeReq.Signature = hex.EncodeToString(
-		ed25519.Sign(alicePriv, core.SettleLargeSigMessage(largeReq)))
-	if err := wrCall("orderbook", "SettleLarge", largeReq); err != nil {
-		t.Fatalf("SettleLarge failed: %v", err)
+	_ = wrCall("orderbook", "SettleLarge", oldLarge)
+	waitBlock()
+	if st := queryOrders(t, buyOrderID)[0].Status; st != 5 {
+		t.Fatalf("unregistered SettleSmall must not settle: buy order moved to %d", st)
+	}
+	if st := queryOrders(t, sellOrderID)[0].Status; st != 5 {
+		t.Fatalf("unregistered SettleLarge must not relist: sell order moved to %d", st)
+	}
+	if got := getPoolInfo(t); got.LeafCount != poolBefore.LeafCount {
+		t.Fatalf("unregistered settle writings must not mint notes, %d → %d",
+			poolBefore.LeafCount, got.LeafCount)
+	}
+
+	// P1-2 regression: one signed counterparty leg + a garbage own leg must
+	// abort the WHOLE pair — no payout for anyone.
+	forged := *largeSig
+	forged.CmNoteOut = hexCommit(0xC7) // attacker redirects the payout
+	forgedLeg := aliceLeg
+	forgedLeg.CmNoteOut = forged.CmNoteOut
+	// The attacker cannot produce alice's signature over the forged leg;
+	// reusing the old signature must fail verification.
+	oneLeg := &core.SettlePairRequest{
+		OrderAID: sellOrderID,
+		OrderBID: buyOrderID,
+		A:        forgedLeg,
+		B:        bobLeg,
+	}
+	if err := wrCall("orderbook", "SettlePair", oneLeg); err != nil {
+		t.Fatalf("submitting one-good-leg pair failed at HTTP level: %v", err)
+	}
+	waitBlock()
+	if st := queryOrders(t, buyOrderID)[0].Status; st != 5 {
+		t.Fatalf("pair with a forged leg must not settle: buy order moved to %d", st)
+	}
+	if got := getPoolInfo(t); got.LeafCount != poolBefore.LeafCount {
+		t.Fatal("pair with a forged leg must mint nothing")
+	}
+
+	// Negative: swapping the legs (small shape on the larger side) must be
+	// rejected — the recorded cmp decides which circuit each side may use.
+	swapped := &core.SettlePairRequest{
+		OrderAID: sellOrderID,
+		OrderBID: buyOrderID,
+		A:        bobLeg,
+		B:        aliceLeg,
+	}
+	if err := wrCall("orderbook", "SettlePair", swapped); err != nil {
+		t.Fatalf("submitting swapped-legs pair failed at HTTP level: %v", err)
+	}
+	waitBlock()
+	if st := queryOrders(t, sellOrderID)[0].Status; st != 5 {
+		t.Fatalf("swapped legs must be rejected, sell order moved to %d", st)
+	}
+
+	// Happy path: the ATOMIC pair settles both sides in one writing.
+	pairReq := &core.SettlePairRequest{
+		OrderAID: sellOrderID,
+		OrderBID: buyOrderID,
+		A:        aliceLeg,
+		B:        bobLeg,
+	}
+	if err := wrCall("orderbook", "SettlePair", pairReq); err != nil {
+		t.Fatalf("SettlePair failed: %v", err)
 	}
 	waitBlock()
 
-	// Alice's order is relisted in place with the residual commitments.
+	// Bob's order is Done; alice is relisted in place with the residuals.
+	if st := queryOrders(t, buyOrderID)[0].Status; st != 2 {
+		t.Fatalf("expected buy order Done(2), got %d", st)
+	}
 	sellAfter := queryOrders(t, sellOrderID)[0]
 	if sellAfter.Status != 0 { // Pending
 		t.Fatalf("expected relisted sell order Pending(0), got %d", sellAfter.Status)
 	}
-	if sellAfter.Amount != largeReq.CmQResidual {
-		t.Fatalf("relisted order amount = %s, want %s", sellAfter.Amount, largeReq.CmQResidual)
+	if sellAfter.Amount != largeSig.CmQResidual {
+		t.Fatalf("relisted order amount = %s, want %s", sellAfter.Amount, largeSig.CmQResidual)
 	}
 	if sellAfter.MatchOrder != "" {
 		t.Fatalf("relisted order must have match_order cleared, got %s", sellAfter.MatchOrder)
 	}
-	if sellAfter.LockedCommitment != largeReq.CmLockedResidual {
+	if sellAfter.LockedCommitment != largeSig.CmLockedResidual {
 		t.Fatalf("relisted order collateral = %s, want %s",
-			sellAfter.LockedCommitment, largeReq.CmLockedResidual)
+			sellAfter.LockedCommitment, largeSig.CmLockedResidual)
 	}
 
-	// Bob's fill note is a new pool leaf.
-	afterLarge := getPoolInfo(t)
-	if afterLarge.LeafCount != afterSmall.LeafCount+1 {
-		t.Fatalf("SettleLarge must append exactly one pool note")
+	// BOTH payout notes landed in the SAME step (+2 leaves).
+	afterPair := getPoolInfo(t)
+	if afterPair.LeafCount != poolBefore.LeafCount+2 {
+		t.Fatalf("SettlePair must append exactly two pool notes, %d → %d",
+			poolBefore.LeafCount, afterPair.LeafCount)
 	}
-	if getNoteByCm(t, largeReq.CmNoteOut) < 0 {
-		t.Fatalf("bob's fill note %s must be in the tree", largeReq.CmNoteOut)
+	if getNoteByCm(t, bobLeg.CmNoteOut) < 0 || getNoteByCm(t, aliceLeg.CmNoteOut) < 0 {
+		t.Fatal("both payout notes must be in the tree")
 	}
 
-	// Replays must not change anything.
-	if err := wrCall("orderbook", "SettleLarge", largeReq); err != nil {
+	// Replays must not change anything (the pair is no longer Settling, and
+	// the settlement id has already minted).
+	if err := wrCall("orderbook", "SettlePair", pairReq); err != nil {
 		t.Logf("replay rejected at txpool level: %v", err)
 	}
 	waitBlock()
 	if st := queryOrders(t, sellOrderID)[0].Status; st != 0 {
 		t.Fatalf("replayed settle must not change relisted order, got status %d", st)
 	}
-	if got := getPoolInfo(t); got.LeafCount != afterLarge.LeafCount {
+	if got := getPoolInfo(t); got.LeafCount != afterPair.LeafCount {
 		t.Fatalf("replayed settle must not mint again")
 	}
 

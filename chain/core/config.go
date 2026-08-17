@@ -24,11 +24,11 @@ type Config struct {
 // `SettleCoZk2pVKPath` is the ark-compressed PLONK verifying key of the
 // 2-party collaborative settlement (SubmitCompareCoZk2p writing; verification
 // requires a chain binary built with `-tags cozk2p`).
-// `RequireProofs`, when true, makes an empty/missing settlement VK path a
-// startup error instead of silently skipping verification (see LoadVK's
-// fail-open contract). Leave false for test/dev configs that intentionally
-// run without circuit artifacts; set true in production so a misconfigured
-// node refuses to boot rather than accept unverified settlements.
+// `RequireProofs` defaults to TRUE: an empty/missing settlement VK path is
+// a startup error instead of silently skipping verification (see LoadVK's
+// fail-open contract). Dev/test configs that intentionally run without
+// circuit artifacts must OPT OUT explicitly with `require_proofs = false`;
+// a config that simply forgets its VK paths refuses to boot.
 // `DBLogLevel` controls GORM SQL logging: "silent", "error", "warn", "info".
 type OrderBookConfig struct {
 	DBPath             string `toml:"db_path"`
@@ -51,8 +51,9 @@ type OrderBookConfig struct {
 // real bridge inclusion proof lands: when set, every deposit must carry the
 // operator's signature; when empty, the check is skipped (dev only — a
 // public network MUST set it).
-// `RequireProofs` mirrors the OrderBook flag: an empty VK path becomes a
-// startup error instead of silently skipping verification.
+// `RequireProofs` mirrors the OrderBook flag (default TRUE): an empty VK
+// path becomes a startup error; dev mode needs an explicit
+// `require_proofs = false`.
 // `DBLogLevel` controls GORM SQL logging: "silent", "error", "warn", "info".
 // `ChainID` is copied from the top-level config by LoadConfig.
 type AccountConfig struct {
@@ -75,18 +76,23 @@ type GenesisNote struct {
 	Memo string `toml:"memo"`
 }
 
-// DefaultConfig returns a Config with sensible defaults.
+// DefaultConfig returns a Config with sensible SECURE defaults: proof
+// verification is required, so a configuration that carries no verifying
+// keys refuses to boot instead of silently skipping verification. Dev/test
+// configs opt out with an explicit `require_proofs = false`.
 // DBLogLevel defaults to "warn" to suppress expected "record not found" noise.
 func DefaultConfig() *Config {
 	return &Config{
 		ChainID: 1926,
 		OrderBook: OrderBookConfig{
-			DBPath:     "orders.db",
-			DBLogLevel: "warn",
+			DBPath:        "orders.db",
+			DBLogLevel:    "warn",
+			RequireProofs: true,
 		},
 		Account: AccountConfig{
-			DBPath:     "accounts.db",
-			DBLogLevel: "warn",
+			DBPath:        "accounts.db",
+			DBLogLevel:    "warn",
+			RequireProofs: true,
 		},
 	}
 }

@@ -64,9 +64,11 @@ func TestCoZk2pSettleRealProofOnChain(t *testing.T) {
 [orderbook]
 db_path = "data/orders.db"
 settle_cozk2p_vk_path = %q
+require_proofs = false
 
 [account]
 db_path = "data/accounts.db"
+require_proofs = false
 `, fx.VKPath)
 	cfgPath := filepath.Join(t.TempDir(), "core_cozk2p_e2e.toml")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
@@ -148,42 +150,51 @@ db_path = "data/accounts.db"
 		t.Fatalf("expected sell order Settling(5) after real-proof compare, got %d — was ./invisibook built with -tags cozk2p?", st)
 	}
 
-	// --- Complete the lifecycle with the settle writings (proof-skipped in
-	// this config; the mechanics are what's under test here) ---
-	smallReq := &core.SettleSmallRequest{
+	// --- Complete the lifecycle with the ATOMIC SettlePair (proof-skipped
+	// in this config; the mechanics are what's under test here) ---
+	smallSig := &core.SettleSmallRequest{
 		OrderID:      buyOrderID,
 		MatchOrderID: sellOrderID,
 		CmNoteOut:    hexCommit(0xC1),
-		ZkProof:      "test-proof-skip",
 	}
-	smallReq.Signature = hex.EncodeToString(
-		ed25519.Sign(bobPriv, core.SettleSmallSigMessage(smallReq)))
-	if err := wrCall("orderbook", "SettleSmall", smallReq); err != nil {
-		t.Fatalf("SettleSmall failed: %v", err)
+	bLeg := core.SettlePairLeg{
+		CmNoteOut: smallSig.CmNoteOut,
+		ZkProof:   "test-proof-skip",
+		Signature: hex.EncodeToString(
+			ed25519.Sign(bobPriv, core.SettleSmallSigMessage(smallSig))),
 	}
-	waitBlock()
-	if st := queryOrders(t, buyOrderID)[0].Status; st != 2 { // Done
-		t.Fatalf("expected buy order Done(2), got %d", st)
-	}
-
-	largeReq := &core.SettleLargeRequest{
+	largeSig := &core.SettleLargeRequest{
 		OrderID:          sellOrderID,
 		MatchOrderID:     buyOrderID,
 		CmQResidual:      hexCommit(0xA1),
 		CmLockedResidual: hexCommit(0xA2),
 		CmNoteOut:        hexCommit(0xC2),
-		ZkProof:          "test-proof-skip",
 	}
-	largeReq.Signature = hex.EncodeToString(
-		ed25519.Sign(alicePriv, core.SettleLargeSigMessage(largeReq)))
-	if err := wrCall("orderbook", "SettleLarge", largeReq); err != nil {
-		t.Fatalf("SettleLarge failed: %v", err)
+	aLeg := core.SettlePairLeg{
+		CmNoteOut:        largeSig.CmNoteOut,
+		CmQResidual:      largeSig.CmQResidual,
+		CmLockedResidual: largeSig.CmLockedResidual,
+		ZkProof:          "test-proof-skip",
+		Signature: hex.EncodeToString(
+			ed25519.Sign(alicePriv, core.SettleLargeSigMessage(largeSig))),
+	}
+	pairReq := &core.SettlePairRequest{
+		OrderAID: sellOrderID,
+		OrderBID: buyOrderID,
+		A:        aLeg,
+		B:        bLeg,
+	}
+	if err := wrCall("orderbook", "SettlePair", pairReq); err != nil {
+		t.Fatalf("SettlePair failed: %v", err)
 	}
 	waitBlock()
+	if st := queryOrders(t, buyOrderID)[0].Status; st != 2 { // Done
+		t.Fatalf("expected buy order Done(2), got %d", st)
+	}
 	if st := queryOrders(t, sellOrderID)[0].Status; st != 0 { // Pending (relisted)
 		t.Fatalf("expected relisted sell order Pending(0), got %d", st)
 	}
-	if getNoteByCm(t, smallReq.CmNoteOut) < 0 || getNoteByCm(t, largeReq.CmNoteOut) < 0 {
+	if getNoteByCm(t, bLeg.CmNoteOut) < 0 || getNoteByCm(t, aLeg.CmNoteOut) < 0 {
 		t.Fatal("both payout notes must be in the pool tree")
 	}
 

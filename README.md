@@ -18,11 +18,17 @@ A privacy-preserving order book built on pure cryptography — no TEE, no centra
 
 ### Chain
 
+The default build includes the cozk2p PLONK verifier (the collaborative
+settlement path); it needs Rust for the verifier staticlib:
+
 ```bash
-cd chain
-go build -o invisibook .
-./invisibook
+make build-chain     # builds the cozk2p staticlib + go build -tags cozk2p
+cd chain && ./invisibook
 ```
+
+`make build-chain-lite` produces a pure-Go binary WITHOUT the verifier —
+dev only. It refuses to boot on any config that sets
+`settle_cozk2p_vk_path`, so it cannot silently run as a production node.
 
 The chain node listens on:
 - **HTTP** `localhost:7999` – reading & writing API
