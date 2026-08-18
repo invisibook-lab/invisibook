@@ -18,12 +18,16 @@ import (
 
 // cozk2pE2eFixture is the subset of `dump_settle2p_fixture` output this test
 // needs (the full schema is documented in core/cozk2p_layout_test.go).
+// Locked-only model: the proved statement covers the two locked collateral
+// commitments plus the public price and A's side.
 type cozk2pE2eFixture struct {
-	Cmp                 int    `json:"cmp"`
-	OrderACommitmentHex string `json:"order_a_commitment_hex"`
-	OrderBCommitmentHex string `json:"order_b_commitment_hex"`
-	ProofHex            string `json:"proof_hex"`
-	VKPath              string `json:"vk_path"`
+	Cmp        int    `json:"cmp"`
+	LockedAHex string `json:"locked_a_hex"`
+	LockedBHex string `json:"locked_b_hex"`
+	Price      uint64 `json:"price"`
+	AIsSeller  bool   `json:"a_is_seller"`
+	ProofHex   string `json:"proof_hex"`
+	VKPath     string `json:"vk_path"`
 }
 
 // TestCoZk2pSettleRealProofOnChain is the full-depth e2e of the 2-party
@@ -51,6 +55,12 @@ func TestCoZk2pSettleRealProofOnChain(t *testing.T) {
 	}
 	if fx.Cmp != 1 {
 		t.Fatalf("this test assumes the sample trade's cmp=1, got %d", fx.Cmp)
+	}
+	if !fx.AIsSeller {
+		t.Fatalf("this test assumes the sample trade's A side sells")
+	}
+	if fx.Price == 0 {
+		t.Fatal("fixture has no price — regenerate it for the locked-only model")
 	}
 
 	alicePriv, alicePubkey := deriveKeypair(t, aliceDerivedSeedHex)
@@ -93,10 +103,10 @@ require_proofs = false
 	}()
 	time.Sleep(6 * time.Second)
 
-	// --- Send both orders carrying the fixture's order commitments; alice
+	// --- Send both orders carrying the fixture's locked commitments; alice
 	// first so her sell is the maker (order A / circuit a-side) ---
 	sellReq := signedSendOrder(alicePriv, core.Sell, "ETH", "USDT",
-		3, fx.OrderACommitmentHex, alicePubkey, []string{"alice-eth-note"})
+		fx.Price, fx.LockedAHex, alicePubkey, []string{"alice-eth-note"})
 	sellOrderID := sellReq.ID
 	if err := wrCall("orderbook", "SendOrder", sellReq); err != nil {
 		t.Fatalf("SendOrder (sell) failed: %v", err)
@@ -104,7 +114,7 @@ require_proofs = false
 	waitBlock()
 
 	buyReq := signedSendOrder(bobPriv, core.Buy, "ETH", "USDT",
-		3, fx.OrderBCommitmentHex, bobPubkey, []string{"bob-usdt-note"})
+		fx.Price, fx.LockedBHex, bobPubkey, []string{"bob-usdt-note"})
 	buyOrderID := buyReq.ID
 	if err := wrCall("orderbook", "SendOrder", buyReq); err != nil {
 		t.Fatalf("SendOrder (buy) failed: %v", err)
@@ -166,13 +176,11 @@ require_proofs = false
 	largeSig := &core.SettleLargeRequest{
 		OrderID:          sellOrderID,
 		MatchOrderID:     buyOrderID,
-		CmQResidual:      hexCommit(0xA1),
 		CmLockedResidual: hexCommit(0xA2),
 		CmNoteOut:        hexCommit(0xC2),
 	}
 	aLeg := core.SettlePairLeg{
 		CmNoteOut:        largeSig.CmNoteOut,
-		CmQResidual:      largeSig.CmQResidual,
 		CmLockedResidual: largeSig.CmLockedResidual,
 		ZkProof:          "test-proof-skip",
 		Signature: hex.EncodeToString(

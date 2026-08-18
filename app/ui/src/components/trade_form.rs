@@ -36,7 +36,7 @@ pub struct PreparedOrder {
 }
 
 /// Build the complete SendOrder request from selected notes: spend slots
-/// with Merkle paths, fresh (q, collateral, change) commitments, the bind,
+/// with Merkle paths, fresh (collateral, change) commitments, the bind,
 /// and the rapidsnark proof. Pure CPU — call from a blocking context.
 /// `notes` must be 1..=2 unspent records of `lock_token` whose sum covers
 /// `collateral + fee`.
@@ -102,14 +102,13 @@ pub fn prepare_order(
         rng.fill_bytes(&mut b);
         b
     };
-    let (r_q, r_locked, r_change, change_sk) = (draw(), draw(), draw(), draw());
+    let (r_locked, r_change, change_sk) = (draw(), draw(), draw());
 
     let w = SendOrderWitness {
         slots,
         anchor: tree.root(),
         lock_asset,
         q,
-        r_q: fr_from_be_bytes(&r_q),
         r_locked: fr_from_be_bytes(&r_locked),
         price,
         side_sell,
@@ -119,7 +118,7 @@ pub fn prepare_order(
         r_change: fr_from_be_bytes(&r_change),
         bind: fr_from_be_bytes(&[0u8; 32]),
     };
-    let (cm_q, locked_cm, cm_change) = w.output_commitments();
+    let (locked_cm, cm_change) = w.output_commitments();
     let mut w = w;
     w.bind = send_order_bind(
         chain_id,
@@ -127,7 +126,6 @@ pub fn prepare_order(
         lock_token,
         &nf_hex[0],
         &nf_hex[1],
-        &note_fr_to_hex(&cm_q),
         &note_fr_to_hex(&locked_cm),
         fee,
         &note_fr_to_hex(&cm_change),
@@ -147,7 +145,6 @@ pub fn prepare_order(
             token2: subject.1,
         },
         price: Some(price),
-        amount: proof.cm_q_hex.clone(),
         pubkey: String::new(),    // filled by ChainClient::send_order
         signature: String::new(), // filled by ChainClient::send_order
         anchor: note_fr_to_hex(&tree.root()),
@@ -160,7 +157,6 @@ pub fn prepare_order(
     let opening = OrderOpening {
         order_id,
         q,
-        r_q: hex::encode(r_q),
         locked_amount: collateral,
         r_locked: hex::encode(r_locked),
         lock_token: lock_token.to_string(),
@@ -394,7 +390,10 @@ pub fn TradeForm(
             };
 
             submitting.set(true);
-            let amount_str = amount_input.read().clone();
+            // What the book shows for an own row is the LOCKED collateral
+            // (the column other rows show the collateral commitment in), not
+            // the typed quantity — locked-only model.
+            let locked_str = collateral.to_string();
             spawn(async move {
                 let result = submit_order(
                     &client,
@@ -411,7 +410,7 @@ pub fn TradeForm(
                 .await;
                 match result {
                     Ok((order_id, confirmed)) => {
-                        own_order_ids.write().insert(order_id, amount_str);
+                        own_order_ids.write().insert(order_id, locked_str);
                         expanded.set(None);
                         if confirmed {
                             message.set(Some((
@@ -686,7 +685,6 @@ mod submit_tests {
                     token2: "USDT".into(),
                 },
                 price: Some(3),
-                amount: "aa".repeat(32),
                 pubkey: String::new(),
                 signature: String::new(),
                 anchor: "bb".repeat(32),
@@ -699,7 +697,6 @@ mod submit_tests {
             opening: OrderOpening {
                 order_id: order_id.into(),
                 q: 2,
-                r_q: "11".repeat(32),
                 locked_amount: 6,
                 r_locked: "22".repeat(32),
                 lock_token: "USDT".into(),

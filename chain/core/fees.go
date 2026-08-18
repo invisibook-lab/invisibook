@@ -232,7 +232,6 @@ func sendOrderBind(chainID uint64, req *SendOrderRequest) *big.Int {
 		[]byte(lockToken),
 		[]byte(req.InputNullifiers[0]),
 		[]byte(req.InputNullifiers[1]),
-		[]byte(req.Amount),
 		[]byte(req.LockedCommitment),
 		u64be(req.Fee),
 		[]byte(req.ChangeCommitment),

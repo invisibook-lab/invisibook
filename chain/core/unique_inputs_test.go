@@ -12,7 +12,6 @@ func validSendOrderRequest() *SendOrderRequest {
 		ID:               "order-1",
 		Type:             Buy,
 		Subject:          TradePair{Token1: "ETH", Token2: "USDT"},
-		Amount:           CipherText(strings.Repeat("a", 64)),
 		Pubkey:           "alice-pk",
 		Signature:        "sig",
 		Anchor:           strings.Repeat("b", 64),

@@ -8,16 +8,19 @@ import (
 	"testing"
 )
 
-// cozk2pFixture mirrors `cozk2p/src/bin/dump_settle2p_fixture.rs` output.
-// The proof inside was generated COLLABORATIVELY by two in-process SPDZ
-// parties, so these tests cover exactly what production comparison submits.
+// cozk2pFixture mirrors `cozk2p/src/bin/dump_settle2p_fixture.rs` output
+// (locked-only model). The proof inside was generated COLLABORATIVELY by
+// two in-process SPDZ parties, so these tests cover exactly what
+// production comparison submits.
 type cozk2pFixture struct {
-	Cmp                 int             `json:"cmp"`
-	OrderACommitmentHex string          `json:"order_a_commitment_hex"`
-	OrderBCommitmentHex string          `json:"order_b_commitment_hex"`
-	ProofHex            string          `json:"proof_hex"`
-	Public              json.RawMessage `json:"public"`
-	VKPath              string          `json:"vk_path"`
+	Cmp        int             `json:"cmp"`
+	LockedAHex string          `json:"locked_a_hex"`
+	LockedBHex string          `json:"locked_b_hex"`
+	Price      uint64          `json:"price"`
+	AIsSeller  bool            `json:"a_is_seller"`
+	ProofHex   string          `json:"proof_hex"`
+	Public     json.RawMessage `json:"public"`
+	VKPath     string          `json:"vk_path"`
 }
 
 func loadCoZk2pFixture(t *testing.T) cozk2pFixture {
@@ -40,9 +43,11 @@ func loadCoZk2pFixture(t *testing.T) cozk2pFixture {
 func TestCompareCoZk2pPublicLayoutMatchesRust(t *testing.T) {
 	fx := loadCoZk2pFixture(t)
 	rebuilt, err := json.Marshal(settle2pPublic{
-		Cmp:    fx.Cmp,
-		OrderA: fx.OrderACommitmentHex,
-		OrderB: fx.OrderBCommitmentHex,
+		Cmp:       fx.Cmp,
+		LockedA:   fx.LockedAHex,
+		LockedB:   fx.LockedBHex,
+		Price:     fx.Price,
+		AIsSeller: fx.AIsSeller,
 	})
 	if err != nil {
 		t.Fatalf("marshaling rebuilt public: %v", err)
@@ -76,7 +81,7 @@ func TestCompareMessageDomainSeparation(t *testing.T) {
 	})
 	large := SettleLargeSigMessage(&SettleLargeRequest{
 		OrderID: "order-a", MatchOrderID: "order-b",
-		CmQResidual: "00", CmLockedResidual: "00", CmNoteOut: "00",
+		CmLockedResidual: "00", CmNoteOut: "00",
 	})
 	if bytes.Equal(small, large) {
 		t.Fatal("settle small/large signing messages must be domain-separated")

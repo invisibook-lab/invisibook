@@ -58,30 +58,32 @@ func canonicalHex(seed string) string {
 }
 
 // signedSendOrder builds a v2 SendOrder request for test mode (proof
-// verification skipped). `seed` distinguishes the two nullifiers; the anchor
-// is the always-valid empty-tree root, and the locked/change commitments are
-// canonical placeholders.
+// verification skipped). `seed` distinguishes the two nullifiers and the
+// anchor is the always-valid empty-tree root. Locked-only model: the order
+// carries ONE commitment. When `locked` is already a 64-char hex it becomes
+// the row's LockedCommitment verbatim (real-proof e2e tests seed the exact
+// commitments a fixture proved against); any other string only salts a
+// canonical placeholder.
 func signedSendOrder(priv ed25519.PrivateKey, tradeType core.TradeType, token1, token2 string,
-	price uint64, amount, pubkey string, seed []string) *core.SendOrderRequest {
+	price uint64, locked, pubkey string, seed []string) *core.SendOrderRequest {
 	tag := pubkey
 	if len(seed) > 0 {
 		tag = seed[0]
 	}
 	nfs := []string{canonicalHex("nf0:" + tag), canonicalHex("nf1:" + tag)}
-	// `amount` is the plaintext quantity in the legacy call shape; v2 carries
-	// it as a 64-char commitment (cm_q), so derive a canonical placeholder
-	// keyed by the quantity so distinct quantities give distinct commitments.
-	cmQ := canonicalHex("cmq:" + tag + ":" + amount)
+	lockedCommitment := locked
+	if len(lockedCommitment) != 64 {
+		lockedCommitment = canonicalHex("locked:" + tag + ":" + locked)
+	}
 	req := &core.SendOrderRequest{
 		ID:               core.ComputeOrderID(nfs),
 		Type:             tradeType,
 		Subject:          core.TradePair{Token1: core.TokenID(token1), Token2: core.TokenID(token2)},
 		Price:            new(big.Int).SetUint64(price),
-		Amount:           core.CipherText(cmQ),
 		Pubkey:           pubkey,
 		Anchor:           core.FrToHex(core.EmptyRoot(core.TreeDepth)),
 		InputNullifiers:  nfs,
-		LockedCommitment: canonicalHex("locked:" + tag),
+		LockedCommitment: lockedCommitment,
 		Fee:              0,
 		ChangeCommitment: canonicalHex("change:" + tag),
 		ZkProof:          "test-proof-skip",
@@ -359,7 +361,6 @@ func TestFullOrderLifecycle(t *testing.T) {
 type OrderItem struct {
 	ID               string `json:"id"`
 	Status           int    `json:"status"`
-	Amount           string `json:"amount"`
 	MatchOrder       string `json:"match_order"`
 	Pubkey           string `json:"pubkey"`
 	LockedCommitment string `json:"locked_commitment"`

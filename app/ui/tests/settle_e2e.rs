@@ -418,17 +418,14 @@ async fn settle_e2e_relist() {
     assert_eq!(bob_final.status, OrderStatus::Done);
 
     // Alice's order is relisted in place: SAME id, still on the book, its
-    // quantity AND collateral commitments rewritten to the residuals.
+    // single collateral commitment rewritten to the residual (locked-only
+    // model: there is no quantity commitment).
     let alice_final = poll_order(&alice, &alice_order_id, 10, |o| {
         o.status == OrderStatus::Pending
     })
     .await
     .expect("sell order must be relisted Pending");
     assert_eq!(alice_final.id, alice_order_id, "relisted under the same id");
-    assert_ne!(
-        alice_final.amount, alice_matched.amount,
-        "order commitment must be rewritten to the residual commitment"
-    );
     assert_ne!(
         alice_final.locked_commitment, alice_matched.locked_commitment,
         "collateral commitment must be rewritten to the residual commitment"

@@ -154,13 +154,11 @@ func runCompareSettleLifecycle(
 	largeSig := &core.SettleLargeRequest{
 		OrderID:          sellOrderID,
 		MatchOrderID:     buyOrderID,
-		CmQResidual:      hexCommit(0xA1),
 		CmLockedResidual: hexCommit(0xA2),
 		CmNoteOut:        hexCommit(0xC2),
 	}
 	aliceLeg := core.SettlePairLeg{
 		CmNoteOut:        largeSig.CmNoteOut,
-		CmQResidual:      largeSig.CmQResidual,
 		CmLockedResidual: largeSig.CmLockedResidual,
 		ZkProof:          "test-proof-skip",
 		Signature: hex.EncodeToString(
@@ -181,7 +179,6 @@ func runCompareSettleLifecycle(
 	oldLarge := &core.SettleLargeRequest{
 		OrderID:          sellOrderID,
 		MatchOrderID:     buyOrderID,
-		CmQResidual:      largeSig.CmQResidual,
 		CmLockedResidual: largeSig.CmLockedResidual,
 		CmNoteOut:        largeSig.CmNoteOut,
 		Signature:        aliceLeg.Signature,
@@ -260,9 +257,6 @@ func runCompareSettleLifecycle(
 	sellAfter := queryOrders(t, sellOrderID)[0]
 	if sellAfter.Status != 0 { // Pending
 		t.Fatalf("expected relisted sell order Pending(0), got %d", sellAfter.Status)
-	}
-	if sellAfter.Amount != largeSig.CmQResidual {
-		t.Fatalf("relisted order amount = %s, want %s", sellAfter.Amount, largeSig.CmQResidual)
 	}
 	if sellAfter.MatchOrder != "" {
 		t.Fatalf("relisted order must have match_order cleared, got %s", sellAfter.MatchOrder)

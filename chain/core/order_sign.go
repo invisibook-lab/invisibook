@@ -39,7 +39,6 @@ func SendOrderSigningMessage(req *SendOrderRequest) []byte {
 	buf = appendSigningField(buf, string(req.Subject.Token1))
 	buf = appendSigningField(buf, string(req.Subject.Token2))
 	buf = appendSigningField(buf, priceStr)
-	buf = appendSigningField(buf, string(req.Amount))
 	buf = appendSigningField(buf, req.Pubkey)
 	buf = appendSigningField(buf, req.Anchor)
 	buf = appendSigningField(buf, req.InputNullifiers[0])

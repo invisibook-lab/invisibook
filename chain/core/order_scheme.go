@@ -23,7 +23,6 @@ type OrderScheme struct {
 	Token1           string `gorm:"column:token1;index:idx_pair_type"`
 	Token2           string `gorm:"column:token2;index:idx_pair_type"`
 	Price            string `gorm:"column:price"`
-	Amount           string `gorm:"column:amount"` // cm_q
 	Pubkey           string `gorm:"column:pubkey;index"`
 	LockedCommitment string `gorm:"column:locked_commitment"`
 	Fee              uint64 `gorm:"column:fee"`
@@ -121,9 +120,7 @@ type SettlementJournalScheme struct {
 	CmNoteB        string `gorm:"column:cm_note_b;not null"`
 	ALarge         bool   `gorm:"column:a_large"`
 	BLarge         bool   `gorm:"column:b_large"`
-	CmQResidualA   string `gorm:"column:cm_q_residual_a"`
 	CmLockedResidA string `gorm:"column:cm_locked_residual_a"`
-	CmQResidualB   string `gorm:"column:cm_q_residual_b"`
 	CmLockedResidB string `gorm:"column:cm_locked_residual_b"`
 	State          int    `gorm:"column:state;index"`
 	Height         uint64 `gorm:"column:height"`
@@ -248,7 +245,6 @@ func orderToScheme(o *Order) *OrderScheme {
 		Token1:           string(o.Subject.Token1),
 		Token2:           string(o.Subject.Token2),
 		Price:            priceStr,
-		Amount:           string(o.Amount),
 		Pubkey:           o.Pubkey,
 		LockedCommitment: o.LockedCommitment,
 		Fee:              o.Fee,
@@ -277,7 +273,6 @@ func schemeToOrder(s *OrderScheme) *Order {
 			Token2: TokenID(s.Token2),
 		},
 		Price:            price,
-		Amount:           CipherText(s.Amount),
 		Pubkey:           s.Pubkey,
 		LockedCommitment: s.LockedCommitment,
 		Fee:              s.Fee,
@@ -295,14 +290,6 @@ func schemesToOrders(rows []OrderScheme) []*Order {
 		orders = append(orders, schemeToOrder(&rows[i]))
 	}
 	return orders
-}
-
-// UpdateOrderAmount replaces an order's hidden amount commitment (64-char
-// hex). Used by co-zk settlement when the surviving larger order stays on the
-// book with its remainder commitment.
-func (ot *OrderBook) UpdateOrderAmount(id OrderID, amount CipherText) error {
-	return ot.db.Model(&OrderScheme{}).Where("id = ?", string(id)).
-		Update("amount", string(amount)).Error
 }
 
 // UpdateOrderLockedCommitment replaces an order's collateral commitment

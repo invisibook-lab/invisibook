@@ -14,20 +14,23 @@
 //!
 //! 1. Fingerprint preamble over the chain-sourced public inputs — a stale
 //!    chain read aborts before any secret flows.
-//! 2. Share both order amounts + blindings; verify each opens its ON-CHAIN
-//!    order commitment inside the MPC (Poseidon on shares).
+//! 2. Share both order quantities + collateral blindings; verify each
+//!    side's `needed(q, side)` opens its ON-CHAIN collateral commitment
+//!    inside the MPC (share-local price scaling + Poseidon on shares).
+//!    Locked-only model: the collateral commitment is the order's ONLY
+//!    commitment — there is no separate quantity commitment.
 //! 3. Three-way compare, opening only `cmp`.
-//! 4. The smaller party reveals its plaintext (amount, blinding) — the
-//!    paper's sanctioned disclosure, needed by the larger side's π_B; both
-//!    parties then open `share − revealed` and require zero, so a lying
-//!    reveal aborts instantly.
+//! 4. The smaller party reveals its plaintext (quantity, collateral
+//!    blinding) — the paper's sanctioned disclosure, needed by the larger
+//!    side's π_B; both parties then open `share − revealed` and require
+//!    zero, so a lying reveal aborts instantly.
 //! 5. Each side derives its incoming payout note's opening (its own fresh
 //!    blinding, its app-provided npk) and PERSISTS it (witness.json WAL)
 //!    BEFORE the (npk, r) pair is handed to the payer — the payer can only
 //!    mint what my disk already remembers.
 //! 6. The two (npk, r) pairs are exchanged; the WAL is updated with the
 //!    counterparty's pair (my settle proof needs it).
-//! 7. Signatures over (order_a, order_b, cmp) are ferried from the host app
+//! 7. Signatures over (order ids, cmp) are ferried from the host app
 //!    (`SigIo`) and exchanged; then the collaborative prove of π_cmp runs
 //!    and the proof is locally verified before it is returned.
 
@@ -49,25 +52,17 @@ use crate::{
     mpc_poseidon::poseidon_hash,
     poseidon::{asset_fr, commit, fr_to_hex, hash2, note_commit},
     prove::{ProveTimings, prove_collaborative_timed, verify_settle},
-    relation::{SettlePublic, SidePrivate},
+    relation::{SettlePublic, SidePrivate, needed_collateral},
 };
 
-/// Locked collateral slots per side (2-slot circuit shape; slot 1 is
-/// always the zero-commitment pad in the note model).
-pub const MAX_LOCKED: usize = 2;
-
-/// This trader's private witness material (note model): the openings of
-/// its on-chain `Order.Amount` (cm_q) and `Order.LockedCommitment` rows.
+/// This trader's private witness material (locked-only model): the opening
+/// of its on-chain `Order.LockedCommitment` row — the order's ONLY
+/// commitment. The committed value is derived: `needed(q, side)` = q for a
+/// sell, q·price for a buy.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MyPrivate {
-    /// Hidden order amount (token1 quantity), the value `Order.Amount`
-    /// commits to.
+    /// Hidden order quantity (token1 units) backing the collateral.
     pub order_amount: u64,
-    /// 64-char hex blinding of the on-chain order commitment.
-    pub r_order: String,
-    /// Hidden collateral value the on-chain `Order.LockedCommitment`
-    /// commits to (= q for a sell, q·price for a buy).
-    pub locked_amount: u64,
     /// 64-char hex blinding of the on-chain collateral commitment.
     pub r_locked: String,
 }
@@ -89,13 +84,10 @@ pub struct SessionInput {
     pub my_recv_token: String,
     pub price: u64,
     pub a_is_seller: bool,
-    /// On-chain `Order.Amount` commitment hexes of the two orders.
-    pub order_a: String,
-    pub order_b: String,
-    /// Each order's collateral in the 2-slot circuit shape:
-    /// `[Order.LockedCommitment, Poseidon(0,0) pad]`.
-    pub locked_a: [String; 2],
-    pub locked_b: [String; 2],
+    /// On-chain `Order.LockedCommitment` hexes of the two orders — each
+    /// order's single commitment in the locked-only model.
+    pub locked_a: String,
+    pub locked_b: String,
     /// 64-char hex Fr: this wallet's fresh receiving key for its payout
     /// note (never reuse across trades — one key, one note).
     pub my_recv_npk: String,
@@ -132,12 +124,15 @@ pub struct MyOutcome {
     pub ctr_r_recv: String,
 
     // ── Larger side only (empty/zero when i_am_smaller): the revealed
-    //    counterparty opening + my residual re-commitments ──
+    //    counterparty opening + my residual re-commitment ──
+    /// The counterparty's revealed quantity.
     pub ctr_order_amount: u64,
-    pub ctr_r_order: String,
+    /// The counterparty's revealed collateral blinding (canonical hex).
+    pub ctr_r_locked: String,
+    /// Unfilled quantity kept on the book — wallet bookkeeping only; the
+    /// residual COLLATERAL commitment below is the only re-commitment
+    /// (locked-only model: no residual quantity commitment exists).
     pub new_order_amount: u64,
-    pub r_order_new: String,
-    pub new_order_commitment: String,
     pub new_locked_amount: u64,
     pub r_locked_new: String,
     pub new_locked_commitment: String,
@@ -241,17 +236,11 @@ fn commitment_fr(s: &str, what: &str) -> Result<Fr> {
     Ok(Fr::from_be_bytes_mod_order(&hex32(s, what)?))
 }
 
-/// The zero-commitment pad `Poseidon(0, 0)` in the 64-char hex form the
-/// chain stores. Slot 1 of every collateral pair must equal it.
-pub fn poseidon_zero_commitment_hex() -> String {
-    fr_to_hex(&commit(0, &[0u8; 32]))
-}
-
 /// Local pre-network sanity: this trader's witness must open its own side
-/// of the chain-sourced public inputs (the order commitment and the
-/// order-bound collateral commitment), and the collateral must exactly
-/// back the order at the execution price. Distinct error strings keep
-/// failures attributable (corrupt local records vs stale chain reads).
+/// of the chain-sourced public inputs — `needed(q, side)` at the execution
+/// price must commit to the on-chain collateral commitment. Distinct error
+/// strings keep failures attributable (corrupt local records vs stale
+/// chain reads).
 pub fn sanity_check_input(input: &SessionInput) -> Result<()> {
     ensure!(
         input.role == "trader-a" || input.role == "trader-b",
@@ -261,80 +250,45 @@ pub fn sanity_check_input(input: &SessionInput) -> Result<()> {
     // The recv npk must be a well-formed field element hex.
     commitment_fr(&input.my_recv_npk, "my_recv_npk")?;
 
-    // The order commitment must open with my witness.
-    let my_order_hex = if i_am_a {
-        &input.order_a
-    } else {
-        &input.order_b
-    };
-    let r_order = hex32(&input.my.r_order, "r_order")?;
-    let opened = fr_to_hex(&commit(input.my.order_amount, &r_order));
-    ensure!(
-        &opened == my_order_hex,
-        "corrupt local order records: witness does not open the on-chain order commitment"
-    );
-
-    // Slot 0 must open the order's collateral commitment; slot 1 must be
-    // the zero pad (note model: exactly one real collateral slot).
+    // needed(q, side) must fit u64 (the 64-bit circuits) and open my
+    // on-chain collateral commitment.
+    let i_am_seller = i_am_a == input.a_is_seller;
+    let needed = needed_collateral(input.my.order_amount, input.price, i_am_seller)
+        .context("required collateral exceeds 64 bits")?;
     let my_locked_hex = if i_am_a {
         &input.locked_a
     } else {
         &input.locked_b
     };
     let r_locked = hex32(&input.my.r_locked, "r_locked")?;
-    let opened_locked = fr_to_hex(&commit(input.my.locked_amount, &r_locked));
+    let opened_locked = fr_to_hex(&commit(needed, &r_locked));
     ensure!(
-        opened_locked == my_locked_hex[0],
+        &opened_locked == my_locked_hex,
         "corrupt local order records: witness does not open the on-chain collateral commitment"
-    );
-    ensure!(
-        my_locked_hex[1] == poseidon_zero_commitment_hex(),
-        "collateral slot 1 must be the zero-commitment pad"
-    );
-
-    // Collateral backing at the execution price (equal-price limitation).
-    let i_am_seller = i_am_a == input.a_is_seller;
-    let needed: u128 = if i_am_seller {
-        input.my.order_amount as u128
-    } else {
-        input.my.order_amount as u128 * input.price as u128
-    };
-    ensure!(
-        input.my.locked_amount as u128 == needed,
-        "collateral does not back the order at the execution price"
     );
     Ok(())
 }
 
 /// Scale a token1 quantity into one side's payment leg: sellers move fill
-/// token1, buyers move fill·price token2. Bounds the result to u64 so every
-/// minted note stays spendable by the 64-bit circuits.
+/// token1, buyers move fill·price token2. That is the collateral equation
+/// [`needed_collateral`] with the buyer side selected by `by_price`, so both
+/// go through the one helper — including its u64 bound, which keeps every
+/// minted note spendable by the 64-bit circuits.
 fn scale_leg(amount: u64, by_price: bool, price: u64, what: &str) -> Result<u64> {
-    let v = if by_price {
-        amount as u128 * price as u128
-    } else {
-        amount as u128
-    };
-    ensure!(
-        v <= u64::MAX as u128,
-        "{what} amount {v} exceeds 64 bits and would be unspendable"
-    );
-    Ok(v as u64)
+    needed_collateral(amount, price, !by_price)
+        .with_context(|| format!("{what} amount exceeds 64 bits and would be unspendable"))
 }
 
 /// Poseidon-fold fingerprint of the chain-sourced public inputs, exchanged
 /// before any secret flows so divergent chain reads abort with a clear
 /// error instead of a MAC failure deep inside the protocol.
 fn input_fingerprint(input: &SessionInput) -> Result<Fr> {
-    let mut vec = vec![
-        commitment_fr(&input.order_a, "order_a")?,
-        commitment_fr(&input.order_b, "order_b")?,
+    let vec = vec![
+        commitment_fr(&input.locked_a, "locked_a")?,
+        commitment_fr(&input.locked_b, "locked_b")?,
         Fr::from(input.price),
         Fr::from(input.a_is_seller as u64),
     ];
-    for h in input.locked_a.iter().chain(input.locked_b.iter()) {
-        vec.push(commitment_fr(h, "locked hash")?);
-    }
     let mut h = Fr::from(vec.len() as u64);
     for v in vec {
         h = hash2(h, v);
@@ -448,26 +402,39 @@ where
         "verifying commitments and comparing amounts in MPC",
     );
     let my_amount_scalar = Scalar::from(input.my.order_amount);
-    let my_r_order = Scalar::new(blinding_fr(&hex32(&input.my.r_order, "r_order")?));
+    let my_r_locked = Scalar::new(blinding_fr(&hex32(&input.my.r_locked, "r_locked")?));
     let zero = Scalar::from(0u64);
-    // Canonical order: A's amount, A's blinding, B's amount, B's blinding.
+    // Canonical order: A's quantity, A's blinding, B's quantity, B's
+    // blinding — the blindings are the collateral blindings (locked-only).
     let pick = |owner_is_a: bool, mine: Scalar<G1Projective>| {
         if owner_is_a == i_am_a { mine } else { zero }
     };
-    let v_a = fabric.share_scalar(pick(true, my_amount_scalar), PARTY0);
-    let r_a = fabric.share_scalar(pick(true, my_r_order), PARTY0);
-    let v_b = fabric.share_scalar(pick(false, my_amount_scalar), PARTY1);
-    let r_b = fabric.share_scalar(pick(false, my_r_order), PARTY1);
+    let q_a = fabric.share_scalar(pick(true, my_amount_scalar), PARTY0);
+    let r_a = fabric.share_scalar(pick(true, my_r_locked), PARTY0);
+    let q_b = fabric.share_scalar(pick(false, my_amount_scalar), PARTY1);
+    let r_b = fabric.share_scalar(pick(false, my_r_locked), PARTY1);
 
-    let order_a_pub = Scalar::new(commitment_fr(&input.order_a, "order_a")?);
-    let order_b_pub = Scalar::new(commitment_fr(&input.order_b, "order_b")?);
-    let bind_a = &poseidon_hash(&fabric, &v_a, &r_a) - order_a_pub;
-    let bind_b = &poseidon_hash(&fabric, &v_b, &r_b) - order_b_pub;
-    open_expect_zero(&bind_a, "order A commitment binding").await?;
-    open_expect_zero(&bind_b, "order B commitment binding").await?;
+    // needed(q, side) on shares: the side flags and price are public, so
+    // the scaling is share-local (no Beaver triples). A's flag is
+    // a_is_seller; B is always the opposite side.
+    let needed_of = |q: &AuthenticatedScalarResult<G1Projective>, is_seller: bool| {
+        if is_seller {
+            q.clone()
+        } else {
+            q * Scalar::from(input.price)
+        }
+    };
+    let needed_a = needed_of(&q_a, input.a_is_seller);
+    let needed_b = needed_of(&q_b, !input.a_is_seller);
+    let locked_a_pub = Scalar::new(commitment_fr(&input.locked_a, "locked_a")?);
+    let locked_b_pub = Scalar::new(commitment_fr(&input.locked_b, "locked_b")?);
+    let bind_a = &poseidon_hash(&fabric, &needed_a, &r_a) - locked_a_pub;
+    let bind_b = &poseidon_hash(&fabric, &needed_b, &r_b) - locked_b_pub;
+    open_expect_zero(&bind_a, "order A collateral binding").await?;
+    open_expect_zero(&bind_b, "order B collateral binding").await?;
 
-    // ── Three-way comparison, opening only cmp ──
-    let cmp = compare_three_way(&fabric, &v_a, &v_b).await?;
+    // ── Three-way comparison of the quantities, opening only cmp ──
+    let cmp = compare_three_way(&fabric, &q_a, &q_b).await?;
     emit("compare", &format!("cmp = {cmp}"));
 
     // ── Signature ferry + in-fabric exchange (over the compared result;
@@ -498,12 +465,14 @@ where
     emit("prove", "collaboratively proving the comparison");
     let public = SettlePublic {
         cmp,
-        order_a: commitment_fr(&input.order_a, "order_a")?,
-        order_b: commitment_fr(&input.order_b, "order_b")?,
+        locked_a: commitment_fr(&input.locked_a, "locked_a")?,
+        locked_b: commitment_fr(&input.locked_b, "locked_b")?,
+        price: input.price,
+        a_is_seller: input.a_is_seller,
     };
     let side = SidePrivate {
         order_amount: input.my.order_amount,
-        r_order: hex32(&input.my.r_order, "r_order")?,
+        r_locked: hex32(&input.my.r_locked, "r_locked")?,
     };
     let (proof, timings) =
         prove_collaborative_timed(fabric.clone(), my_party, &side, &public, config.pk).await?;
@@ -538,14 +507,14 @@ where
     // ── The smaller party reveals its opening (compare is now ON-CHAIN;
     //    the larger side's π_B must open the smaller's commitment) ──
     let i_am_smaller = cmp == 0 || (cmp == 1) != i_am_a;
-    let (fill, ctr_order_amount, ctr_r_order) = if cmp == 0 {
+    let (fill, ctr_order_amount, ctr_r_locked) = if cmp == 0 {
         (input.my.order_amount, 0u64, String::new())
     } else {
         emit("reveal", "revealing the smaller side's opening");
         let smaller_party = if cmp == 1 { PARTY1 } else { PARTY0 };
         let reveal_mine = my_party == smaller_party;
         let payload: Vec<Scalar<G1Projective>> = if reveal_mine {
-            vec![my_amount_scalar, my_r_order]
+            vec![my_amount_scalar, my_r_locked]
         } else {
             vec![zero, zero]
         };
@@ -554,7 +523,7 @@ where
         ensure!(revealed.len() == 2, "malformed reveal payload from peer");
         // Bind the plaintext reveal to the MPC-verified shares: a lying
         // reveal aborts here, not as a rejected settle proof later.
-        let (v_smaller, r_smaller) = if cmp == 1 { (&v_b, &r_b) } else { (&v_a, &r_a) };
+        let (v_smaller, r_smaller) = if cmp == 1 { (&q_b, &r_b) } else { (&q_a, &r_a) };
         let v_diff = v_smaller - revealed[0];
         let r_diff = r_smaller - revealed[1];
         open_expect_zero(&v_diff, "reveal amount consistency").await?;
@@ -594,14 +563,15 @@ where
     let recv_asset = asset_fr(&input.my_recv_token)?;
     let recv_commitment = fr_to_hex(&note_commit(recv_npk_fr, recv_asset, recv_amount, &r_recv));
 
-    // My residuals (larger side only; zero commitments are never minted by
-    // the small path so the fields stay empty there).
-    let (new_order_amount, r_order_new, new_order_commitment) = if i_am_smaller {
-        (0u64, String::new(), String::new())
+    // My residual (larger side only; zero commitments are never minted by
+    // the small path so the fields stay empty there). Locked-only model:
+    // the residual collateral commitment `P2(needed(q_res, side), r)` is
+    // the ONLY re-commitment; the residual quantity itself is plain wallet
+    // bookkeeping.
+    let new_order_amount = if i_am_smaller {
+        0u64
     } else {
-        let remainder = input.my.order_amount - fill;
-        let r = draw();
-        (remainder, hex::encode(r), fr_to_hex(&commit(remainder, &r)))
+        input.my.order_amount - fill
     };
     let (new_locked_amount, r_locked_new, new_locked_commitment) = if i_am_smaller {
         (0u64, String::new(), String::new())
@@ -628,10 +598,8 @@ where
         ctr_recv_npk: String::new(),
         ctr_r_recv: String::new(),
         ctr_order_amount,
-        ctr_r_order,
+        ctr_r_locked,
         new_order_amount,
-        r_order_new,
-        new_order_commitment,
         new_locked_amount,
         r_locked_new,
         new_locked_commitment,
@@ -711,8 +679,6 @@ pub struct SettleLeg {
     pub cm_note_out: String,
     pub signature: String,
     pub zk_proof: String,
-    #[serde(default)]
-    pub cm_q_residual: String,
     #[serde(default)]
     pub cm_locked_residual: String,
 }

@@ -13,8 +13,10 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 use zk::{
-    circom_bridge::fr_to_decimal_string, prover::run_rapidsnark, test_circuit::TestCircuitHandle,
-    wallet::poseidon2,
+    circom_bridge::fr_to_decimal_string,
+    prover::run_rapidsnark,
+    test_circuit::TestCircuitHandle,
+    wallet::{needed_collateral, poseidon2},
 };
 
 use crate::note::{
@@ -247,14 +249,14 @@ pub fn prove_spend_withdraw(
 // ────────────────────── SendOrder (admission collateral) ──────────────────────
 
 /// Witness for `send_order.circom`: spend two note slots (dummies allowed),
-/// commit the order quantity `q` under `cm_q`, lock its collateral, pay the
+/// lock the order's collateral under `locked_commitment` (the order's ONLY
+/// commitment — the hidden quantity `q` is a pure witness), pay the
 /// plaintext `fee`, and mint the change note back to the spender.
 pub struct SendOrderWitness {
     pub slots: [SpendSlot; 2],
     pub anchor: Fr,
     pub lock_asset: Fr,
     pub q: u64,
-    pub r_q: Fr,
     pub r_locked: Fr,
     pub price: u64,
     pub side_sell: bool,
@@ -272,11 +274,10 @@ impl SendOrderWitness {
     }
 
     /// Public outputs the caller needs BEFORE proving (they enter bind):
-    /// (cm_q, locked_commitment, cm_change).
-    pub fn output_commitments(&self) -> (Fr, Fr, Fr) {
+    /// (locked_commitment, cm_change).
+    pub fn output_commitments(&self) -> (Fr, Fr) {
         (
-            poseidon2(Fr::from(self.q), self.r_q),
-            poseidon2(Fr::from(self.locked_value()), self.r_locked),
+            locked_commitment(self.q, self.price, self.side_sell, self.r_locked),
             note_commit(
                 self.npk_change,
                 self.lock_asset,
@@ -290,7 +291,6 @@ impl SendOrderWitness {
 /// Output of [`prove_send_order`].
 pub struct SendOrderProof {
     pub nf_hex: [String; 2],
-    pub cm_q_hex: String,
     pub locked_commitment_hex: String,
     pub cm_change_hex: String,
     pub proof_json: Value,
@@ -298,8 +298,8 @@ pub struct SendOrderProof {
 }
 
 /// Build the `send_order` witness and prove. Publics order:
-/// [anchor, nf_0, nf_1, lock_asset_id, cm_q, locked_commitment, fee,
-///  cm_change, price, side, bind].
+/// [anchor, nf_0, nf_1, lock_asset_id, locked_commitment, fee, cm_change,
+///  price, side, bind].
 pub fn prove_send_order(
     w: SendOrderWitness,
     circuit_handle: &TestCircuitHandle,
@@ -320,7 +320,7 @@ pub fn prove_send_order(
         w.slots[0].nullifier(w.lock_asset),
         w.slots[1].nullifier(w.lock_asset),
     ];
-    let (cm_q, locked_commitment, cm_change) = w.output_commitments();
+    let (locked_commitment, cm_change) = w.output_commitments();
 
     let dec = fr_to_decimal_string;
     let slot_parts: Vec<_> = w.slots.iter().map(|s| s.to_json_parts()).collect();
@@ -340,7 +340,6 @@ pub fn prove_send_order(
         "nf_0": dec(&nf[0]),
         "nf_1": dec(&nf[1]),
         "lock_asset_id": dec(&w.lock_asset),
-        "cm_q": dec(&cm_q),
         "locked_commitment": dec(&locked_commitment),
         "fee": w.fee.to_string(),
         "cm_change": dec(&cm_change),
@@ -355,7 +354,6 @@ pub fn prove_send_order(
         "path": paths,
         "path_bits": bits,
         "q": w.q.to_string(),
-        "r_q": dec(&w.r_q),
         "r_locked": dec(&w.r_locked),
         "npk_change": dec(&w.npk_change),
         "v_change": w.v_change.to_string(),
@@ -365,7 +363,6 @@ pub fn prove_send_order(
     let (proof_json, public_json) = run_rapidsnark(zkey, &wtns)?;
     Ok(SendOrderProof {
         nf_hex: [note_fr_to_hex(&nf[0]), note_fr_to_hex(&nf[1])],
-        cm_q_hex: note_fr_to_hex(&cm_q),
         locked_commitment_hex: note_fr_to_hex(&locked_commitment),
         cm_change_hex: note_fr_to_hex(&cm_change),
         proof_json,
@@ -425,20 +422,29 @@ pub fn prove_claim_fees(
 // ────────────────────── Settlement (paper's π_A / π_B) ──────────────────────
 
 /// The collateral a side must have locked: q·price for a buyer, q for a
-/// seller — the settle circuits' collateral equation, mirrored here so the
-/// wallet fails fast on inconsistent inputs.
+/// seller. Thin delegate to [`needed_collateral`], the ONE definition of the
+/// settle circuits' collateral equation (it lives in `zk`, which owns the
+/// circuit conventions); kept under this name for the chain-side callers.
 pub fn required_collateral(q: u64, price: u64, side_sell: bool) -> u64 {
-    if side_sell { q } else { q * price }
+    needed_collateral(q, price, side_sell)
+}
+
+/// The order's collateral commitment `P2(needed(q, side), r)` — the single
+/// commitment an order carries in the locked-only model. Shared by every
+/// settle witness (my own locked value, the counterparty's, the residual).
+pub fn locked_commitment(q: u64, price: u64, side_sell: bool, r: Fr) -> Fr {
+    poseidon2(Fr::from(required_collateral(q, price, side_sell)), r)
 }
 
 /// Witness for `settle_small.circom` (the fully filled side): the whole
 /// locked collateral transfers to the counterparty as one pool note.
+/// Locked-only model: the order carries one collateral commitment
+/// `P2(needed(q, side), r_locked)`; `q` is a pure witness.
 /// `npk_ctr`/`r_note` arrive from the counterparty over the settlement
 /// channel — the RECEIVER picked them, so it already persisted the opening.
 pub struct SettleSmallWitness {
     pub q: u64,
-    pub r_q: Fr,
-    pub locked: [(u64, Fr); 2],
+    pub r_locked: Fr,
     pub price: u64,
     pub side_sell: bool,
     pub pay_asset: Fr,
@@ -448,9 +454,15 @@ pub struct SettleSmallWitness {
 }
 
 impl SettleSmallWitness {
-    /// The payout value (= full collateral) this proof will transfer.
+    /// The payout value (= full collateral = needed(q, side)) this proof
+    /// will transfer.
     pub fn payout_value(&self) -> u64 {
-        self.locked[0].0 + self.locked[1].0
+        required_collateral(self.q, self.price, self.side_sell)
+    }
+
+    /// The order's collateral commitment (the `locked` public input).
+    pub fn locked_commitment(&self) -> Fr {
+        locked_commitment(self.q, self.price, self.side_sell, self.r_locked)
     }
 
     /// The payout note's commitment — needed by the caller BEFORE proving
@@ -474,42 +486,25 @@ pub struct SettleSmallProof {
 }
 
 /// Build the `settle_small` witness and prove. Publics order:
-/// [cm_q, locked_0, locked_1, price, side, pay_asset, cm_note_out, bind].
+/// [locked, price, side, pay_asset, cm_note_out, bind].
 pub fn prove_settle_small(
     w: SettleSmallWitness,
     circuit_handle: &TestCircuitHandle,
     zkey: &Path,
 ) -> Result<SettleSmallProof> {
-    ensure!(
-        w.payout_value() == required_collateral(w.q, w.price, w.side_sell),
-        "collateral {} does not match required {} (q={}, price={}, sell={})",
-        w.payout_value(),
-        required_collateral(w.q, w.price, w.side_sell),
-        w.q,
-        w.price,
-        w.side_sell
-    );
     let dec = fr_to_decimal_string;
-    let cm_q = poseidon2(Fr::from(w.q), w.r_q);
-    let locked_cms = [
-        poseidon2(Fr::from(w.locked[0].0), w.locked[0].1),
-        poseidon2(Fr::from(w.locked[1].0), w.locked[1].1),
-    ];
+    let locked = w.locked_commitment();
     let cm_note_out = w.cm_note_out();
 
     let input = json!({
-        "cm_q": dec(&cm_q),
-        "locked_0": dec(&locked_cms[0]),
-        "locked_1": dec(&locked_cms[1]),
+        "locked": dec(&locked),
         "price": w.price.to_string(),
         "side": if w.side_sell { "1" } else { "0" },
         "pay_asset": dec(&w.pay_asset),
         "cm_note_out": dec(&cm_note_out),
         "bind": dec(&w.bind),
         "q": w.q.to_string(),
-        "r_q": dec(&w.r_q),
-        "locked_v": [w.locked[0].0.to_string(), w.locked[1].0.to_string()],
-        "locked_r": [dec(&w.locked[0].1), dec(&w.locked[1].1)],
+        "r_locked": dec(&w.r_locked),
         "npk_ctr": dec(&w.npk_ctr),
         "r_note": dec(&w.r_note),
     });
@@ -524,19 +519,17 @@ pub fn prove_settle_small(
 }
 
 /// Witness for `settle_large.circom` (the partially filled side): pays the
-/// fill to the counterparty and re-commits the residual order + collateral
-/// under fresh randomness. `(q_ctr, r_q_ctr)` is the smaller side's
-/// revealed opening — the circuit forces it to open THEIR on-chain
-/// commitment, so the fill cannot be understated.
+/// fill to the counterparty and re-commits the residual collateral under
+/// fresh randomness. `(q_ctr, r_locked_ctr)` is the smaller side's revealed
+/// collateral opening — the circuit opens THEIR on-chain collateral with
+/// the OPPOSITE side, so the fill cannot be understated.
 pub struct SettleLargeWitness {
     pub q: u64,
-    pub r_q: Fr,
+    pub r_locked: Fr,
     pub q_ctr: u64,
-    pub r_q_ctr: Fr,
-    pub locked: [(u64, Fr); 2],
+    pub r_locked_ctr: Fr,
     pub price: u64,
     pub side_sell: bool,
-    pub r_q_residual: Fr,
     pub r_locked_residual: Fr,
     pub pay_asset: Fr,
     pub npk_ctr: Fr,
@@ -549,26 +542,45 @@ impl SettleLargeWitness {
         self.q - self.q_ctr
     }
 
+    /// My total collateral: needed(q, side).
+    pub fn locked_value(&self) -> u64 {
+        required_collateral(self.q, self.price, self.side_sell)
+    }
+
+    /// My on-chain collateral commitment (the `locked` public input).
+    pub fn locked_commitment(&self) -> Fr {
+        locked_commitment(self.q, self.price, self.side_sell, self.r_locked)
+    }
+
+    /// The counterparty's collateral commitment, opened with the OPPOSITE
+    /// side (the `locked_ctr` public input).
+    pub fn locked_ctr_commitment(&self) -> Fr {
+        locked_commitment(self.q_ctr, self.price, !self.side_sell, self.r_locked_ctr)
+    }
+
     pub fn residual_locked(&self) -> u64 {
         required_collateral(self.residual_q(), self.price, self.side_sell)
     }
 
     pub fn fill_value(&self) -> u64 {
-        self.locked[0].0 + self.locked[1].0 - self.residual_locked()
+        self.locked_value() - self.residual_locked()
     }
 
-    /// The three output commitments — needed BEFORE proving for bind.
-    pub fn output_cms(&self) -> (Fr, Fr, Fr) {
-        let cm_q_res = poseidon2(Fr::from(self.residual_q()), self.r_q_residual);
-        let cm_locked_res = poseidon2(Fr::from(self.residual_locked()), self.r_locked_residual);
+    /// The two output commitments — needed BEFORE proving for bind.
+    pub fn output_cms(&self) -> (Fr, Fr) {
+        let cm_locked_res = locked_commitment(
+            self.residual_q(),
+            self.price,
+            self.side_sell,
+            self.r_locked_residual,
+        );
         let cm_note = note_commit(self.npk_ctr, self.pay_asset, self.fill_value(), self.r_note);
-        (cm_q_res, cm_locked_res, cm_note)
+        (cm_locked_res, cm_note)
     }
 }
 
 /// Output of [`prove_settle_large`].
 pub struct SettleLargeProof {
-    pub cm_q_residual_hex: String,
     pub cm_locked_residual_hex: String,
     pub cm_note_out_hex: String,
     pub residual_q: u64,
@@ -578,57 +590,39 @@ pub struct SettleLargeProof {
 }
 
 /// Build the `settle_large` witness and prove. Publics order:
-/// [cm_q, cm_q_ctr, locked_0, locked_1, price, side, cm_q_residual,
-///  cm_locked_residual, pay_asset, cm_note_out, bind].
+/// [locked, locked_ctr, price, side, cm_locked_residual, pay_asset,
+///  cm_note_out, bind].
 pub fn prove_settle_large(
     w: SettleLargeWitness,
     circuit_handle: &TestCircuitHandle,
     zkey: &Path,
 ) -> Result<SettleLargeProof> {
     ensure!(w.q >= w.q_ctr, "larger side must have q >= q_ctr");
-    ensure!(
-        w.locked[0].0 + w.locked[1].0 == required_collateral(w.q, w.price, w.side_sell),
-        "collateral does not match required for q={} price={} sell={}",
-        w.q,
-        w.price,
-        w.side_sell
-    );
     let dec = fr_to_decimal_string;
-    let cm_q = poseidon2(Fr::from(w.q), w.r_q);
-    let cm_q_ctr = poseidon2(Fr::from(w.q_ctr), w.r_q_ctr);
-    let locked_cms = [
-        poseidon2(Fr::from(w.locked[0].0), w.locked[0].1),
-        poseidon2(Fr::from(w.locked[1].0), w.locked[1].1),
-    ];
-    let (cm_q_res, cm_locked_res, cm_note_out) = w.output_cms();
+    let locked = w.locked_commitment();
+    let locked_ctr = w.locked_ctr_commitment();
+    let (cm_locked_res, cm_note_out) = w.output_cms();
 
     let input = json!({
-        "cm_q": dec(&cm_q),
-        "cm_q_ctr": dec(&cm_q_ctr),
-        "locked_0": dec(&locked_cms[0]),
-        "locked_1": dec(&locked_cms[1]),
+        "locked": dec(&locked),
+        "locked_ctr": dec(&locked_ctr),
         "price": w.price.to_string(),
         "side": if w.side_sell { "1" } else { "0" },
-        "cm_q_residual": dec(&cm_q_res),
         "cm_locked_residual": dec(&cm_locked_res),
         "pay_asset": dec(&w.pay_asset),
         "cm_note_out": dec(&cm_note_out),
         "bind": dec(&w.bind),
         "q": w.q.to_string(),
-        "r_q": dec(&w.r_q),
+        "r_locked": dec(&w.r_locked),
         "q_ctr": w.q_ctr.to_string(),
-        "r_q_ctr": dec(&w.r_q_ctr),
-        "locked_v": [w.locked[0].0.to_string(), w.locked[1].0.to_string()],
-        "locked_r": [dec(&w.locked[0].1), dec(&w.locked[1].1)],
-        "r_q_residual": dec(&w.r_q_residual),
-        "r_locked_residual": dec(&w.r_locked_residual),
+        "r_locked_ctr": dec(&w.r_locked_ctr),
+        "r_locked_res": dec(&w.r_locked_residual),
         "npk_ctr": dec(&w.npk_ctr),
         "r_note": dec(&w.r_note),
     });
     let wtns = circuit_handle.gen_witness(&input)?;
     let (proof_json, public_json) = run_rapidsnark(zkey, &wtns)?;
     Ok(SettleLargeProof {
-        cm_q_residual_hex: note_fr_to_hex(&cm_q_res),
         cm_locked_residual_hex: note_fr_to_hex(&cm_locked_res),
         cm_note_out_hex: note_fr_to_hex(&cm_note_out),
         residual_q: w.residual_q(),
@@ -813,7 +807,7 @@ mod tests {
     }
 
     /// SendOrder round trip: a buyer of q=10 at price=3 locks 30 token2,
-    /// pays fee=2, spends a 40-value note, keeps 8 change. Publics (11).
+    /// pays fee=2, spends a 40-value note, keeps 8 change. Publics (10).
     /// Also: understating the collateral (locking less than q·price) is
     /// impossible because locked_value is computed in-circuit — a mismatched
     /// r_locked fails the commitment check.
@@ -837,7 +831,6 @@ mod tests {
             anchor: tree.root(),
             lock_asset: usdt,
             q: 10,
-            r_q: fr_from_be_bytes(&rep(0xB1)),
             r_locked: fr_from_be_bytes(&rep(0xB2)),
             price: 3,
             side_sell: false,
@@ -851,7 +844,7 @@ mod tests {
         let setup = locked_setup("send_order");
         let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir).expect("handle");
         let proof = prove_send_order(w, &handle, &setup.zkey).expect("prove");
-        assert_eq!(proof.public_json.as_array().unwrap().len(), 11);
+        assert_eq!(proof.public_json.as_array().unwrap().len(), 10);
     }
 
     /// ClaimFees round trip: the producer mints a note for its accrued 500.
@@ -873,18 +866,13 @@ mod tests {
 
     /// SettleSmall round trip: a seller fully filled at q=60, price=3 —
     /// its 60 token1 collateral becomes the counterparty's note.
-    /// Publics: [cm_q, locked_0, locked_1, price, side, pay_asset,
-    /// cm_note_out, bind] (8).
+    /// Publics: [locked, price, side, pay_asset, cm_note_out, bind] (6).
     #[test]
     fn settle_small_round_trips_through_rapidsnark() {
         let sk_ctr = fr_from_be_bytes(&rep(0x44));
         let w = SettleSmallWitness {
             q: 60,
-            r_q: fr_from_be_bytes(&rep(0x71)),
-            locked: [
-                (60, fr_from_be_bytes(&rep(0x72))),
-                (0, fr_from_be_bytes(&[0u8; 32])),
-            ],
+            r_locked: fr_from_be_bytes(&rep(0x72)),
             price: 3,
             side_sell: true,
             pay_asset: asset_id("ETH").unwrap(),
@@ -896,29 +884,24 @@ mod tests {
         let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir).expect("handle");
         let proof = prove_settle_small(w, &handle, &setup.zkey).expect("prove");
         assert_eq!(proof.payout_value, 60);
-        assert_eq!(proof.public_json.as_array().unwrap().len(), 8);
+        assert_eq!(proof.public_json.as_array().unwrap().len(), 6);
     }
 
     /// SettleLarge round trip: a buyer of q=80 at price=3 (locked 240
-    /// token2) filled against a 60-quantity counterparty — pays 180,
-    /// re-locks 60 for the residual 20. Publics: 11. Also: understating
-    /// the fill (wrong counterparty opening) must fail.
+    /// token2) filled against a 60-quantity SELLING counterparty (locked
+    /// 60 token1) — pays 180, re-locks 60 for the residual 20. Publics: 8.
+    /// Also: understating the fill (wrong counterparty opening) must fail.
     #[test]
     fn settle_large_round_trips_and_rejects_understated_fill() {
         let sk_ctr = fr_from_be_bytes(&rep(0x44));
-        let ctr_r_q = fr_from_be_bytes(&rep(0x71));
+        let ctr_r_locked = fr_from_be_bytes(&rep(0x71));
         let make = |q_ctr: u64| SettleLargeWitness {
             q: 80,
-            r_q: fr_from_be_bytes(&rep(0x75)),
+            r_locked: fr_from_be_bytes(&rep(0x76)),
             q_ctr,
-            r_q_ctr: ctr_r_q,
-            locked: [
-                (240, fr_from_be_bytes(&rep(0x76))),
-                (0, fr_from_be_bytes(&[0u8; 32])),
-            ],
+            r_locked_ctr: ctr_r_locked,
             price: 3,
             side_sell: false,
-            r_q_residual: fr_from_be_bytes(&rep(0x77)),
             r_locked_residual: fr_from_be_bytes(&rep(0x78)),
             pay_asset: asset_id("USDT").unwrap(),
             npk_ctr: npk_from_sk(sk_ctr),
@@ -931,36 +914,29 @@ mod tests {
         let proof = prove_settle_large(make(60), &handle, &setup.zkey).expect("prove");
         assert_eq!(proof.residual_q, 20);
         assert_eq!(proof.fill_value, 180);
-        assert_eq!(proof.public_json.as_array().unwrap().len(), 11);
+        assert_eq!(proof.public_json.as_array().unwrap().len(), 8);
 
         // Understating the fill: claim the counterparty ordered only 10.
-        // (q_ctr, r_q_ctr) then no longer opens the counterparty's real
-        // commitment — but the CHAIN supplies cm_q_ctr from the order row,
-        // so emulate that by proving against the real cm and a fake q_ctr:
-        // witness generation must fail on the cm_q_ctr equality.
-        let mut cheat = make(10);
-        // Keep the real counterparty commitment in the publics by lying
-        // only about q_ctr: the prover computes cm_q_ctr from its claimed
-        // opening, so to target the REAL commitment we must inject it.
-        // prove_settle_large derives publics from the witness, so the lie
-        // is only caught when the chain rebuilds cm_q_ctr — emulate the
-        // chain-side check here.
-        let real_cm_ctr = poseidon2(Fr::from(60u64), ctr_r_q);
-        let cheat_cm_ctr = poseidon2(Fr::from(10u64), cheat.r_q_ctr);
+        // The counterparty's real collateral is P2(needed(60, sell)=60,
+        // r_locked_ctr); a fabricated q_ctr opens a DIFFERENT commitment —
+        // the chain supplies locked_ctr from the match row, so the lying
+        // proof's publics can never match the chain-side rebuild.
+        let cheat = make(10);
+        let real_locked_ctr = poseidon2(Fr::from(60u64), ctr_r_locked);
+        let cheat_locked_ctr = cheat.locked_ctr_commitment();
         assert_ne!(
-            note_fr_to_hex(&real_cm_ctr),
-            note_fr_to_hex(&cheat_cm_ctr),
-            "a fabricated counterparty quantity yields a different cm — the chain's \
-             order-row rebuild rejects the proof"
+            note_fr_to_hex(&real_locked_ctr),
+            note_fr_to_hex(&cheat_locked_ctr),
+            "a fabricated counterparty quantity yields a different collateral cm — \
+             the chain's order-row rebuild rejects the proof"
         );
-        cheat.q_ctr = 10;
         let cheat_proof = prove_settle_large(cheat, &handle, &setup.zkey).expect("proves");
-        // The proof itself is valid — but over the WRONG public cm_q_ctr;
+        // The proof itself is valid — but over the WRONG public locked_ctr;
         // its publics cannot match the chain's rebuild of the real order.
         let publics = cheat_proof.public_json.as_array().unwrap();
         assert_ne!(
             publics[1].as_str().unwrap(),
-            fr_to_decimal_string(&real_cm_ctr),
+            fr_to_decimal_string(&real_locked_ctr),
             "cheating publics differ from the chain-side rebuild"
         );
     }

@@ -70,7 +70,7 @@ pub fn sample_orders() -> Vec<Order> {
         let mut h = Sha256::new();
         h.update(b"sample-cm:");
         h.update(amt.as_bytes());
-        let amount: String = h.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        let locked: String = h.finalize().iter().map(|b| format!("{:02x}", b)).collect();
         let fake_nf = format!("sample-nf-{}", idx);
         let id = compute_order_id(std::slice::from_ref(&fake_nf));
         Order {
@@ -78,9 +78,8 @@ pub fn sample_orders() -> Vec<Order> {
             trade_type,
             subject,
             price: Some(price),
-            amount,
             pubkey: String::new(),
-            locked_commitment: String::new(),
+            locked_commitment: locked,
             fee: 0,
             block_height: 0,
             intra_block_index: 0,
@@ -153,7 +152,6 @@ mod tests {
                 token2: "USDT".into(),
             },
             price: None,
-            amount: String::new(),
             pubkey: tag.to_string(),
             locked_commitment: String::new(),
             fee: 0,

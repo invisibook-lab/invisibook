@@ -30,9 +30,11 @@ func loadCoZk2pVK(t *testing.T, fx cozk2pFixture) *PlonkVK {
 // the same way SubmitCompareCoZk2p does from a request + order rows.
 func rebuildComparePublic(fx cozk2pFixture) settle2pPublic {
 	return settle2pPublic{
-		Cmp:    fx.Cmp,
-		OrderA: fx.OrderACommitmentHex,
-		OrderB: fx.OrderBCommitmentHex,
+		Cmp:       fx.Cmp,
+		LockedA:   fx.LockedAHex,
+		LockedB:   fx.LockedBHex,
+		Price:     fx.Price,
+		AIsSeller: fx.AIsSeller,
 	}
 }
 
@@ -61,7 +63,7 @@ func TestVerifyPlonkRejectsTamperedCompareCommitment(t *testing.T) {
 	fx := loadCoZk2pFixture(t)
 	vk := loadCoZk2pVK(t, fx)
 	tampered := rebuildComparePublic(fx)
-	tampered.OrderA = bumpLastDigit(tampered.OrderA)
+	tampered.LockedA = bumpLastDigit(tampered.LockedA)
 	if err := VerifyPlonkSettle2p(vk, fx.ProofHex, marshalPublic(t, tampered)); err == nil {
 		t.Fatal("verify must reject when an order commitment is altered")
 	}

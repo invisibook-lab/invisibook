@@ -1,11 +1,14 @@
 //! End-to-end tests of the full settlement session (`session::run_session`):
 //! two traders over a mock MPC fabric run comparison, reveal, output
 //! exchange, signature ferry, collaborative prove, and local verify —
-//! producing identical, independently verifiable results.
+//! producing identical, independently verifiable results. Locked-only
+//! model: each order's single on-chain commitment is
+//! `P2(needed(q, side), r_locked)`.
 
 use std::{fs, path::PathBuf};
 
 use anyhow::Result;
+use ark_bn254::Fr;
 use ark_ff::PrimeField;
 use ark_mpc::{PARTY0, algebra::Scalar, test_helpers::execute_mock_mpc};
 use ark_serialize::CanonicalDeserialize;
@@ -46,15 +49,15 @@ impl SigIo for TestSigIo {
     }
 }
 
-/// The sample trade: A (maker) sells 80 token1 at price 3, B buys 60.
-/// cmp = 1, fill = 60; A keeps 20 on the book and receives 180 token2.
+/// The sample trade: A (maker) SELLS 80 token1 at price 3 and locks 80;
+/// B BUYS 60 and locks 180. cmp = 1, fill = 60; A keeps 20 on the book and
+/// receives 180 token2.
 fn inputs() -> (SessionInput, SessionInput) {
     let price = 3u64;
-    let order_a = fr_to_hex(&commit(80, &[0xA1; 32]));
-    let order_b = fr_to_hex(&commit(60, &[0xB1; 32]));
-    let zero = fr_to_hex(&commit(0, &[0u8; 32]));
-    let locked_a = [fr_to_hex(&commit(80, &[0xA3; 32])), zero.clone()];
-    let locked_b = [fr_to_hex(&commit(180, &[0xB3; 32])), zero];
+    // Locked-only model: the collateral commitment is the order's ONLY
+    // on-chain commitment.
+    let locked_a = fr_to_hex(&commit(80, &[0xA3; 32]));
+    let locked_b = fr_to_hex(&commit(180, &[0xB3; 32]));
 
     let npk_hex = |seed: u8| fr_to_hex(&commit(seed as u64, &[seed; 32]));
     let base = |role: &str, my: MyPrivate| SessionInput {
@@ -70,8 +73,6 @@ fn inputs() -> (SessionInput, SessionInput) {
         my_recv_token: if role == "trader-a" { "USDT" } else { "ETH" }.into(),
         price,
         a_is_seller: true,
-        order_a: order_a.clone(),
-        order_b: order_b.clone(),
         locked_a: locked_a.clone(),
         locked_b: locked_b.clone(),
         my_recv_npk: npk_hex(if role == "trader-a" { 0x51 } else { 0x52 }),
@@ -81,8 +82,6 @@ fn inputs() -> (SessionInput, SessionInput) {
         "trader-a",
         MyPrivate {
             order_amount: 80,
-            r_order: hex::encode([0xA1u8; 32]),
-            locked_amount: 80,
             r_locked: hex::encode([0xA3u8; 32]),
         },
     );
@@ -90,8 +89,6 @@ fn inputs() -> (SessionInput, SessionInput) {
         "trader-b",
         MyPrivate {
             order_amount: 60,
-            r_order: hex::encode([0xB1u8; 32]),
-            locked_amount: 180,
             r_locked: hex::encode([0xB3u8; 32]),
         },
     );
@@ -149,7 +146,6 @@ async fn session_happy_path() {
                 cm_note_out: result.my.recv_commitment.clone(),
                 signature: sig.to_string(),
                 zk_proof: format!("proof-of-{}", input.role),
-                cm_q_residual: result.my.new_order_commitment.clone(),
                 cm_locked_residual: result.my.new_locked_commitment.clone(),
             };
             let legs = exchange_settle_legs(&fabric, party, &my_leg)
@@ -165,6 +161,8 @@ async fn session_happy_path() {
     // Identical public statement, proof, and signatures on both sides.
     assert_eq!(result_a.cmp, 1);
     assert_eq!(result_b.cmp, 1);
+    assert_eq!(result_a.public.price, 3);
+    assert!(result_a.public.a_is_seller);
     assert_eq!(
         serde_json::to_string(&result_a.public).unwrap(),
         serde_json::to_string(&result_b.public).unwrap()
@@ -185,13 +183,12 @@ async fn session_happy_path() {
     verify_settle(&vk, &result_a.public, &proof).expect("proof must verify");
 
     // Plaintext outcomes per the sample trade: A (larger) receives 180
-    // USDT and keeps 20 on the book; B (smaller) receives 60 ETH and got
-    // A's revealed... no — B is smaller, so B REVEALED and A holds B's
-    // opening. Each side's incoming payout is a NOTE commitment under its
-    // own fresh npk.
+    // USDT and keeps 20 on the book; B (smaller) REVEALED its opening, so
+    // A holds B's (quantity, collateral blinding). Each side's incoming
+    // payout is a NOTE commitment under its own fresh npk.
     use cozk2p::poseidon::{asset_fr, note_commit};
     let open_note = |npk_hex: &str, token: &str, amount: u64, r_hex: &str, expected: &str| {
-        let npk = ark_bn254::Fr::from_be_bytes_mod_order(&hex::decode(npk_hex).unwrap());
+        let npk = Fr::from_be_bytes_mod_order(&hex::decode(npk_hex).unwrap());
         let mut r = [0u8; 32];
         r.copy_from_slice(&hex::decode(r_hex).unwrap());
         let cm = note_commit(npk, asset_fr(token).unwrap(), amount, &r);
@@ -207,6 +204,33 @@ async fn session_happy_path() {
         result_a.my.ctr_order_amount, 60,
         "A holds B's revealed opening"
     );
+    // The revealed blinding is B's collateral blinding in canonical form.
+    assert_eq!(
+        result_a.my.ctr_r_locked,
+        fr_to_hex(&Fr::from_be_bytes_mod_order(&[0xB3u8; 32]))
+    );
+    // A can rebuild B's on-chain collateral commitment from the reveal:
+    // B is the buyer, so needed = q_ctr * price.
+    {
+        let mut r = [0u8; 32];
+        r.copy_from_slice(&hex::decode(&result_a.my.ctr_r_locked).unwrap());
+        assert_eq!(
+            fr_to_hex(&commit(result_a.my.ctr_order_amount * 3, &r)),
+            fr_to_hex(&commit(180, &[0xB3; 32])),
+            "the reveal must open B's locked commitment"
+        );
+    }
+    // A's residual collateral commitment (the seller keeps 20 token1
+    // locked) opens with the freshly drawn blinding.
+    {
+        let mut r = [0u8; 32];
+        r.copy_from_slice(&hex::decode(&result_a.my.r_locked_new).unwrap());
+        assert_eq!(
+            fr_to_hex(&commit(20, &r)),
+            result_a.my.new_locked_commitment,
+            "the residual collateral commitment must open"
+        );
+    }
     open_note(
         &result_a.my.recv_npk,
         "USDT",
@@ -214,11 +238,14 @@ async fn session_happy_path() {
         &result_a.my.r_recv,
         &result_a.my.recv_commitment,
     );
-    // B: smaller side, fully filled, no residuals.
+    // B: smaller side, fully filled, no residuals and no reveal received.
     assert!(result_b.my.i_am_smaller);
     assert_eq!(result_b.my.recv_amount, 60);
     assert_eq!(result_b.my.new_order_amount, 0);
+    assert_eq!(result_b.my.new_locked_amount, 0);
+    assert!(result_b.my.new_locked_commitment.is_empty());
     assert_eq!(result_b.my.ctr_order_amount, 0);
+    assert!(result_b.my.ctr_r_locked.is_empty());
     open_note(
         &result_b.my.recv_npk,
         "ETH",
@@ -241,6 +268,8 @@ async fn session_happy_path() {
         assert_eq!(legs.1.zk_proof, "proof-of-trader-b");
         assert_eq!(legs.0.cm_note_out, result_a.my.recv_commitment);
         assert_eq!(legs.1.cm_note_out, result_b.my.recv_commitment);
+        assert_eq!(legs.0.cm_locked_residual, result_a.my.new_locked_commitment);
+        assert!(legs.1.cm_locked_residual.is_empty());
     }
     assert_eq!(
         serde_json::to_string(&legs_a.0).unwrap(),
@@ -252,7 +281,8 @@ async fn session_happy_path() {
     );
 
     // The witness WAL landed on disk for both parties, consistent with the
-    // final result.
+    // final result — and carries NO residual-quantity commitment fields
+    // (locked-only model).
     for (dir, result) in [(&dir_a, &result_a), (&dir_b, &result_b)] {
         let witness: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("witness.json")).unwrap()).unwrap();
@@ -261,6 +291,12 @@ async fn session_happy_path() {
             witness["my"]["recv_commitment"].as_str().unwrap(),
             result.my.recv_commitment
         );
+        let my = witness["my"].as_object().unwrap();
+        assert!(
+            !my.contains_key("new_order_commitment") && !my.contains_key("r_order_new"),
+            "no residual quantity commitment may exist in the WAL"
+        );
+        assert!(my.contains_key("ctr_r_locked"));
     }
 
     let _ = fs::remove_dir_all(&dir_a);
@@ -339,13 +375,13 @@ async fn compare_abort_precedes_any_reveal() {
     let _ = fs::remove_dir_all(&dir_b);
 }
 
-/// Divergent chain reads (here: B holds a tampered order_a) must abort at
+/// Divergent chain reads (here: B holds a tampered locked_a) must abort at
 /// the fingerprint preamble on both sides, before any secret is shared.
 #[tokio::test(flavor = "multi_thread")]
 async fn session_aborts_on_divergent_statement() {
     let (input_a, mut input_b) = inputs();
-    // B read a different (stale/tampered) order_a commitment.
-    input_b.order_a = fr_to_hex(&commit(81, &[0xA1; 32]));
+    // B read a different (stale/tampered) collateral commitment for A.
+    input_b.locked_a = fr_to_hex(&commit(81, &[0xA3; 32]));
     let (pk, vk) = dev_keys(&cozk2p::default_cache_dir()).unwrap();
     let dir_a = out_dir("tamper-a");
     let dir_b = out_dir("tamper-b");

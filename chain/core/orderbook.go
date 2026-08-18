@@ -120,25 +120,24 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 // ────────────────────── Writing: SendOrder ──────────────────────
 
 // SendOrderRequest (v2) is the JSON payload accepted by SendOrder. Placing
-// an order spends up to two pool notes (by nullifier), commits the order
-// quantity as `Amount` (cm_q), locks its collateral as `LockedCommitment`,
+// an order spends up to two pool notes (by nullifier), locks its collateral
+// as `LockedCommitment` (the order's ONLY commitment — locked-only model),
 // destroys the plaintext `Fee`, and mints a change note — all proven by the
 // send_order circuit. The order ID is SHA-256 over the input nullifiers,
 // and the ed25519 signature covers the whole request.
 type SendOrderRequest struct {
-	ID               OrderID    `json:"id"                 validate:"required"`
-	Type             TradeType  `json:"type"               validate:"oneof=0 1"`
-	Subject          TradePair  `json:"subject"`
-	Price            *big.Int   `json:"price,omitempty"`
-	Amount           CipherText `json:"amount"             validate:"required,len=64"` // cm_q
-	Pubkey           string     `json:"pubkey"             validate:"required"`
-	Signature        string     `json:"signature"          validate:"required"`
-	Anchor           string     `json:"anchor"             validate:"required,len=64"`
-	InputNullifiers  []string   `json:"input_nullifiers"   validate:"required,len=2,dive,len=64"`
-	LockedCommitment string     `json:"locked_commitment"  validate:"required,len=64"`
-	Fee              uint64     `json:"fee"`
-	ChangeCommitment string     `json:"change_commitment"  validate:"required,len=64"`
-	ZkProof          string     `json:"zk_proof"           validate:"required"`
+	ID               OrderID   `json:"id"                 validate:"required"`
+	Type             TradeType `json:"type"               validate:"oneof=0 1"`
+	Subject          TradePair `json:"subject"`
+	Price            *big.Int  `json:"price,omitempty"`
+	Pubkey           string    `json:"pubkey"             validate:"required"`
+	Signature        string    `json:"signature"          validate:"required"`
+	Anchor           string    `json:"anchor"             validate:"required,len=64"`
+	InputNullifiers  []string  `json:"input_nullifiers"   validate:"required,len=2,dive,len=64"`
+	LockedCommitment string    `json:"locked_commitment"  validate:"required,len=64"`
+	Fee              uint64    `json:"fee"`
+	ChangeCommitment string    `json:"change_commitment"  validate:"required,len=64"`
+	ZkProof          string    `json:"zk_proof"           validate:"required"`
 }
 
 // validateOrderPrice rejects prices the settlement circuits cannot represent.
@@ -220,7 +219,7 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	// Cheap checks first (zcashd ordering): canonical field elements,
 	// request-internal duplicate nullifier, spent set, anchor known.
 	for _, h := range []string{req.Anchor, req.InputNullifiers[0], req.InputNullifiers[1],
-		string(req.Amount), req.LockedCommitment, req.ChangeCommitment} {
+		req.LockedCommitment, req.ChangeCommitment} {
 		if _, perr := ParseFrHex(h); perr != nil {
 			return fmt.Errorf("non-canonical field element %q: %w", h, perr)
 		}
@@ -246,7 +245,7 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	}
 
 	// Rebuild the send_order public vector:
-	// [anchor, nf_0, nf_1, lock_asset_id, cm_q, locked_commitment, fee,
+	// [anchor, nf_0, nf_1, lock_asset_id, locked_commitment, fee,
 	//  cm_change, price, side, bind].
 	toDec := func(h, what string) (string, error) {
 		d, derr := HexToDecimal(h)
@@ -267,10 +266,6 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	if err != nil {
 		return err
 	}
-	cmQDec, err := toDec(string(req.Amount), "amount")
-	if err != nil {
-		return err
-	}
 	lockedDec, err := toDec(req.LockedCommitment, "locked_commitment")
 	if err != nil {
 		return err
@@ -279,13 +274,10 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	if err != nil {
 		return err
 	}
-	side := "0"
-	if req.Type == Sell {
-		side = "1"
-	}
+	side := sideSignal(req.Type)
 	bind := sendOrderBind(ot.chainID, req)
 	signals := []string{
-		anchorDec, nf0Dec, nf1Dec, assetID.String(), cmQDec, lockedDec,
+		anchorDec, nf0Dec, nf1Dec, assetID.String(), lockedDec,
 		fmt.Sprintf("%d", req.Fee), changeDec,
 		req.Price.String(), side, bind.String(),
 	}
@@ -321,7 +313,6 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 		Type:             req.Type,
 		Subject:          req.Subject,
 		Price:            req.Price,
-		Amount:           req.Amount,
 		Pubkey:           req.Pubkey,
 		LockedCommitment: req.LockedCommitment,
 		Fee:              req.Fee,
@@ -346,27 +337,6 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 		}
 	}
 	return nil
-}
-
-// lockedSlotsHex returns the order's collateral commitment as the 2-slot
-// shape the settle circuits expect: [LockedCommitment, P2(0,0) pad].
-func lockedSlotsHex(ord *Order) []string {
-	return []string{ord.LockedCommitment, PoseidonZeroCommitmentHex}
-}
-
-// lockedSlotsDec is lockedSlotsHex rendered as the decimal-string
-// commitments snarkjs verifiers consume.
-func lockedSlotsDec(ord *Order) ([]string, error) {
-	hexes := lockedSlotsHex(ord)
-	out := make([]string, 0, len(hexes))
-	for i, h := range hexes {
-		dec, err := HexToDecimal(h)
-		if err != nil {
-			return nil, fmt.Errorf("locked commitment hex at slot %d: %w", i, err)
-		}
-		out = append(out, dec)
-	}
-	return out, nil
 }
 
 // ────────────────────── Writing: RegisterSettleAddr ──────────────────────

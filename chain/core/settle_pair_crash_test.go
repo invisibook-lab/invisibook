@@ -63,7 +63,6 @@ func newPairFixture(t *testing.T) *pairFixture {
 			Type:             typ,
 			Subject:          pair,
 			Price:            price,
-			Amount:           CipherText(canonicalTestHex(byte(id[6]))),
 			Pubkey:           hex.EncodeToString(pub),
 			LockedCommitment: canonicalTestHex(byte(id[6]) + 1),
 			BlockHeight:      height,
@@ -100,7 +99,6 @@ func (fx *pairFixture) signedPair(cmNoteA, cmNoteB string) *SettlePairRequest {
 	largeSig := &SettleLargeRequest{
 		OrderID:          fx.orderA,
 		MatchOrderID:     fx.orderB,
-		CmQResidual:      canonicalTestHex(0xA1),
 		CmLockedResidual: canonicalTestHex(0xA2),
 		CmNoteOut:        cmNoteA,
 	}
@@ -114,7 +112,6 @@ func (fx *pairFixture) signedPair(cmNoteA, cmNoteB string) *SettlePairRequest {
 		OrderBID: fx.orderB,
 		A: SettlePairLeg{
 			CmNoteOut:        cmNoteA,
-			CmQResidual:      largeSig.CmQResidual,
 			CmLockedResidual: largeSig.CmLockedResidual,
 			ZkProof:          "test-proof-skip",
 			Signature: hex.EncodeToString(
@@ -174,12 +171,11 @@ func TestSettlePairCrashBetweenDatabasesThenRetry(t *testing.T) {
 	if got := fx.acc.PoolSize(); got != 2 {
 		t.Fatalf("retry must NOT mint again, pool = %d", got)
 	}
-	mustStatus(t, fx.ot, fx.orderA, Pending) // relisted with the residuals
+	mustStatus(t, fx.ot, fx.orderA, Pending) // relisted with the residual
 	mustStatus(t, fx.ot, fx.orderB, Done)
 	relisted, _ := fx.ot.GetOrder(fx.orderA)
-	if string(relisted.Amount) != canonicalTestHex(0xA1) ||
-		relisted.LockedCommitment != canonicalTestHex(0xA2) {
-		t.Fatal("relisted order must carry the residual commitments")
+	if relisted.LockedCommitment != canonicalTestHex(0xA2) {
+		t.Fatal("relisted order must carry the residual collateral commitment")
 	}
 	if relisted.MatchOrder != "" {
 		t.Fatal("relisted order must have its match link cleared")

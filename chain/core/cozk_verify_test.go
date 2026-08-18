@@ -11,16 +11,16 @@ import (
 // output (/tmp/pool_fixture_settle.json): one matched pair (A sells 80 ETH
 // at 3, B buys 60) through the comparison proof and both single-prover
 // settle proofs, with placeholder order ids baked into the binds.
+// Locked-only model: each order carries ONE collateral commitment.
 type settleFixture struct {
-	ChainID          uint64          `json:"chain_id"`
-	Price            uint64          `json:"price"`
-	OrderACommitment string          `json:"order_a_commitment"`
-	OrderBCommitment string          `json:"order_b_commitment"`
-	LockedA          []string        `json:"locked_a"`
-	LockedB          []string        `json:"locked_b"`
-	Cmp              cmpFixtureLeg   `json:"cmp"`
-	Small            smallFixtureLeg `json:"small"`
-	Large            largeFixtureLeg `json:"large"`
+	ChainID   uint64          `json:"chain_id"`
+	Price     uint64          `json:"price"`
+	AIsSeller bool            `json:"a_is_seller"`
+	LockedA   string          `json:"locked_a"`
+	LockedB   string          `json:"locked_b"`
+	Cmp       cmpFixtureLeg   `json:"cmp"`
+	Small     smallFixtureLeg `json:"small"`
+	Large     largeFixtureLeg `json:"large"`
 }
 
 type cmpFixtureLeg struct {
@@ -42,7 +42,6 @@ type smallFixtureLeg struct {
 type largeFixtureLeg struct {
 	OrderID          string          `json:"order_id"`
 	MatchOrderID     string          `json:"match_order_id"`
-	CmQResidual      string          `json:"cm_q_residual"`
 	CmLockedResidual string          `json:"cm_locked_residual"`
 	CmNoteOut        string          `json:"cm_note_out"`
 	ProofJSON        json.RawMessage `json:"proof_json"`
@@ -73,8 +72,17 @@ func mustDec(t *testing.T, hex string) string {
 	return d
 }
 
-// The compare statement rebuild [cmp, order_a, order_b] must match the
-// prover's publics and verify; a flipped cmp must fail.
+// bool01 renders a boolean as the "0"/"1" decimal signal the circuits take.
+func bool01(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
+// The compare statement rebuild [cmp, locked_a, locked_b, price,
+// a_is_seller] must match the prover's publics and verify; a flipped cmp
+// must fail.
 func TestVerifySettleCmpProof(t *testing.T) {
 	fx := loadSettleFixture(t)
 	vk, err := LoadVK("settle_cozk", fx.Cmp.VKPath)
@@ -85,7 +93,8 @@ func TestVerifySettleCmpProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signals := []string{cmpDec, mustDec(t, fx.OrderACommitment), mustDec(t, fx.OrderBCommitment)}
+	signals := []string{cmpDec, mustDec(t, fx.LockedA), mustDec(t, fx.LockedB),
+		fmt.Sprintf("%d", fx.Price), bool01(fx.AIsSeller)}
 	if len(signals) != len(fx.Cmp.PublicJSON) {
 		t.Fatalf("compare publics: %d != %d", len(signals), len(fx.Cmp.PublicJSON))
 	}
@@ -126,8 +135,7 @@ func TestVerifySettleSmallProof(t *testing.T) {
 	}
 	bind := settleSmallBind(fx.ChainID, req)
 	signals := []string{
-		mustDec(t, fx.OrderBCommitment),
-		mustDec(t, fx.LockedB[0]), mustDec(t, fx.LockedB[1]),
+		mustDec(t, fx.LockedB),
 		fmt.Sprintf("%d", fx.Price), "0",
 		payAsset.String(),
 		mustDec(t, req.CmNoteOut),
@@ -149,7 +157,7 @@ func TestVerifySettleSmallProof(t *testing.T) {
 		CmNoteOut:    req.CmNoteOut,
 	}
 	tampered := append([]string{}, signals...)
-	tampered[7] = settleSmallBind(fx.ChainID, other).String()
+	tampered[5] = settleSmallBind(fx.ChainID, other).String()
 	if err := VerifyGroth16(vk, string(fx.Small.ProofJSON), tampered); err == nil {
 		t.Fatal("cross-pair replay must be rejected")
 	}
@@ -166,21 +174,19 @@ func TestVerifySettleLargeProof(t *testing.T) {
 	req := &SettleLargeRequest{
 		OrderID:          OrderID(fx.Large.OrderID),
 		MatchOrderID:     OrderID(fx.Large.MatchOrderID),
-		CmQResidual:      fx.Large.CmQResidual,
 		CmLockedResidual: fx.Large.CmLockedResidual,
 		CmNoteOut:        fx.Large.CmNoteOut,
 	}
-	// A is the seller: side = 1, pays ETH.
+	// A is the seller: side = 1, pays ETH. locked_ctr is B's row commitment.
 	payAsset, err := AssetID("ETH")
 	if err != nil {
 		t.Fatal(err)
 	}
 	bind := settleLargeBind(fx.ChainID, req)
 	signals := []string{
-		mustDec(t, fx.OrderACommitment), mustDec(t, fx.OrderBCommitment),
-		mustDec(t, fx.LockedA[0]), mustDec(t, fx.LockedA[1]),
+		mustDec(t, fx.LockedA), mustDec(t, fx.LockedB),
 		fmt.Sprintf("%d", fx.Price), "1",
-		mustDec(t, req.CmQResidual), mustDec(t, req.CmLockedResidual),
+		mustDec(t, req.CmLockedResidual),
 		payAsset.String(),
 		mustDec(t, req.CmNoteOut),
 		bind.String(),
@@ -195,7 +201,7 @@ func TestVerifySettleLargeProof(t *testing.T) {
 	}
 
 	tampered := append([]string{}, signals...)
-	tampered[9] = bumpLastDigit(tampered[9])
+	tampered[6] = bumpLastDigit(tampered[6])
 	if err := VerifyGroth16(vk, string(fx.Large.ProofJSON), tampered); err == nil {
 		t.Fatal("tampered payout note must be rejected")
 	}

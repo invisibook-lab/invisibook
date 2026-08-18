@@ -1,7 +1,7 @@
 # 2-Party Collaborative-ZK Settlement (cozk2p)
 
-> **Status:** Current (2026-08-16, note model + two-phase session). For
-> every place this design differs from the paper, see
+> **Status:** Current (2026-08-17, locked-only model + two-phase
+> session). For every place this design differs from the paper, see
 > [paper_deviations.md](paper_deviations.md). The 3-party co-snarks
 > experiment it replaced is described in
 > [cozk_design.md](cozk_design.md) (historical).
@@ -41,10 +41,14 @@ one `MpcFabric`; the host app drives the `settle2p_session` subprocess
 over stdio ([app_design.md](app_design.md) §4.2).
 
 1. **Preamble.** Exchange a Poseidon fingerprint of the chain-sourced
-   statement (both `cm_q`, the 2-slot collateral commitments, price,
-   side). Divergent chain reads abort before any secret flows.
-2. **Bind.** Share both order openings into the fabric and verify each
-   opens its ON-CHAIN commitment inside the MPC (Poseidon on shares).
+   statement (the two collateral commitments, price, side). Divergent
+   chain reads abort before any secret flows.
+2. **Bind.** Share both quantities and collateral blindings into the
+   fabric; compute each side's `needed(q, side)` on shares (the side
+   flags and price are public, so the scaling is share-local) and
+   verify it opens that side's ON-CHAIN collateral commitment inside
+   the MPC (Poseidon on shares). The collateral commitment is the
+   order's ONLY commitment — there is no separate quantity commitment.
 3. **Compare.** Three-way comparison over shares; only
    `cmp = sign(q_A − q_B)` is opened.
 4. **Sign + prove.** The hosts' ed25519 signatures over
@@ -56,9 +60,9 @@ over stdio ([app_design.md](app_design.md) §4.2).
    (`confirm_compare_onchain`) and BLOCKS until the host confirms both
    orders are `Settling` on chain. Abort here leaks nothing and leaves
    no trace. **The reveal never precedes this anchor.**
-6. **Reveal.** The smaller party reveals `(q, r)` in plaintext; both
-   sides open `share − revealed` and require zero, so a lying reveal
-   aborts instantly. The larger side now holds its complete
+6. **Reveal.** The smaller party reveals `(q, r_locked)` in plaintext;
+   both sides open `share − revealed` and require zero, so a lying
+   reveal aborts instantly. The larger side now holds its complete
    `settle_large` witness.
 7. **Payout-note keys.** Each side derives its incoming note's opening,
    writes it to the `witness.json` WAL BEFORE the `(npk, r)` pair
@@ -73,24 +77,36 @@ phases separately from the host/chain waits (`compare_onchain_wait_ms`,
 `leg_exchange_ms`), so chain latency never contaminates the
 cryptographic numbers.
 
-## 3. The relation (compare-only, 3 publics)
+## 3. The relation (compare-only, 5 publics)
 
-π_cmp proves exactly:
+π_cmp proves exactly (with `needed(q, s) = q·price + s·(q − q·price)`
+and `s_B = 1 − s_A`):
 
 ```
-Com(q_A, r_A) = cm_qA
-Com(q_B, r_B) = cm_qB
+P2(needed(q_A, s_A), r_A) = locked_A
+P2(needed(q_B, s_B), r_B) = locked_B
 cmp = sign(q_A − q_B) ∈ {−1, 0, 1}
 ```
 
-Publics: `[cmp, cm_qA, cm_qB]` — the same 3-signal statement as the
-Groth16 twin `settle_cozk.circom`. `MpcPlonkCircuit` has no gadget
-library and cannot bit-decompose a shared value, so each amount enters
-as 64 little-endian bits supplied by its owner (boolean-constrained
-in-circuit); comparison is an MSB-first equality-prefix scan; Poseidon
-is a hand-written gadget matching the circom permutation (t=3, 8 full +
-57 partial rounds, x^5 S-box), golden-tested against the chain's
-zero-commitment constant. The relation is written once against the
+Publics: `[cmp, locked_a, locked_b, price, a_is_seller]` — the same
+5-signal statement as the Groth16 twin `settle_cozk.circom`. In the
+locked-only model an order commits ONLY its collateral, so the
+compared quantities are pinned by opening each collateral against its
+in-circuit `needed` (input legitimacy); `price` and `a_is_seller`
+therefore enter the statement (the equation is injective in `q` for
+`price > 0` — see [paper_deviations.md](paper_deviations.md) D17).
+
+`MpcPlonkCircuit` has no gadget library and cannot bit-decompose a
+shared value, so each quantity enters as 64 little-endian bits supplied
+by its owner (boolean-constrained in-circuit — the PLONK mirror of the
+circom twin's `Num2Bits(64)` range check). `price` and `a_is_seller` are
+PUBLIC wires and are used as they are: the chain builds both from the
+order rows (a u64 price, a 0-1 flag), a prover cannot lie about a public
+input, so neither is re-checked in-circuit (88 constraints saved).
+Comparison is an MSB-first equality-prefix scan; Poseidon is a
+hand-written gadget matching the circom permutation (t=3, 8 full +
+57 partial rounds, x^5 S-box), golden-tested against `Poseidon(0,0)`.
+The relation is written once against the
 generic `Circuit<F>` trait and instantiated on both `PlonkCircuit<Fr>`
 (keygen, tests) and `MpcPlonkCircuit` (collaborative proving).
 Circuit size: 2048 gates; proof 769 B compressed.
@@ -104,8 +120,9 @@ staticlib over cgo:
 - `cozk2p/src/ffi.rs` exports `cozk2p_verify_settle(vk, public_json,
   proof)`.
 - `chain/core/plonkverify.go` + the `SubmitCompareCoZk2p` writing
-  rebuild the 3-signal statement from the order rows and call the
-  bridge. The dual-signed compare message is domain-separated
+  rebuild the 5-signal statement from the order rows (collateral
+  commitments, execution price, order A's side) and call the bridge.
+  The dual-signed compare message is domain-separated
   (`invisibook-cozk2p-compare-v2`).
 - The bridge compiles only with `go build -tags cozk2p`
   (`make build-chain-cozk2p`); without the tag the writing rejects

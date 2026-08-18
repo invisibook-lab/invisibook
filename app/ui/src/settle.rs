@@ -53,11 +53,6 @@ mod inner {
     };
     use zk::wallet::hex_to_fr;
 
-    /// `Poseidon(0, 0)` — the zero-commitment used to pad the order's
-    /// single collateral commitment to the circuits' fixed 2-slot shape.
-    pub const POSEIDON_ZERO_COMMITMENT_HEX: &str =
-        "2098f5fb9e239eab3ceac3f27b81e481dc3124d55ffed523a839ee8446b64864";
-
     /// This trader's incoming payout NOTE: the full opening the wallet must
     /// persist to keep it spendable (notes.json IS the money).
     #[derive(Clone, Debug)]
@@ -72,13 +67,13 @@ mod inner {
     }
 
     /// The surviving (larger) side's residual order opening after the chain
-    /// relisted it in place: the fresh (q, collateral) openings that now
-    /// open the on-chain residual commitments. Replaces the order's old
-    /// `OrderOpening` in the wallet's order ledger.
+    /// relisted it in place: the fresh collateral opening that now opens
+    /// the on-chain residual commitment (locked-only model: the residual
+    /// quantity is plain wallet bookkeeping, not committed). Replaces the
+    /// order's old `OrderOpening` in the wallet's order ledger.
     #[derive(Clone, Debug)]
     pub struct Remainder {
         pub order_amount: u64,
-        pub order_random_hex: String,
         pub locked_amount: u64,
         pub locked_random_hex: String,
     }
@@ -151,8 +146,6 @@ mod inner {
     #[derive(Serialize)]
     struct MyPrivateWire {
         order_amount: u64,
-        r_order: String,
-        locked_amount: u64,
         r_locked: String,
     }
 
@@ -166,10 +159,8 @@ mod inner {
         my_recv_token: String,
         price: u64,
         a_is_seller: bool,
-        order_a: String,
-        order_b: String,
-        locked_a: [String; 2],
-        locked_b: [String; 2],
+        locked_a: String,
+        locked_b: String,
         my_recv_npk: String,
         my: MyPrivateWire,
     }
@@ -180,11 +171,15 @@ mod inner {
     }
 
     /// Subset of the subprocess `SettlePublic` the app cross-checks; serde
-    /// ignores the fields not named here.
+    /// ignores the fields not named here. Locked-only model: the statement
+    /// carries the two collateral commitments, the execution price, and the
+    /// maker's side — all 5 signals except the proven `cmp` itself.
     #[derive(Deserialize)]
     struct PublicWire {
-        order_a: String,
-        order_b: String,
+        locked_a: String,
+        locked_b: String,
+        price: u64,
+        a_is_seller: bool,
     }
 
     /// The subprocess's `compare_ready` payload: π_cmp + both signatures,
@@ -211,12 +206,22 @@ mod inner {
         ctr_recv_npk: String,
         ctr_r_recv: String,
         ctr_order_amount: u64,
-        ctr_r_order: String,
+        ctr_r_locked: String,
         new_order_amount: u64,
-        r_order_new: String,
-        new_order_commitment: String,
         new_locked_amount: u64,
         r_locked_new: String,
+        new_locked_commitment: String,
+    }
+
+    impl MyOutcomeWire {
+        /// True when this side survived on the book as the larger leg, so
+        /// the chain relisted its order under a fresh residual collateral
+        /// commitment. The residual commitment is the ONE marker (it is what
+        /// the relisted row carries on chain); the smaller side leaves it
+        /// empty.
+        fn is_relisted(&self) -> bool {
+            !self.new_locked_commitment.is_empty()
+        }
     }
 
     #[derive(Deserialize)]
@@ -238,8 +243,6 @@ mod inner {
         cm_note_out: String,
         signature: String,
         zk_proof: String,
-        #[serde(default)]
-        cm_q_residual: String,
         #[serde(default)]
         cm_locked_residual: String,
     }
@@ -271,20 +274,17 @@ mod inner {
         }
     }
 
-    /// An order's collateral in the circuits' fixed 2-slot shape:
-    /// `[Order.LockedCommitment, Poseidon(0,0) pad]`. The commitment sits
-    /// on the order row itself — no extra chain read.
-    fn locked_slots(order: &Order) -> Result<[String; 2], SettleError> {
+    /// An order's single collateral commitment hex (`Order.LockedCommitment`
+    /// — the order's ONLY commitment in the locked-only model). The
+    /// commitment sits on the order row itself — no extra chain read.
+    fn locked_hex(order: &Order) -> Result<String, SettleError> {
         if order.locked_commitment.len() != 64 {
             return Err(SettleError::Transient(format!(
                 "order {} carries no collateral commitment (stale read?)",
                 orderbook::short_id(&order.id)
             )));
         }
-        Ok([
-            order.locked_commitment.clone(),
-            POSEIDON_ZERO_COMMITMENT_HEX.to_string(),
-        ])
+        Ok(order.locked_commitment.clone())
     }
 
     /// Run the full settlement for a matched pair: compare session, on-chain
@@ -326,10 +326,8 @@ mod inner {
         let a_is_seller = maker.trade_type == TradeType::Sell;
 
         // Chain-sourced public inputs (all already on the order rows).
-        let order_a = maker.amount.clone();
-        let order_b = taker.amount.clone();
-        let locked_a = locked_slots(maker)?;
-        let locked_b = locked_slots(taker)?;
+        let locked_a = locked_hex(maker)?;
+        let locked_b = locked_hex(taker)?;
 
         let my_lock_token = lock_token(my_order);
         let my_recv_token = recv_token(my_order);
@@ -347,15 +345,11 @@ mod inner {
             my_recv_token: my_recv_token.clone(),
             price,
             a_is_seller,
-            order_a: order_a.clone(),
-            order_b: order_b.clone(),
-            locked_a,
-            locked_b,
+            locked_a: locked_a.clone(),
+            locked_b: locked_b.clone(),
             my_recv_npk,
             my: MyPrivateWire {
                 order_amount: opening.q,
-                r_order: opening.r_q.clone(),
-                locked_amount: opening.locked_amount,
                 r_locked: opening.r_locked.clone(),
             },
         };
@@ -391,9 +385,10 @@ mod inner {
             taker_id: &taker.id,
             maker_pubkey: &maker.pubkey,
             taker_pubkey: &taker.pubkey,
-            expected_order_a: &order_a,
-            expected_order_b: &order_b,
+            expected_locked_a: &locked_a,
+            expected_locked_b: &locked_b,
             price,
+            a_is_seller,
             my_lock_token: &my_lock_token,
             opening,
             session_dir: &session_dir,
@@ -423,7 +418,7 @@ mod inner {
 
         progress("Confirming settlement on chain...");
         let outcome = &output.res.my;
-        confirm_on_chain(client, &my_order.id, &outcome.new_order_commitment).await?;
+        confirm_on_chain(client, &my_order.id, &outcome.new_locked_commitment).await?;
 
         Ok(outcome_from_result(
             &deps.note_seed,
@@ -451,9 +446,11 @@ mod inner {
         taker_id: &'a str,
         maker_pubkey: &'a str,
         taker_pubkey: &'a str,
-        expected_order_a: &'a str,
-        expected_order_b: &'a str,
+        expected_locked_a: &'a str,
+        expected_locked_b: &'a str,
         price: u64,
+        /// Maker side read off the chain rows: order A (the maker) sells.
+        a_is_seller: bool,
         my_lock_token: &'a str,
         opening: &'a OrderOpening,
         session_dir: &'a std::path::Path,
@@ -528,6 +525,27 @@ mod inner {
             .and_then(|orders| orders.into_iter().find(|o| o.id == order_id))
     }
 
+    /// Cross-check a proven statement against the rows read from the chain:
+    /// every non-`cmp` signal of the 5-signal statement (both collateral
+    /// commitments, the execution price, the maker's side) must match, or
+    /// the subprocess proved something other than THIS pair (a stale chain
+    /// read, most likely). Cheap local guard — the chain re-verifies.
+    fn check_public_statement(
+        ctx: &SessionCtx<'_>,
+        public: &PublicWire,
+    ) -> Result<(), SettleError> {
+        if public.locked_a != ctx.expected_locked_a
+            || public.locked_b != ctx.expected_locked_b
+            || public.price != ctx.price
+            || public.a_is_seller != ctx.a_is_seller
+        {
+            return Err(SettleError::Transient(
+                "prover statement does not match the on-chain order rows".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Handle the subprocess's `compare_ready`: cross-check the proven
     /// statement and signatures, submit the comparison, and block until
     /// BOTH orders are Settling. Only a `true` reply lets the subprocess
@@ -537,15 +555,7 @@ mod inner {
         ready: &CompareReadyWire,
         progress: &mut impl FnMut(&str),
     ) -> Result<(), SettleError> {
-        // The proven statement's order commitments must equal the ones read
-        // from chain (catches a stale read cheaply; the chain re-verifies).
-        if ready.public.order_a != ctx.expected_order_a
-            || ready.public.order_b != ctx.expected_order_b
-        {
-            return Err(SettleError::Transient(
-                "prover statement does not match on-chain order commitments".into(),
-            ));
-        }
+        check_public_statement(ctx, &ready.public)?;
         let params = CompareParams {
             order_a_id: ctx.maker_id.to_string(),
             order_b_id: ctx.taker_id.to_string(),
@@ -591,15 +601,8 @@ mod inner {
             .map_err(|e| SettleError::Unrecoverable(format!("pay asset: {e}")))?;
         let npk_ctr = hex_fr(&outcome.ctr_recv_npk, "ctr_recv_npk")?;
         let r_note = hex_fr(&outcome.ctr_r_recv, "ctr_r_recv")?;
-        let locked = [
-            (
-                ctx.opening.locked_amount,
-                hex_fr(&ctx.opening.r_locked, "r_locked")?,
-            ),
-            (0, hex_fr(&"0".repeat(64), "zero pad")?),
-        ];
         let q = ctx.opening.q;
-        let r_q = hex_fr(&ctx.opening.r_q, "r_q")?;
+        let r_locked = hex_fr(&ctx.opening.r_locked, "r_locked")?;
 
         if outcome.i_am_smaller {
             let setup =
@@ -609,8 +612,7 @@ mod inner {
                 .map_err(|e| SettleError::Transient(format!("circuit handle: {e}")))?;
             let mut w = SettleSmallWitness {
                 q,
-                r_q,
-                locked,
+                r_locked,
                 price: ctx.price,
                 side_sell: my_side_sell,
                 pay_asset,
@@ -642,7 +644,6 @@ mod inner {
                 cm_note_out: params.cm_note_out,
                 signature: params.signature,
                 zk_proof: params.zk_proof,
-                cm_q_residual: String::new(),
                 cm_locked_residual: String::new(),
             })
         } else {
@@ -653,25 +654,22 @@ mod inner {
                 .map_err(|e| SettleError::Transient(format!("circuit handle: {e}")))?;
             let mut w = SettleLargeWitness {
                 q,
-                r_q,
+                r_locked,
                 q_ctr: outcome.ctr_order_amount,
-                r_q_ctr: hex_fr(&outcome.ctr_r_order, "ctr_r_order")?,
-                locked,
+                r_locked_ctr: hex_fr(&outcome.ctr_r_locked, "ctr_r_locked")?,
                 price: ctx.price,
                 side_sell: my_side_sell,
-                r_q_residual: hex_fr(&outcome.r_order_new, "r_order_new")?,
                 r_locked_residual: hex_fr(&outcome.r_locked_new, "r_locked_new")?,
                 pay_asset,
                 npk_ctr,
                 r_note,
                 bind: fr_from_be_bytes(&[0u8; 32]),
             };
-            let (cm_q_res, cm_locked_res, cm_note) = w.output_cms();
+            let (cm_locked_res, cm_note) = w.output_cms();
             w.bind = settle_large_bind(
                 ctx.client.chain_id(),
                 &ctx.my_order.id,
                 &ctx.counter_order.id,
-                &note_fr_to_hex(&cm_q_res),
                 &note_fr_to_hex(&cm_locked_res),
                 &note_fr_to_hex(&cm_note),
             );
@@ -681,7 +679,6 @@ mod inner {
             let mut params = SettleLargeParams {
                 order_id: ctx.my_order.id.clone(),
                 match_order_id: ctx.counter_order.id.clone(),
-                cm_q_residual: proof.cm_q_residual_hex.clone(),
                 cm_locked_residual: proof.cm_locked_residual_hex.clone(),
                 cm_note_out: proof.cm_note_out_hex.clone(),
                 signature: String::new(),
@@ -694,7 +691,6 @@ mod inner {
                 cm_note_out: params.cm_note_out,
                 signature: params.signature,
                 zk_proof: params.zk_proof,
-                cm_q_residual: params.cm_q_residual,
                 cm_locked_residual: params.cm_locked_residual,
             })
         }
@@ -707,7 +703,7 @@ mod inner {
         legs: &(SettleLegWire, SettleLegWire),
     ) -> Result<SettlePairParams, SettleError> {
         let to_leg = |leg: &SettleLegWire| {
-            if leg.cm_q_residual.is_empty() {
+            if leg.cm_locked_residual.is_empty() {
                 SettlePairLegParams::small(
                     leg.cm_note_out.clone(),
                     leg.signature.clone(),
@@ -716,7 +712,6 @@ mod inner {
             } else {
                 SettlePairLegParams::large(
                     leg.cm_note_out.clone(),
-                    leg.cm_q_residual.clone(),
                     leg.cm_locked_residual.clone(),
                     leg.signature.clone(),
                     leg.zk_proof.clone(),
@@ -932,30 +927,25 @@ mod inner {
             .map_err(|e| SettleError::Transient(format!("parsing prover result: {e}")))?;
         // Redundant with confirm_compare, but result.json is re-read here:
         // keep the invariant local.
-        if res.public.order_a != ctx.expected_order_a || res.public.order_b != ctx.expected_order_b
-        {
-            return Err(SettleError::Transient(
-                "prover statement does not match on-chain order commitments".into(),
-            ));
-        }
+        check_public_statement(ctx, &res.public)?;
         let _ = (&res.proof_hex, &res.sig_a, &res.sig_b); // consumed in compare phase
         Ok(ProverOutput { res, legs })
     }
 
     /// Poll until this trader's order is `Done` or has been relisted with
-    /// its new remainder commitment. Timing out while the pair is still
-    /// mutually matched means the writing was rejected.
+    /// its new residual collateral commitment. Timing out while the pair is
+    /// still mutually matched means the writing was rejected.
     async fn confirm_on_chain(
         client: &ChainClient,
         my_order_id: &str,
-        my_new_order_commitment: &str,
+        my_new_locked_commitment: &str,
     ) -> Result<(), SettleError> {
         for _ in 0..30 {
             tokio::time::sleep(Duration::from_secs(2)).await;
             if let Some(order) = query_one(client, my_order_id).await {
                 if order.status == OrderStatus::Done
-                    || (!my_new_order_commitment.is_empty()
-                        && order.amount == *my_new_order_commitment)
+                    || (!my_new_locked_commitment.is_empty()
+                        && order.locked_commitment == *my_new_locked_commitment)
                 {
                     return Ok(());
                 }
@@ -981,10 +971,9 @@ mod inner {
             r_hex: my.r_recv.clone(),
             sk_hex: hex::encode(note_sk_bytes(note_seed, my_order_id)),
         };
-        let remainder = if my.new_order_amount > 0 {
+        let remainder = if my.is_relisted() {
             Some(Remainder {
                 order_amount: my.new_order_amount,
-                order_random_hex: my.r_order_new.clone(),
                 locked_amount: my.new_locked_amount,
                 locked_random_hex: my.r_locked_new.clone(),
             })
@@ -1150,12 +1139,12 @@ mod inner {
             nf: String::new(),
             pending_order: String::new(),
         };
-        // Rebuild the residual order opening from the witness.
-        let remainder = if witness.my.new_order_amount > 0 {
+        // Rebuild the residual order opening from the witness, using the
+        // same relist predicate the live path uses.
+        let remainder = if witness.my.is_relisted() {
             Some(OrderOpening {
                 order_id: witness.my_order_id.clone(),
                 q: witness.my.new_order_amount,
-                r_q: witness.my.r_order_new.clone(),
                 locked_amount: witness.my.new_locked_amount,
                 r_locked: witness.my.r_locked_new.clone(),
                 lock_token: witness.my_lock_token.clone(),

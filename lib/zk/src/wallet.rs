@@ -86,14 +86,25 @@ mod tests {
 
 // ────────────────────── Settle comparison (co-zk π_cmp) ──────────────────────
 
+/// The collateral a side must have locked under the locked-only model:
+/// q for a seller, q·price for a buyer — the settle circuits' shared
+/// side-dependent equation `needed(q, s) = q·price + s·(q − q·price)`.
+pub fn needed_collateral(q: u64, price: u64, is_seller: bool) -> u64 {
+    if is_seller { q } else { q * price }
+}
+
 /// Witness for `settle_cozk.circom` — the single-prover twin of the
-/// collaborative comparison: both order quantities and their blindings.
+/// collaborative comparison (locked-only model): both hidden quantities,
+/// both collateral blindings, plus the public price and A's side. A and B
+/// are on opposite sides.
 /// (Used by tests and fixtures; production runs the cozk2p MPC prover.)
 pub struct SettleCmpWitness {
     pub a: u64,
     pub r_a: [u8; 32],
     pub b: u64,
     pub r_b: [u8; 32],
+    pub price: u64,
+    pub a_is_seller: bool,
 }
 
 impl SettleCmpWitness {
@@ -105,14 +116,30 @@ impl SettleCmpWitness {
             std::cmp::Ordering::Greater => 1,
         }
     }
+
+    /// A's collateral commitment `P2(needed(a, s_a), r_a)`.
+    pub fn locked_a(&self) -> Fr {
+        poseidon_commit(
+            needed_collateral(self.a, self.price, self.a_is_seller),
+            &self.r_a,
+        )
+    }
+
+    /// B's collateral commitment — B is on the OPPOSITE side.
+    pub fn locked_b(&self) -> Fr {
+        poseidon_commit(
+            needed_collateral(self.b, self.price, !self.a_is_seller),
+            &self.r_b,
+        )
+    }
 }
 
 /// Output of [`prove_settle_cmp`]. `public_json` is
-/// `[cmp, order_a_commitment, order_b_commitment]` in decimal.
+/// `[cmp, locked_a, locked_b, price, a_is_seller]` in decimal.
 pub struct SettleCmpProof {
     pub cmp: i8,
-    pub order_a_commitment_hex: String,
-    pub order_b_commitment_hex: String,
+    pub locked_a_hex: String,
+    pub locked_b_hex: String,
     pub proof_json: Value,
     pub public_json: Value,
 }
@@ -124,24 +151,26 @@ pub fn prove_settle_cmp(
     circuit_handle: &TestCircuitHandle,
     zkey: &Path,
 ) -> Result<SettleCmpProof> {
-    let order_a = poseidon_commit(w.a, &w.r_a);
-    let order_b = poseidon_commit(w.b, &w.r_b);
+    let locked_a = w.locked_a();
+    let locked_b = w.locked_b();
     let cmp = w.cmp();
     let input = json!({
         "cmp": fr_to_decimal_string(&settle_cmp_fr(cmp)),
-        "order_a_commitment": fr_to_decimal_string(&order_a),
-        "order_b_commitment": fr_to_decimal_string(&order_b),
-        "a": w.a.to_string(),
+        "locked_a": fr_to_decimal_string(&locked_a),
+        "locked_b": fr_to_decimal_string(&locked_b),
+        "price": w.price.to_string(),
+        "a_is_seller": if w.a_is_seller { "1" } else { "0" },
+        "q_a": w.a.to_string(),
         "r_a": fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&w.r_a)),
-        "b": w.b.to_string(),
+        "q_b": w.b.to_string(),
         "r_b": fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&w.r_b)),
     });
     let wtns = circuit_handle.gen_witness(&input)?;
     let (proof_json, public_json) = run_rapidsnark(zkey, &wtns)?;
     Ok(SettleCmpProof {
         cmp,
-        order_a_commitment_hex: fr_to_hex(&order_a),
-        order_b_commitment_hex: fr_to_hex(&order_b),
+        locked_a_hex: fr_to_hex(&locked_a),
+        locked_b_hex: fr_to_hex(&locked_b),
         proof_json,
         public_json,
     })

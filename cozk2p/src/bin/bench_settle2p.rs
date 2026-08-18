@@ -27,7 +27,7 @@ use ark_mpc::{PARTY0, test_helpers::execute_mock_mpc};
 use ark_serialize::CanonicalSerialize;
 use clap::Parser;
 use cozk2p::{
-    SidePrivate, compute_public, default_cache_dir, dev_keys,
+    SidePrivate, compute_public, default_cache_dir, dev_keys, needed_collateral,
     poseidon::{commit, fr_to_hex},
     prove_single, sample_trade,
     session::{
@@ -85,20 +85,19 @@ fn build_session_inputs(
     price: u64,
     a_is_seller: bool,
 ) -> (SessionInput, SessionInput) {
-    let zero = commit_hex(0, &[0u8; 32]);
-    let order_a = commit_hex(a.order_amount, &a.r_order);
-    let order_b = commit_hex(b.order_amount, &b.r_order);
-    let collateral = |amt: u64, is_seller: bool| if is_seller { amt } else { amt * price };
+    // Locked-only model: each order's single on-chain commitment is
+    // P2(needed(q, side), r_locked) — the same equation the relation and
+    // the session use.
+    let collateral = |amt: u64, is_seller: bool| {
+        needed_collateral(amt, price, is_seller).expect("sample collateral fits u64")
+    };
     let locked_amt_a = collateral(a.order_amount, a_is_seller);
     let locked_amt_b = collateral(b.order_amount, !a_is_seller);
-    let (r_locked_a, r_locked_b) = ([0xA3u8; 32], [0xB3u8; 32]);
-    let locked_a = [commit_hex(locked_amt_a, &r_locked_a), zero.clone()];
-    let locked_b = [commit_hex(locked_amt_b, &r_locked_b), zero.clone()];
-    let my_priv = |s: &SidePrivate, locked_amt: u64, r_locked: [u8; 32]| MyPrivate {
+    let locked_a = commit_hex(locked_amt_a, &a.r_locked);
+    let locked_b = commit_hex(locked_amt_b, &b.r_locked);
+    let my_priv = |s: &SidePrivate| MyPrivate {
         order_amount: s.order_amount,
-        r_order: hex::encode(s.r_order),
-        locked_amount: locked_amt,
-        r_locked: hex::encode(r_locked),
+        r_locked: hex::encode(s.r_locked),
     };
     // Fresh npk per side: any in-range field element works for the bench.
     let npk_hex = |seed: u8| fr_to_hex(&commit(seed as u64, &[seed; 32]));
@@ -118,8 +117,6 @@ fn build_session_inputs(
             my_recv_token: recv.into(),
             price,
             a_is_seller,
-            order_a: order_a.clone(),
-            order_b: order_b.clone(),
             locked_a: locked_a.clone(),
             locked_b: locked_b.clone(),
             my_recv_npk: npk,
@@ -133,7 +130,7 @@ fn build_session_inputs(
             a_lock,
             a_recv,
             npk_hex(0x51),
-            my_priv(a, locked_amt_a, r_locked_a),
+            my_priv(a),
         ),
         common(
             "trader-b",
@@ -141,7 +138,7 @@ fn build_session_inputs(
             a_recv,
             a_lock,
             npk_hex(0x52),
-            my_priv(b, locked_amt_b, r_locked_b),
+            my_priv(b),
         ),
     )
 }
@@ -181,7 +178,7 @@ fn mean(xs: &[f64]) -> f64 {
 async fn main() -> Result<()> {
     let args = Args::parse();
     let (a, b, price, a_is_seller) = sample_trade();
-    let public = compute_public(&a, &b);
+    let public = compute_public(&a, &b, price, a_is_seller)?;
 
     println!("=== setup (cached after first run) ===");
     let t = Instant::now();
@@ -265,7 +262,6 @@ async fn main() -> Result<()> {
                     cm_note_out: result.my.recv_commitment.clone(),
                     signature: DUMMY_SIG.to_string(),
                     zk_proof: "x".repeat(800),
-                    cm_q_residual: result.my.new_order_commitment.clone(),
                     cm_locked_residual: result.my.new_locked_commitment.clone(),
                 };
                 let leg_start = Instant::now();
@@ -374,7 +370,6 @@ async fn main() -> Result<()> {
                     "cm_note_out": "11".repeat(32),
                     "signature": DUMMY_SIG,
                     "zk_proof": "x".repeat(800),
-                    "cm_q_residual": "",
                     "cm_locked_residual": "",
                 }});
                 writeln!(stdin, "{leg}")?;
@@ -411,7 +406,7 @@ async fn main() -> Result<()> {
 
     let report = json!({
         "circuit_gates": gates,
-        "public_signals": 15,
+        "public_signals": 5,
         "proof_size_bytes": {
             "compressed": proof_compressed,
             "uncompressed": proof_uncompressed,

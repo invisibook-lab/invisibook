@@ -3,10 +3,10 @@
 //! A TWO-party (no helper node) collaborative prover for invisibook's
 //! privacy-preserving settlement, built on renegade-fi's `mpc-jellyfish`
 //! (collaborative TurboPlonk) over `ark-mpc` (malicious-secure 2-party
-//! SPDZ). The two matched traders jointly prove the same settlement
-//! statement as the 3-party `lib/cozk` path (open both order commitments,
-//! public `cmp = sign(a-b)`, remainder updates, collateral/receive
-//! commitments) without either learning the other's amounts.
+//! SPDZ). The two matched traders jointly prove the comparison statement of
+//! the single-prover `settle_cozk.circom` (locked-only model: open both
+//! collateral commitments via `needed(q, side)`, public
+//! `cmp = sign(q_a - q_b)`) without either learning the other's quantity.
 //!
 //! This workspace is intentionally separate from `lib/` — it pins an older
 //! nightly (see `rust-toolchain.toml`) because `ark-mpc` relies on the
@@ -35,5 +35,5 @@ pub use prove::{
     build_mpc_circuit, build_single_prover_circuit, prove_collaborative, prove_single,
     verify_settle,
 };
-pub use relation::{SettlePublic, SidePrivate, compute_public};
+pub use relation::{SettlePublic, SidePrivate, compute_public, needed_collateral};
 pub use setup::{default_cache_dir, dev_keys, sample_trade};

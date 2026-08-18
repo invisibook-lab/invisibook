@@ -164,30 +164,30 @@ fn main() {
     // ── Settlement fixtures: a matched pair (A sells 80 ETH @3, B buys 60)
     //    through compare + both settle proofs, with placeholder order ids
     //    ("order-a"/"order-b") baked into the binds so the Go verify tests
-    //    can rebuild the exact statements without chain state. ──
+    //    can rebuild the exact statements without chain state.
+    //    Locked-only model: each order carries ONE collateral commitment —
+    //    A locks 80 ETH under r_la, B locks 180 USDT under r_lb; the same
+    //    commitments enter the compare and the settle statements. ──
     let settle_out = out_path.replace(".json", "_settle.json");
-    let (r_qa, r_qb) = (fr_from_be_bytes(&rep(0x81)), fr_from_be_bytes(&rep(0x82)));
-    let (r_la, r_lb) = (fr_from_be_bytes(&rep(0x83)), fr_from_be_bytes(&rep(0x84)));
-    let zero_r = fr_from_be_bytes(&[0u8; 32]);
+    let (r_la_bytes, r_lb_bytes) = (rep(0x83), rep(0x84));
+    let (r_la, r_lb) = (fr_from_be_bytes(&r_la_bytes), fr_from_be_bytes(&r_lb_bytes));
     let price = 3u64;
 
     let cmp_setup = dev_setup_snarkjs("settle_cozk").expect("setup settle_cozk");
     let cmp_handle = TestCircuitHandle::from_compiled(&cmp_setup.circuit_dir).expect("handle");
-    let mut r_qa_bytes = [0x81u8; 32];
-    let mut r_qb_bytes = [0x82u8; 32];
-    // Use the raw byte convention prove_settle_cmp expects.
     let cmp_proof = prove_settle_cmp(
         &SettleCmpWitness {
             a: 80,
-            r_a: r_qa_bytes,
+            r_a: r_la_bytes,
             b: 60,
-            r_b: r_qb_bytes,
+            r_b: r_lb_bytes,
+            price,
+            a_is_seller: true,
         },
         &cmp_handle,
         &cmp_setup.zkey,
     )
     .expect("prove settle_cmp");
-    let _ = (&mut r_qa_bytes, &mut r_qb_bytes);
 
     // B (smaller, buyer, side = 0): pays its whole 180 USDT collateral to
     // A's fresh npk.
@@ -197,8 +197,7 @@ fn main() {
     let npk_b_fresh = npk_from_sk(fr_from_be_bytes(&rep(0x92)));
     let small_w = SettleSmallWitness {
         q: 60,
-        r_q: r_qb,
-        locked: [(180, r_lb), (0, zero_r)],
+        r_locked: r_lb,
         price,
         side_sell: false,
         pay_asset: asset_id("USDT").unwrap(),
@@ -220,30 +219,27 @@ fn main() {
         prove_settle_small(small_w, &small_handle, &small_setup.zkey).expect("prove settle_small");
 
     // A (larger, seller, side = 1): pays the 60 ETH fill to B's fresh npk,
-    // relists 20 with fresh commitments.
+    // relists the residual 20 under a fresh collateral commitment.
     let large_setup = dev_setup_snarkjs("settle_large").expect("setup settle_large");
     let large_handle = TestCircuitHandle::from_compiled(&large_setup.circuit_dir).expect("handle");
     let large_w = SettleLargeWitness {
         q: 80,
-        r_q: r_qa,
+        r_locked: r_la,
         q_ctr: 60,
-        r_q_ctr: r_qb,
-        locked: [(80, r_la), (0, zero_r)],
+        r_locked_ctr: r_lb,
         price,
         side_sell: true,
-        r_q_residual: fr_from_be_bytes(&rep(0x94)),
         r_locked_residual: fr_from_be_bytes(&rep(0x95)),
         pay_asset: asset_id("ETH").unwrap(),
         npk_ctr: npk_b_fresh,
         r_note: fr_from_be_bytes(&rep(0x96)),
         bind: fr_from_be_bytes(&[0u8; 32]), // patched below
     };
-    let (cm_q_res, cm_locked_res, cm_note) = large_w.output_cms();
+    let (cm_locked_res, cm_note) = large_w.output_cms();
     let large_bind = settle_large_bind(
         CHAIN_ID,
         "order-a",
         "order-b",
-        &note_fr_to_hex(&cm_q_res),
         &note_fr_to_hex(&cm_locked_res),
         &note_fr_to_hex(&cm_note),
     );
@@ -257,12 +253,9 @@ fn main() {
     let settle_fixture = json!({
         "chain_id": CHAIN_ID,
         "price": price,
-        "order_a_commitment": cmp_proof.order_a_commitment_hex,
-        "order_b_commitment": cmp_proof.order_b_commitment_hex,
-        "locked_a": [note_fr_to_hex(&zk::wallet::poseidon2(ark_bn254::Fr::from(80u64), r_la)),
-                     note_fr_to_hex(&zk::wallet::poseidon2(ark_bn254::Fr::from(0u64), zero_r))],
-        "locked_b": [note_fr_to_hex(&zk::wallet::poseidon2(ark_bn254::Fr::from(180u64), r_lb)),
-                     note_fr_to_hex(&zk::wallet::poseidon2(ark_bn254::Fr::from(0u64), zero_r))],
+        "a_is_seller": true,
+        "locked_a": cmp_proof.locked_a_hex,
+        "locked_b": cmp_proof.locked_b_hex,
         "cmp": {
             "cmp": cmp_proof.cmp,
             "proof_json": cmp_proof.proof_json,
@@ -280,7 +273,6 @@ fn main() {
         "large": {
             "order_id": "order-a",
             "match_order_id": "order-b",
-            "cm_q_residual": large_proof.cm_q_residual_hex,
             "cm_locked_residual": large_proof.cm_locked_residual_hex,
             "cm_note_out": large_proof.cm_note_out_hex,
             "proof_json": large_proof.proof_json,

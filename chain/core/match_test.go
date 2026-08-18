@@ -24,7 +24,6 @@ func mkOrder(id string, typ TradeType, price uint64, height uint32) *Order {
 		Type:             typ,
 		Subject:          TradePair{Token1: "ETH", Token2: "USDT"},
 		Price:            new(big.Int).SetUint64(price),
-		Amount:           CipherText("00" + strings.Repeat(hex.EncodeToString([]byte{0xAA}), 31)),
 		Pubkey:           "pk-" + id,
 		LockedCommitment: "00" + strings.Repeat(hex.EncodeToString([]byte{0xBB}), 31),
 		BlockHeight:      height,
