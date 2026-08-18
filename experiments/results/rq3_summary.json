@@ -1,0 +1,424 @@
+{
+  "environment": {
+    "cpu": "12th Gen Intel(R) Core(TM) i9-12900HX",
+    "logical_cpus": 24,
+    "memory_gib": 29.4,
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "os": "Ubuntu 22.04.5 LTS",
+    "rustc": "rustc 1.93.0-nightly (d5419f1e9 2025-10-30)",
+    "cargo": "cargo 1.93.0-nightly (6c1b61003 2025-10-28)",
+    "go": "go version go1.26.2 linux/amd64",
+    "git_commit": "5892d4241a321ef2c266da6d158590bdcd118a25",
+    "git_branch": "cozk-split"
+  },
+  "runs": 5,
+  "scenario": "one trade: A sells 2 ETH @ 3 (maker), B buys 1 ETH @ 3",
+  "order": {
+    "alice_prove_ms": {
+      "median": 191.588413,
+      "p95": 203.6212788,
+      "min": 186.481344,
+      "max": 205.746319,
+      "n": 5
+    },
+    "alice_land_ms": {
+      "median": 4007.4881490000002,
+      "p95": 4008.1719436000003,
+      "min": 4006.4287829999994,
+      "max": 4008.1930760000005,
+      "n": 5
+    },
+    "bob_prove_ms": {
+      "median": 193.469146,
+      "p95": 197.5114932,
+      "min": 188.280004,
+      "max": 198.181155,
+      "n": 5
+    },
+    "bob_land_ms": {
+      "median": 6010.110046000001,
+      "p95": 6010.365912,
+      "min": 6007.801450999999,
+      "max": 6010.408666,
+      "n": 5
+    },
+    "match_ms": {
+      "median": 4006.0780569999997,
+      "p95": 4006.5785134,
+      "min": 4004.4960720000004,
+      "max": 4006.6532749999997,
+      "n": 5
+    }
+  },
+  "session": {
+    "alice": {
+      "build_ms": {
+        "median": 52.190579,
+        "p95": 67.983488,
+        "min": 44.675776,
+        "max": 70.308013,
+        "n": 5
+      },
+      "prove_ms": {
+        "median": 982.158053,
+        "p95": 1006.4582958,
+        "min": 961.252789,
+        "max": 1008.45001,
+        "n": 5
+      },
+      "open_ms": {
+        "median": 2595.945142,
+        "p95": 2940.8020366,
+        "min": 2530.611571,
+        "max": 2989.857046,
+        "n": 5
+      },
+      "verify_ms": {
+        "median": 4.366916,
+        "p95": 6.8580992,
+        "min": 3.747609,
+        "max": 6.887536,
+        "n": 5
+      },
+      "compare_onchain_wait_ms": {
+        "median": 6009.628652,
+        "p95": 6011.3822584,
+        "min": 6008.733194,
+        "max": 6011.760166,
+        "n": 5
+      },
+      "leg_exchange_ms": {
+        "median": 1.1051259999999998,
+        "p95": 1.7231489999999998,
+        "min": 1.074638,
+        "max": 1.861476,
+        "n": 5
+      },
+      "total_ms": {
+        "median": 10033.811882,
+        "p95": 10380.834611999999,
+        "min": 9893.289128,
+        "max": 10439.666811,
+        "n": 5
+      },
+      "peak_rss_bytes": {
+        "median": 1702133760.0,
+        "p95": 1709478707.2,
+        "min": 1678249984,
+        "max": 1709776896,
+        "n": 5
+      }
+    },
+    "bob": {
+      "build_ms": {
+        "median": 52.262431,
+        "p95": 68.2682552,
+        "min": 44.891343,
+        "max": 70.5381,
+        "n": 5
+      },
+      "prove_ms": {
+        "median": 975.243975,
+        "p95": 1024.6998556,
+        "min": 944.15193,
+        "max": 1032.406046,
+        "n": 5
+      },
+      "open_ms": {
+        "median": 2612.608668,
+        "p95": 2917.9713361999998,
+        "min": 2529.454698,
+        "max": 2964.250268,
+        "n": 5
+      },
+      "verify_ms": {
+        "median": 3.892785,
+        "p95": 7.595808199999999,
+        "min": 3.652785,
+        "max": 8.481404,
+        "n": 5
+      },
+      "compare_onchain_wait_ms": {
+        "median": 6009.756638,
+        "p95": 6011.4843776,
+        "min": 6009.030390999999,
+        "max": 6011.85533,
+        "n": 5
+      },
+      "leg_exchange_ms": {
+        "median": 101.202014,
+        "p95": 102.93661060000001,
+        "min": 97.818563,
+        "max": 103.141912,
+        "n": 5
+      },
+      "total_ms": {
+        "median": 10033.762094,
+        "p95": 10380.3797968,
+        "min": 9892.784207,
+        "max": 10439.06892,
+        "n": 5
+      },
+      "peak_rss_bytes": {
+        "median": 1690779648.0,
+        "p95": 1719517184.0,
+        "min": 1675681792,
+        "max": 1723133952,
+        "n": 5
+      }
+    }
+  },
+  "steps": {
+    "alice": [
+      {
+        "label": "1 preamble fingerprint",
+        "ms": {
+          "median": 1.887755,
+          "p95": 2.1985645999999996,
+          "min": 1.80914,
+          "max": 2.200766,
+          "n": 5
+        }
+      },
+      {
+        "label": "2 share inputs + collateral binding",
+        "ms": {
+          "median": 43.239742,
+          "p95": 53.514672399999995,
+          "min": 37.926782,
+          "max": 54.618275,
+          "n": 5
+        }
+      },
+      {
+        "label": "3 three-way compare",
+        "ms": {
+          "median": 13.836971,
+          "p95": 19.0825244,
+          "min": 12.584913,
+          "max": 19.1411,
+          "n": 5
+        }
+      },
+      {
+        "label": "4 signature ferry + exchange",
+        "ms": {
+          "median": 0.806908,
+          "p95": 1.3487319999999998,
+          "min": 0.674432,
+          "max": 1.4675129999999998,
+          "n": 5
+        }
+      },
+      {
+        "label": "5 collaborative prove + local verify",
+        "ms": {
+          "median": 3646.12191,
+          "p95": 4016.3959476,
+          "min": 3542.7716490000003,
+          "max": 4075.833981,
+          "n": 5
+        }
+      },
+      {
+        "label": "6 on-chain compare anchor (host wait)",
+        "ms": {
+          "median": 6009.658043,
+          "p95": 6011.3915736,
+          "min": 6008.758473,
+          "max": 6011.768484,
+          "n": 5
+        }
+      },
+      {
+        "label": "7 smaller-side reveal",
+        "ms": {
+          "median": 1.771151,
+          "p95": 2.3234567999999998,
+          "min": 1.5192910000000002,
+          "max": 2.363038,
+          "n": 5
+        }
+      },
+      {
+        "label": "8 payout-note keys + WAL",
+        "ms": {
+          "median": 0.980959,
+          "p95": 1.3878678,
+          "min": 0.812755,
+          "max": 1.450711,
+          "n": 5
+        }
+      }
+    ],
+    "bob": [
+      {
+        "label": "1 preamble fingerprint",
+        "ms": {
+          "median": 0.25713199999999997,
+          "p95": 0.27682660000000003,
+          "min": 0.153275,
+          "max": 0.27840200000000004,
+          "n": 5
+        }
+      },
+      {
+        "label": "2 share inputs + collateral binding",
+        "ms": {
+          "median": 43.699521,
+          "p95": 54.1024118,
+          "min": 38.40047,
+          "max": 55.271701,
+          "n": 5
+        }
+      },
+      {
+        "label": "3 three-way compare",
+        "ms": {
+          "median": 13.481827,
+          "p95": 18.810434,
+          "min": 12.403121,
+          "max": 18.866853,
+          "n": 5
+        }
+      },
+      {
+        "label": "4 signature ferry + exchange",
+        "ms": {
+          "median": 0.852417,
+          "p95": 1.3301526,
+          "min": 0.567594,
+          "max": 1.419139,
+          "n": 5
+        }
+      },
+      {
+        "label": "5 collaborative prove + local verify",
+        "ms": {
+          "median": 3643.41762,
+          "p95": 4016.424498,
+          "min": 3542.659474,
+          "max": 4075.878057,
+          "n": 5
+        }
+      },
+      {
+        "label": "6 on-chain compare anchor (host wait)",
+        "ms": {
+          "median": 6009.788068,
+          "p95": 6011.514517400001,
+          "min": 6009.0563,
+          "max": 6011.880512000001,
+          "n": 5
+        }
+      },
+      {
+        "label": "7 smaller-side reveal",
+        "ms": {
+          "median": 1.7822650000000002,
+          "p95": 4.1459206,
+          "min": 1.227727,
+          "max": 4.669143,
+          "n": 5
+        }
+      },
+      {
+        "label": "8 payout-note keys + WAL",
+        "ms": {
+          "median": 0.824249,
+          "p95": 1.296654,
+          "min": 0.68772,
+          "max": 1.382853,
+          "n": 5
+        }
+      }
+    ]
+  },
+  "settle_ms": {
+    "median": 20144.252261999998,
+    "p95": 22094.485962199997,
+    "min": 20015.848262,
+    "max": 22548.957867999998,
+    "n": 5
+  },
+  "full_trade_ms": {
+    "median": 34552.640443,
+    "p95": 36507.4391138,
+    "min": 34433.322526,
+    "max": 36965.711859999996,
+    "n": 5
+  },
+  "categories_ms": {
+    "collaborative_cryptography": 4024.1832299999996,
+    "single_prover_order_proofs": 385.05755899999997,
+    "chain_waits": 20033.304904,
+    "settlement_submission_and_legs": 10110.440379999998
+  },
+  "chain_verification_ms": {
+    "send_order": {
+      "median": 4.829,
+      "p95": 4.9593,
+      "min": 4.603,
+      "max": 4.998,
+      "n": 10
+    },
+    "settle_cozk2p": {
+      "median": 12.373,
+      "p95": 13.3926,
+      "min": 10.152,
+      "max": 13.503,
+      "n": 5
+    },
+    "settle_large": {
+      "median": 4.615,
+      "p95": 4.7042,
+      "min": 4.545,
+      "max": 4.722,
+      "n": 5
+    },
+    "settle_small": {
+      "median": 4.42,
+      "p95": 4.453,
+      "min": 4.371,
+      "max": 4.457,
+      "n": 5
+    }
+  },
+  "onchain_payload_bytes": {
+    "SendOrder": {
+      "per_writing": {
+        "median": 1522.0,
+        "p95": 1523.0,
+        "min": 1518,
+        "max": 1523,
+        "n": 10
+      },
+      "count": 10,
+      "total": 15215
+    },
+    "SettlePair": {
+      "per_writing": {
+        "median": 2221.0,
+        "p95": 2221.0,
+        "min": 2216,
+        "max": 2221,
+        "n": 10
+      },
+      "count": 10,
+      "total": 22194
+    },
+    "SubmitCompareCoZk2p": {
+      "per_writing": {
+        "median": 1999.0,
+        "p95": 1999.0,
+        "min": 1999,
+        "max": 1999,
+        "n": 10
+      },
+      "count": 10,
+      "total": 19990
+    }
+  },
+  "onchain_payload_received_bytes": 57399,
+  "onchain_payload_effective_bytes": 7264
+}

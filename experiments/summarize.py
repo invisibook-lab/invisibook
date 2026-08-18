@@ -237,11 +237,16 @@ def rq1(args):
 def rq2(args):
     index = read_json(args.index) or {}
     env = read_json(args.environment) or {}
+    # RQ1 measured the same session WITHOUT the relay. The difference at
+    # 0 ms is what the relay itself costs.
+    baseline = read_json(args.baseline) if args.baseline else None
     points = []
 
+    # The index names files next to itself, so a result directory moves.
+    here = Path(args.index).parent
     for point in index.get("points", []):
-        bench = read_json(point["bench"]) or {}
-        traffic = read_json(point["traffic"]) or {}
+        bench = read_json(here / point["bench"]) or {}
+        traffic = read_json(here / point["traffic"]) or {}
         parties = [
             p for run in bench.get("cozk2p_quic_2process", []) for p in run.get("per_party", [])
         ]
@@ -266,8 +271,11 @@ def rq2(args):
                 "open_ms": phase("open_ms"),
                 "verify_ms": phase("verify_ms"),
                 "total_ms": total,
-                "traffic_bytes": traffic.get("a_to_b_bytes", 0)
-                + traffic.get("b_to_a_bytes", 0),
+                # The relay counts the whole point; report one session.
+                "traffic_bytes_per_session": (
+                    traffic.get("a_to_b_bytes", 0) + traffic.get("b_to_a_bytes", 0)
+                )
+                / max(len(parties) // 2, 1),
             }
         )
 
@@ -277,6 +285,10 @@ def rq2(args):
         "runs_per_point": index.get("runs"),
         "points": points,
     }
+    if baseline:
+        summary["direct_quic_total_ms"] = (
+            baseline.get("two_party_quic", {}).get("total_ms", {}).get("median")
+        )
     Path(args.json_out).write_text(json.dumps(summary, indent=2))
 
     with open(args.csv_out, "w") as f:
@@ -321,9 +333,18 @@ def rq2(args):
     lines += [
         "",
         f"Traffic per session (both directions): "
-        f"{mib(ok[0]['traffic_bytes']) if ok else '0'} MiB.",
-        "",
+        f"{mib(ok[0]['traffic_bytes_per_session']) if ok else '0'} MiB.",
     ]
+    direct = summary.get("direct_quic_total_ms")
+    if direct and ok:
+        lines += [
+            "",
+            f"The relay itself costs {ms(ok[0]['total_ms']['median'] - direct)} ms: "
+            f"the same session without the relay (RQ1) takes {ms(direct)} ms, and "
+            f"the 0 ms point here takes {ms(ok[0]['total_ms']['median'])} ms. Every "
+            "point carries that same hop, so the points compare with each other.",
+        ]
+    lines.append("")
     Path(args.md_out).write_text("\n".join(lines))
 
 
@@ -347,6 +368,25 @@ def parse_node_log(path):
     for name, value in PAYLOAD_RE.findall(text):
         payloads.setdefault(name, []).append(int(value))
     return verifications, payloads
+
+
+# Both traders submit these writings, for liveness. The first one takes
+# effect and the chain rejects the second, so a trade needs only one copy.
+SUBMITTED_TWICE = ("SubmitCompareCoZk2p", "SettlePair")
+
+
+def effective_payload(payloads, runs):
+    """Bytes one trade must put on chain: every writing counted once per
+    effect. `payloads` maps a writing name to the sizes the node logged,
+    and `runs` is the number of trades those sizes come from."""
+    total = 0.0
+    for name, values in payloads.items():
+        if not values:
+            continue
+        median = percentile(values, 50)
+        count = 1 if name in SUBMITTED_TWICE else len(values) / max(runs, 1)
+        total += median * count
+    return round(total)
 
 
 def rq3(args):
@@ -397,14 +437,12 @@ def rq3(args):
 
     alice_steps, bob_steps = steps("alice"), steps("bob")
 
-    # Categories: what the trade spends its wall clock on. The session's
-    # own numbers are per trader; both traders settle at the same time.
-    crypto_ms = (
-        field("session.alice.build_ms")["median"]
-        + field("session.alice.prove_ms")["median"]
-        + field("session.alice.open_ms")["median"]
-        + field("session.alice.verify_ms")["median"]
-    )
+    # Categories: what the trade spends its wall clock on. Both traders
+    # settle at the same time, so one trader's session covers that span.
+    # The four categories add up to the full trade.
+    session_total = field("session.alice.total_ms")["median"]
+    anchor_wait = field("session.alice.compare_onchain_wait_ms")["median"]
+    crypto_ms = session_total - anchor_wait
     order_prove_ms = (
         field("order.alice.prove_ms")["median"] + field("order.bob.prove_ms")["median"]
     )
@@ -412,8 +450,12 @@ def rq3(args):
         field("order.alice.land_ms")["median"]
         + field("order.bob.land_ms")["median"]
         + field("order.match_ms")["median"]
-        + field("session.alice.compare_onchain_wait_ms")["median"]
+        + anchor_wait
     )
+    # What is left of the settlement driver: the rendezvous, each side's own
+    # Groth16 settlement proof, the leg exchange, and the settlement
+    # submission with its confirmation.
+    settle_tail_ms = field("settle_ms")["median"] - session_total
 
     summary = {
         "environment": env,
@@ -449,6 +491,7 @@ def rq3(args):
             "collaborative_cryptography": crypto_ms,
             "single_prover_order_proofs": order_prove_ms,
             "chain_waits": chain_wait_ms,
+            "settlement_submission_and_legs": settle_tail_ms,
         },
         "chain_verification_ms": {
             name: stats(values) for name, values in sorted(verifications.items())
@@ -458,7 +501,8 @@ def rq3(args):
                    "total": sum(values)}
             for name, values in sorted(payloads.items())
         },
-        "onchain_payload_total_bytes": sum(sum(v) for v in payloads.values()),
+        "onchain_payload_received_bytes": sum(sum(v) for v in payloads.values()),
+        "onchain_payload_effective_bytes": effective_payload(payloads, len(runs)),
     }
     Path(args.json_out).write_text(json.dumps(summary, indent=2))
 
@@ -496,6 +540,7 @@ def rq3(args):
         f"| collaborative cryptography | {ms(crypto_ms)} |",
         f"| single-prover order proofs | {ms(order_prove_ms)} |",
         f"| chain waits (blocks and polling) | {ms(chain_wait_ms)} |",
+        f"| settlement submission, own leg and confirmation | {ms(settle_tail_ms)} |",
         "",
         "## What the chain does",
         "",
@@ -515,8 +560,11 @@ def rq3(args):
         )
     lines += [
         "",
-        f"Total on-chain payload of the trade: "
-        f"{summary['onchain_payload_total_bytes']} B.",
+        f"On-chain payload of one trade: "
+        f"{summary['onchain_payload_effective_bytes']} B. Both traders submit "
+        "the comparison and the settlement for liveness, so the node receives "
+        f"{summary['onchain_payload_received_bytes'] // max(summary['runs'], 1)} B "
+        "and rejects the second copy of each.",
         "",
         f"Peak memory per trader: "
         f"{gib(summary['session']['alice']['peak_rss_bytes']['median'])} GiB (A), "
@@ -548,6 +596,7 @@ def main():
     p2 = sub.add_parser("rq2", help="summarize the round-trip-time sweep")
     p2.add_argument("--index", required=True)
     p2.add_argument("--environment", required=True)
+    p2.add_argument("--baseline", help="rq1_summary.json, for the relay's own cost")
     p2.add_argument("--json-out", required=True)
     p2.add_argument("--md-out", required=True)
     p2.add_argument("--csv-out", required=True)
