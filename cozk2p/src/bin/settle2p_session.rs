@@ -264,6 +264,7 @@ async fn main() -> Result<()> {
         "build_ms": result.timings.build_ms,
         "prove_ms": result.timings.prove_ms,
         "open_ms": result.timings.open_ms,
+        "verify_ms": result.verify_ms,
         // Chain/host latencies, kept OUT of the cryptographic phases above:
         // the F1 on-chain compare confirmation and the settle-leg round.
         "compare_onchain_wait_ms": result.onchain_wait_ms,

@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"time"
 
 	"github.com/iden3/go-rapidsnark/types"
 	"github.com/iden3/go-rapidsnark/verifier"
@@ -83,11 +84,15 @@ func VerifyGroth16(vk *CircuitVK, proofJSON string, publicSignals []string) erro
 	}
 
 	zk := types.ZKProof{Proof: &proof, PubSignals: publicSignals}
+	// The verification wall-clock goes into the log line: the experiment
+	// harness (experiments/rq3_end_to_end.sh) reads the on-chain
+	// verification cost from these lines.
+	start := time.Now()
 	if err := verifier.VerifyGroth16(zk, vk.VKBytes); err != nil {
 		log.Printf("[zk] %s REJECTED: %v", vk.Name, err)
 		return fmt.Errorf("groth16 verification failed for %s: %w", vk.Name, err)
 	}
-	log.Printf("[zk] %s ok", vk.Name)
+	log.Printf("[zk] %s ok in %.3f ms", vk.Name, float64(time.Since(start).Microseconds())/1e3)
 	return nil
 }
 

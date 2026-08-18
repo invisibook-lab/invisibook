@@ -31,15 +31,15 @@ type OrderEvent struct {
 // Account tripod (injected via the `tripod` struct tag) for Cash state changes.
 type OrderBook struct {
 	*tripod.Tripod
-	Account            *Account `tripod:"account"`
-	db                 *gorm.DB
-	chainID            uint64
-	settleCoZkVK       *CircuitVK
-	settleCoZk2pVK     *PlonkVK
-	settleSmallVK      *CircuitVK
-	settleLargeVK      *CircuitVK
-	sendOrderVK        *CircuitVK
-	claimFeesVK        *CircuitVK
+	Account        *Account `tripod:"account"`
+	db             *gorm.DB
+	chainID        uint64
+	settleCoZkVK   *CircuitVK
+	settleCoZk2pVK *PlonkVK
+	settleSmallVK  *CircuitVK
+	settleLargeVK  *CircuitVK
+	sendOrderVK    *CircuitVK
+	claimFeesVK    *CircuitVK
 }
 
 // NewOrderBook constructs the OrderBook tripod and registers its writings and
@@ -84,12 +84,12 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	// so a misconfigured node never accepts unverified settlements.
 	if cfg.RequireProofs {
 		for name, missing := range map[string]bool{
-			"settle_cozk":        settleCoZkVK == nil,
-			"settle_cozk2p":      settleCoZk2pVK == nil,
-			"settle_small":       settleSmallVK == nil,
-			"settle_large":       settleLargeVK == nil,
-			"send_order":         sendOrderVK == nil,
-			"claim_fees":         claimFeesVK == nil,
+			"settle_cozk":   settleCoZkVK == nil,
+			"settle_cozk2p": settleCoZk2pVK == nil,
+			"settle_small":  settleSmallVK == nil,
+			"settle_large":  settleLargeVK == nil,
+			"send_order":    sendOrderVK == nil,
+			"claim_fees":    claimFeesVK == nil,
 		} {
 			if missing {
 				panic(fmt.Sprintf("require_proofs is set but %s VK path is empty; refusing to start with proof verification disabled", name))
@@ -97,15 +97,15 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 		}
 	}
 	ot := &OrderBook{
-		Tripod:             tri,
-		db:                 InitOrderDB(cfg.DBPath, ParseGormLogLevel(cfg.DBLogLevel)),
-		chainID:            cfg.ChainID,
-		settleCoZkVK:       settleCoZkVK,
-		settleCoZk2pVK:     settleCoZk2pVK,
-		settleSmallVK:      settleSmallVK,
-		settleLargeVK:      settleLargeVK,
-		sendOrderVK:        sendOrderVK,
-		claimFeesVK:        claimFeesVK,
+		Tripod:         tri,
+		db:             InitOrderDB(cfg.DBPath, ParseGormLogLevel(cfg.DBLogLevel)),
+		chainID:        cfg.ChainID,
+		settleCoZkVK:   settleCoZkVK,
+		settleCoZk2pVK: settleCoZk2pVK,
+		settleSmallVK:  settleSmallVK,
+		settleLargeVK:  settleLargeVK,
+		sendOrderVK:    sendOrderVK,
+		claimFeesVK:    claimFeesVK,
 	}
 	// Settlement is EXCLUSIVELY atomic (F2) through SettlePair: the
 	// unilateral SettleSmall/SettleLarge writings are not registered, so a
@@ -172,6 +172,7 @@ func validateOrderPrice(price *big.Int) error {
 // accrues the fee to the block producer, stores the order, and matches it.
 func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
+	LogPayloadSize("SendOrder", ctx.GetRequestBytes())
 
 	req := new(SendOrderRequest)
 	if err := ctx.BindJson(req); err != nil {

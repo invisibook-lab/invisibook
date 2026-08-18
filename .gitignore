@@ -20,3 +20,6 @@ invisibook
 # Dev dual-instance test data
 .dev/
 chain/cfg/tests/pool_e2e_test.toml
+
+# Experiment logs (the JSON, CSV and Markdown records are kept)
+experiments/results/*.log

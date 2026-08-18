@@ -46,6 +46,7 @@ func buildCompare2pPublicJSON(req *CompareRequest, orderA, orderB *Order) ([]byt
 // only the proof system and the signed message's domain prefix differ.
 func (ot *OrderBook) SubmitCompareCoZk2p(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
+	LogPayloadSize("SubmitCompareCoZk2p", ctx.GetRequestBytes())
 
 	req := new(CompareRequest)
 	if err := ctx.BindJson(req); err != nil {
