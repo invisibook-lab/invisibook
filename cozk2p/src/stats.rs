@@ -33,9 +33,8 @@ use serde::{Deserialize, Serialize};
 
 /// Wall-clock of every protocol step, in the order the session crosses
 /// them. The labels match the numbered steps in
-/// `docs/settlement_protocol.md` (§2.2 for the split flow, §3.2 for the
-/// merged one) so a benchmark table lines up with the protocol
-/// walkthrough one row per step.
+/// `docs/settlement_protocol.md` §2.2, so a benchmark table lines up with
+/// the protocol walkthrough one row per step.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StepTimings {
     /// `(step label, milliseconds spent in that step)`, in protocol order.

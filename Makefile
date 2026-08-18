@@ -1,4 +1,4 @@
-.PHONY: build build-desktop build-chain build-chain-lite build-cozk2p-lib build-settle2p build-chain-cozk2p smoke-chain dump-cozk2p-fixture dump-settlepair2p-fixture dump-pool-fixture test-e2e-pool test-e2e-cozk2p run-chain run-test clean reset reset-chain reset-test
+.PHONY: build build-desktop build-chain build-chain-lite build-cozk2p-lib build-settle2p build-chain-cozk2p smoke-chain dump-cozk2p-fixture dump-pool-fixture test-e2e-pool test-e2e-cozk2p run-chain run-test clean reset reset-chain reset-test
 
 # The settle2p_session prover ships alongside the desktop app.
 COZK2P_SETTLE2P_BIN := $(PWD)/cozk2p/target/release/settle2p_session
@@ -50,13 +50,6 @@ dump-cozk2p-fixture:
 		--vk-out ../chain/vk/settle_cozk2p_vk.bin \
 		--fixture-out /tmp/settle_cozk2p_fixture.json
 
-# Regenerates chain/vk/settle_pair_cozk2p_vk.bin (the MERGED statement) and
-# its Go-test fixture (in-process 2-party collaborative prove; ~2 min).
-dump-settlepair2p-fixture:
-	cd cozk2p && cargo run --release --bin dump_settlepair2p_fixture -- \
-		--vk-out ../chain/vk/settle_pair_cozk2p_vk.bin \
-		--fixture-out /tmp/settle_pair_cozk2p_fixture.json
-
 # Shielded-pool fixture + VKs (note_deposit / spend_withdraw), consumed by
 # chain/core pool tests and chain/test/pool_e2e_test.go.
 dump-pool-fixture:
@@ -68,8 +61,8 @@ test-e2e-pool: build-chain dump-pool-fixture
 
 # Full-depth 2-party e2e: real collaborative proof verified on a running
 # chain (plus the core-level accept/reject fixture tests).
-test-e2e-cozk2p: build-chain-cozk2p dump-cozk2p-fixture dump-settlepair2p-fixture
-	cd chain && go test -tags cozk2p ./core/ -run 'CoZk2p|Settle2p|SettlePair2p' -v
+test-e2e-cozk2p: build-chain-cozk2p dump-cozk2p-fixture
+	cd chain && go test -tags cozk2p ./core/ -run 'CoZk2p|Settle2p' -v
 	cd chain && go test -tags cozk2p ./test/ -run 'CoZk2p' -v -timeout 600s
 
 run-desktop: build-settle2p

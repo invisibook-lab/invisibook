@@ -24,9 +24,7 @@ use rand::{SeedableRng, rngs::StdRng};
 
 use crate::{
     prove::build_single_prover_circuit,
-    prove_pair::build_pair_single_prover_circuit,
     relation::{SidePrivate, compute_public},
-    relation_pair::{PAIR_PUBLIC_LEN, PairSidePrivate, PairStatementInputs, compute_pair_public},
 };
 
 /// Max SRS degree — the settlement circuit is ~9k gates, so 32768 leaves
@@ -142,116 +140,6 @@ pub fn dev_keys(cache_dir: &Path) -> Result<(ProvingKey<Bn254>, VerifyingKey<Bn2
 /// Default key cache directory: `<workspace>/target/settle2p-keys`.
 pub fn default_cache_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/settle2p-keys")
-}
-
-// ────────────────────── Merged (pair) relation keys ──────────────────────
-
-/// A sample well-formed trade for the MERGED relation's keygen circuit
-/// shape (values are irrelevant to `preprocess`). A sells 80 ETH at price
-/// 3, B buys 60: A receives USDT, B receives ETH. Reused by tests/benches.
-pub fn sample_pair_trade() -> (PairSidePrivate, PairSidePrivate, PairStatementInputs) {
-    use crate::poseidon::asset_fr;
-    let a = PairSidePrivate {
-        order_amount: 80,
-        r_locked: [0xA2; 32],
-        r_locked_res: [0xA4; 32],
-        recv_npk: ark_bn254::Fr::from(0xA5u64),
-        r_note: [0xA6; 32],
-    };
-    let b = PairSidePrivate {
-        order_amount: 60,
-        r_locked: [0xB2; 32],
-        r_locked_res: [0xB4; 32],
-        recv_npk: ark_bn254::Fr::from(0xB5u64),
-        r_note: [0xB6; 32],
-    };
-    let inputs = PairStatementInputs {
-        price: 3,
-        a_is_seller: true,
-        asset_recv_a: asset_fr("USDT").expect("static symbol"),
-        asset_recv_b: asset_fr("ETH").expect("static symbol"),
-    };
-    (a, b, inputs)
-}
-
-/// Bump when the merged relation changes without moving the gate count.
-/// v1: initial merged statement (15 publics: cmp + payout notes +
-/// residual pairs + order/collateral opens + trade parameters).
-/// v2: locked-only model — the quantity and residual-quantity commitments
-/// are gone, so the statement is the 11 publics of `relation_pair`, and the
-/// public price/side flag are no longer re-checked in-circuit.
-const PAIR_RELATION_VERSION: u32 = 2;
-
-/// Generate (or load from `cache_dir`) the proving/verifying keys of the
-/// MERGED relation. Same dev-SRS caveats as [`dev_keys`]; the two relations
-/// share the SRS seed but have separate cache tags, so both key pairs can
-/// coexist in one cache dir.
-pub fn dev_keys_pair(cache_dir: &Path) -> Result<(ProvingKey<Bn254>, VerifyingKey<Bn254>)> {
-    warn_dev_srs_once();
-    let (a, b, inputs) = sample_pair_trade();
-    let public = compute_pair_public(&a, &b, &inputs)?;
-    let circuit = build_pair_single_prover_circuit(&a, &b, &public)?;
-    let tag = format!(
-        "settlepair2p-{}x{}-{:x}-v{}",
-        circuit.num_gates(),
-        PAIR_PUBLIC_LEN,
-        DEV_SRS_SEED,
-        PAIR_RELATION_VERSION
-    );
-    let pk_path = cache_dir.join(format!("{tag}.pk"));
-    let vk_path = cache_dir.join(format!("{tag}.vk"));
-    if pk_path.exists() && vk_path.exists() {
-        let pk =
-            ProvingKey::<Bn254>::deserialize_uncompressed_unchecked(fs::read(&pk_path)?.as_slice())
-                .map_err(|e| anyhow!("parsing cached pair pk: {e}"))?;
-        let vk = VerifyingKey::<Bn254>::deserialize_uncompressed_unchecked(
-            fs::read(&vk_path)?.as_slice(),
-        )
-        .map_err(|e| anyhow!("parsing cached pair vk: {e}"))?;
-        return Ok((pk, vk));
-    }
-
-    // The padded evaluation domain must fit the SRS: srs_size = domain + 2,
-    // and `num_gates()` after finalize IS the padded domain size.
-    anyhow::ensure!(
-        circuit.num_gates() + 2 <= MAX_DEGREE,
-        "merged relation ({} gates) exceeds the dev SRS (MAX_DEGREE = {}); bump MAX_DEGREE",
-        circuit.num_gates(),
-        MAX_DEGREE
-    );
-
-    let mut rng = StdRng::seed_from_u64(DEV_SRS_SEED);
-    let srs = PlonkKzgSnark::<Bn254>::universal_setup_for_testing(MAX_DEGREE, &mut rng)
-        .map_err(|e| anyhow!("dev SRS generation: {e}"))?;
-
-    let (pk, vk) = PlonkKzgSnark::<Bn254>::preprocess(&srs, &circuit)
-        .map_err(|e| anyhow!("preprocess: {e}"))?;
-
-    fs::create_dir_all(cache_dir).context("creating key cache dir")?;
-    let write_atomic = |path: &Path, buf: &[u8]| -> Result<()> {
-        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-        fs::write(&tmp, buf)?;
-        fs::rename(&tmp, path)?;
-        Ok(())
-    };
-    let mut buf = Vec::new();
-    pk.serialize_uncompressed(&mut buf)
-        .map_err(|e| anyhow!("serializing pair pk: {e}"))?;
-    write_atomic(&pk_path, &buf)?;
-    buf.clear();
-    vk.serialize_uncompressed(&mut buf)
-        .map_err(|e| anyhow!("serializing pair vk: {e}"))?;
-    write_atomic(&vk_path, &buf)?;
-
-    Ok((pk, vk))
-}
-
-/// Number of constraints in the merged settlement circuit (for reporting).
-pub fn pair_circuit_size() -> Result<usize> {
-    let (a, b, inputs) = sample_pair_trade();
-    let public = compute_pair_public(&a, &b, &inputs)?;
-    let circuit = build_pair_single_prover_circuit(&a, &b, &public)?;
-    Ok(circuit.num_gates())
 }
 
 /// Number of constraints in the settlement circuit (for reporting).
