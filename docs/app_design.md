@@ -1,7 +1,7 @@
 # App Design
 
-> **Status:** Current (2026-08-16, note model + two-phase settlement).
-> For every place this design differs from the paper, see
+> **Status:** Current (2026-08-17, locked-only model + two-phase
+> settlement). For every place this design differs from the paper, see
 > [paper_deviations.md](paper_deviations.md).
 
 ## 1. Overview
@@ -59,7 +59,7 @@ piped stdio. Groth16 proving (rapidsnark) is linked via `lib/zk`.
 | File | Store | Content | Rule |
 |---|---|---|---|
 | `notes.json` | [`NoteStore`](../lib/chain/src/note_store.rs) | every owned note's full opening (cm, token, amount, r, sk, leaf index, status) | fsync + atomic rename; write BEFORE any note-creating tx is submitted |
-| `orders.json` | [`OrderStore`](../lib/chain/src/order_store.rs) | every open order's opening (q, r_q, locked_amount, r_locked, lock token) | write BEFORE `SendOrder`; a relist replaces the opening with the residual one |
+| `orders.json` | [`OrderStore`](../lib/chain/src/order_store.rs) | every open order's opening (q, locked_amount, r_locked, lock token) | write BEFORE `SendOrder`; a relist replaces the opening with the residual one |
 
 Note lifecycle: `UNSPENT → PENDING_SPEND → SPENT` and
 `PENDING_MINT → UNSPENT` (the poller resolves pending states against the
@@ -105,8 +105,8 @@ id at a time.
 run_settle
   ├─ role assignment: maker = trader-a (lower block height, tie → id)
   ├─ equal-price check (cross-price pairs are rejected — paper D6)
-  ├─ SessionInput: chain publics (cm_q ×2, [LockedCommitment, zero-pad] ×2,
-  │    price, side) + MY OrderOpening (q, r_q, locked, r_locked)
+  ├─ SessionInput: chain publics (LockedCommitment ×2, price, side)
+  │    + MY OrderOpening (q, r_locked)
   ├─ rendezvous: RegisterSettleAddr / QuerySettleAddr (QUIC addrs, dev)
   └─ settle2p_session subprocess over stdio:
        "need_sig"       → sign the canonical compare message
@@ -177,9 +177,9 @@ per-step wall-clock table; numbers in
    payout-note keys are exchanged; each app proves its own settle
    circuit (~0.1 s) and the legs cross in-fabric.
 4. Either app submits `SettlePair`: Bob's order → `Done`, Alice's order
-   relists in place with residual commitments, exactly two payout notes
-   mint. Each wallet persists its incoming note and Alice's wallet
-   replaces her order opening with the residual one.
+   relists in place with the residual collateral commitment, exactly
+   two payout notes mint. Each wallet persists its incoming note and
+   Alice's wallet replaces her order opening with the residual one.
 
 ## 4. Reference
 

@@ -3,7 +3,6 @@ use std::fmt;
 // ────────────────────── Type Aliases ──────────────────────
 
 pub type OrderID = String;
-pub type CipherText = String;
 pub type TokenID = String;
 
 // ────────────────────── TradeType ──────────────────────
@@ -73,7 +72,6 @@ pub struct Order {
     pub trade_type: TradeType,
     pub subject: TradePair,
     pub price: Option<u64>,
-    pub amount: CipherText,
     pub pubkey: String, // owner's ed25519 pubkey (64-char hex)
     pub locked_commitment: String,
     pub fee: u64,

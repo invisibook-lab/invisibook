@@ -1,7 +1,8 @@
 //! The wallet's local order-opening ledger. The chain stores an order's
-//! quantity and collateral only as commitments (`Order.Amount` = cm_q,
-//! `Order.LockedCommitment`); the plaintext values and blindings exist
-//! ONLY here. Settlement cannot open the on-chain rows without this file.
+//! collateral only as a commitment (`Order.LockedCommitment` — the order's
+//! ONLY commitment in the locked-only model); the plaintext quantity,
+//! collateral value, and blinding exist ONLY here. Settlement cannot open
+//! the on-chain rows without this file.
 //!
 //! Protocol rule (persist-before-publish): the opening for a new order
 //! MUST be durably written (`save` fsyncs) BEFORE the SendOrder that
@@ -12,15 +13,14 @@ use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
 /// One order's full opening: everything needed to open its on-chain
-/// quantity and collateral commitments at settle time.
+/// collateral commitment at settle time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderOpening {
     /// The on-chain order id (SHA-256 over the input nullifiers).
     pub order_id: String,
-    /// Hidden order quantity q (token1 units) that `Order.Amount` commits to.
+    /// Hidden order quantity q (token1 units); pinned by the collateral
+    /// equation `locked = needed(q, side)` — no separate commitment.
     pub q: u64,
-    /// 64-char hex blinding of the cm_q commitment.
-    pub r_q: String,
     /// Hidden collateral value `Order.LockedCommitment` commits to
     /// (= q for a sell, q·price for a buy).
     pub locked_amount: u64,
@@ -110,7 +110,6 @@ mod tests {
         OrderOpening {
             order_id: id.into(),
             q,
-            r_q: "aa".repeat(32),
             locked_amount: q * 3,
             r_locked: "bb".repeat(32),
             lock_token: "USDT".into(),

@@ -53,16 +53,16 @@ fn warn_dev_srs_once() {
 /// key generation (witness values are irrelevant to `preprocess`; only the
 /// gate/permutation structure matters). Also reused by tests and benches.
 pub fn sample_trade() -> (SidePrivate, SidePrivate, u64, bool) {
+    // A (maker) SELLS 80 token1 at price 3 (locks 80); B BUYS 60
+    // (locks 180). Both flags/price ARE part of the statement now.
     let a = SidePrivate {
         order_amount: 80,
-        r_order: [0xA1; 32],
+        r_locked: [0xA1; 32],
     };
     let b = SidePrivate {
         order_amount: 60,
-        r_order: [0xB1; 32],
+        r_locked: [0xB1; 32],
     };
-    // price / a_is_seller are no longer part of the comparison relation but
-    // still parameterize the post-compare settlement in tests and benches.
     (a, b, 3, true)
 }
 
@@ -70,10 +70,12 @@ pub fn sample_trade() -> (SidePrivate, SidePrivate, u64, bool) {
 /// (the cache filename already includes gates/inputs, which move on
 /// virtually any edit; this covers the rest).
 ///
-/// v3: the relation shrank to the comparison-only statement
-/// [cmp, order_a, order_b] (paper π_cmp); payouts and residuals moved to
-/// the single-prover settle_small/settle_large circuits.
-const RELATION_VERSION: u32 = 3;
+/// v4: locked-only model — orders commit ONLY collateral; the statement is
+/// [cmp, locked_a, locked_b, price, a_is_seller] and each quantity opens
+/// its collateral via needed(q, side) in-circuit.
+/// v5: the PUBLIC price and side flag are used as they are — their
+/// in-circuit range/booleanity re-checks are gone.
+const RELATION_VERSION: u32 = 5;
 
 /// Generate (or load from `cache_dir`) the proving and verifying keys.
 /// Deterministic across machines: fixed-seed SRS + fixed circuit shape.
@@ -84,13 +86,13 @@ const RELATION_VERSION: u32 = 3;
 pub fn dev_keys(cache_dir: &Path) -> Result<(ProvingKey<Bn254>, VerifyingKey<Bn254>)> {
     warn_dev_srs_once();
     // Build the (cheap) keygen circuit first: its shape keys the cache.
-    let (a, b, _price, _a_is_seller) = sample_trade();
-    let public = compute_public(&a, &b);
+    let (a, b, price, a_is_seller) = sample_trade();
+    let public = compute_public(&a, &b, price, a_is_seller)?;
     let circuit = build_single_prover_circuit(&a, &b, &public)?;
     let tag = format!(
         "settle2p-{}x{}-{:x}-v{}",
         circuit.num_gates(),
-        15,
+        5,
         DEV_SRS_SEED,
         RELATION_VERSION
     );
@@ -142,8 +144,8 @@ pub fn default_cache_dir() -> PathBuf {
 
 /// Number of constraints in the settlement circuit (for reporting).
 pub fn circuit_size() -> Result<usize> {
-    let (a, b, _price, _a_is_seller) = sample_trade();
-    let public = compute_public(&a, &b);
+    let (a, b, price, a_is_seller) = sample_trade();
+    let public = compute_public(&a, &b, price, a_is_seller)?;
     let circuit = build_single_prover_circuit(&a, &b, &public)?;
     Ok(circuit.num_gates())
 }

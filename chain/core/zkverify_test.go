@@ -25,16 +25,6 @@ func TestHexToDecimalRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestHexToDecimalRoundTripsKnownCommitment(t *testing.T) {
-	got, err := HexToDecimal(PoseidonZeroCommitmentHex)
-	if err != nil {
-		t.Fatalf("HexToDecimal: %v", err)
-	}
-	if got != PoseidonZeroCommitment {
-		t.Fatalf("hex→decimal mismatch:\nwant %s\ngot  %s", PoseidonZeroCommitment, got)
-	}
-}
-
 // bumpLastDigit replaces the trailing decimal digit of `s` with a different
 // one so the resulting field element no longer matches the original.
 // Shared by the fixture-based verifier tests in this package.

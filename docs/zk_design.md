@@ -1,15 +1,16 @@
 # ZK Design
 
-> **Status:** Current (2026-08-16, note model). For every place this
-> design differs from the paper, see
+> **Status:** Current (2026-08-17, locked-only model). For every place
+> this design differs from the paper, see
 > [paper_deviations.md](paper_deviations.md).
 
 ## 1. Overview
 
 Invisibook never publishes a quantity or a balance. Value lives in a
-shielded note pool; orders carry their quantity and collateral as
-Poseidon commitments; every writing that touches hidden value carries a
-proof:
+shielded note pool; an order carries its collateral as ONE Poseidon
+commitment, and the hidden quantity is implied by it
+([paper_deviations.md](paper_deviations.md) D17); every writing that
+touches hidden value carries a proof:
 
 - **Groth16 (circom + rapidsnark)** for all single-prover circuits —
   pool spends, order admission, per-side settlement, fee claims.
@@ -40,7 +41,7 @@ nf  = P2(P2(TAG_NF=5,  nk), rho)
 
 - Tree: depth 20, empty leaf = Fr("invisibook.empty"), append-only;
   every historical root stays a valid anchor.
-- Value commitments (`cm_q`, collateral, residuals) use the plain
+- Value commitments (collateral, residual collateral) use the plain
   `P2(v, r)` shape (`poseidon_commit`).
 - Asset ids are the token symbol's bytes as a field element (≤ 31
   bytes, no reduction).
@@ -56,13 +57,22 @@ nf  = P2(P2(TAG_NF=5,  nk), rho)
 - **64-bit range checks** — every amount in conservation arithmetic
   goes through `Num2Bits(64)`; products with the u64 `price` stay below
   the modulus (the chain rejects prices ≥ 2^64 at admission).
-- **2-slot shape** — spend circuits take exactly two input slots; a
-  missing input is an Orchard-style dummy (fresh random secrets, zero
+- **2-slot spend shape** — spend circuits take exactly two input slots;
+  a missing input is an Orchard-style dummy (fresh random secrets, zero
   value, membership disabled — its nullifier is an unsteerable PRF
-  image). Collateral is `[Order.LockedCommitment, Poseidon(0,0)]`; the
-  zero-commitment constant is allowed ONLY as this pad (enforced by the
+  image). An order carries ONE collateral commitment
+  (`Order.LockedCommitment`); the old 2-slot collateral pad
+  `Poseidon(0,0)` is gone, and its constant now survives only as a
+  Poseidon golden vector (enforced by the
   grep-gate test
   [lib/chain/tests/model_gate.rs](../lib/chain/tests/model_gate.rs)).
+- **Locked-only collateral equation** — the order's commitment is
+  `locked = P2(needed, r_locked)` with
+  `needed = q·price + side·(q − q·price)` (a sell locks `q` token1, a
+  buy locks `q·price` token2). The hidden quantity `q` is a pure
+  witness: for `price > 0` the equation is injective in `q`, so opening
+  `locked` also pins `q`. This holds ONLY under the equal-price
+  matching rule ([paper_deviations.md](paper_deviations.md) D6, D17).
 - **Publics order** — the chain rebuilds each public-input vector
   itself; the per-circuit order below is normative.
 
@@ -83,12 +93,13 @@ cm_change, bind]`. Handler: `Account.NoteWithdraw`.
 ### 4.2 Order circuits
 
 **`send_order.circom`** — admission with full collateralization: spend
-2 note slots, commit the quantity (`cm_q`) and the side-dependent
-collateral (`locked_commitment` = `q` sell / `q·price` buy), pay the
+2 note slots, compute the side-dependent collateral IN-CIRCUIT from the
+hidden `q` and the public price, commit it as the order's ONLY
+commitment (`locked_commitment` = `P2(needed, r_locked)`), pay the
 plaintext fee, mint the change note. Conservation:
 `inputs = collateral + fee + change`.
-Publics (11): `[anchor, nf_0, nf_1, lock_asset_id, cm_q,
-locked_commitment, fee, cm_change, price, side, bind]`.
+Publics (10): `[anchor, nf_0, nf_1, lock_asset_id, locked_commitment,
+fee, cm_change, price, side, bind]`.
 Handler: `OrderBook.SendOrder`. Prover:
 [`prove_send_order`](../lib/chain/src/note_prover.rs).
 
@@ -98,20 +109,21 @@ Handler: `OrderBook.ClaimFees`.
 
 ### 4.3 Settlement circuits (paper π_A / π_B)
 
-**`settle_small.circom`** (π_A, the fully filled side) — opens own
-`cm_q` and the 2-slot collateral, checks the collateral equals the
-required amount at the execution price, and mints the WHOLE collateral
-as the counterparty's payout note (under the counterparty-chosen
-`npk`/`r`). Publics (8): `[cm_q, locked_0, locked_1, price, side,
-pay_asset, cm_note_out, bind]`.
+**`settle_small.circom`** (π_A, the fully filled side) — opens the
+order's single collateral commitment against the in-circuit
+`needed(q, side)` at the execution price (which also pins the hidden
+`q`), and mints the WHOLE collateral as the counterparty's payout note
+(under the counterparty-chosen `npk`/`r`). Publics (6): `[locked,
+price, side, pay_asset, cm_note_out, bind]`.
 
 **`settle_large.circom`** (π_B, the surviving side) — additionally
-opens the counterparty's on-chain `cm_q_ctr` with the REVEALED opening
-(so the fill cannot be understated), range-proves `q ≥ q_ctr`, pays the
-fill as the payout note, and re-commits the residual quantity and
-collateral under fresh blindings. Publics (11): `[cm_q, cm_q_ctr,
-locked_0, locked_1, price, side, cm_q_residual, cm_locked_residual,
-pay_asset, cm_note_out, bind]`.
+opens the COUNTERPARTY's on-chain collateral commitment with the
+revealed `(q_ctr, r_locked_ctr)`, on the OPPOSITE side
+(`needed(q_ctr, 1 − side)`), so the fill cannot be understated;
+range-proves `q ≥ q_ctr`; pays the fill as the payout note; and
+re-commits the residual collateral under a fresh blinding (there is no
+residual quantity commitment). Publics (8): `[locked, locked_ctr,
+price, side, cm_locked_residual, pay_asset, cm_note_out, bind]`.
 
 Asymmetry note: `settle_small` does not self-prove `q ≤ q_ctr`; the
 chain's recorded `cmp` gates which circuit each side may use (F3 in the
@@ -124,11 +136,14 @@ Both legs are verified together by the atomic `SettlePair` writing
 ### 4.4 Compare gate
 
 **`settle_cozk.circom`** — the single-prover twin of the collaborative
-comparison: opens both order commitments and outputs
-`cmp = sign(q_A − q_B)`. Publics (3): `[cmp, order_a_commitment,
-order_b_commitment]`. Production uses the cozk2p PLONK prover for the
-same 3-signal statement; this Groth16 twin serves fixtures, tests, and
-the `SubmitCompareCoZk` variant.
+comparison: opens both orders' collateral commitments through the
+side-dependent equation (A and B are on opposite sides) and outputs
+`cmp = sign(q_A − q_B)`. Publics (5): `[cmp, locked_a, locked_b,
+price, a_is_seller]` — `price` and `a_is_seller` are in the statement
+because the collateral equation needs them to pin the compared
+quantities. Production uses the cozk2p PLONK prover for the same
+5-signal statement; this Groth16 twin serves fixtures, tests, and the
+`SubmitCompareCoZk` variant.
 
 ## 5. Wallet-side proving
 
@@ -149,10 +164,12 @@ Warm-key prove times (rapidsnark, mean of 3; full tables in
 |---|---|
 | note_deposit | 86 |
 | spend_withdraw | 185 |
-| send_order | 203 |
-| settle_small | 90 |
-| settle_large | 96 |
 | claim_fees | 86 |
+
+The locked-only migration changed `send_order`, `settle_small`, and
+`settle_large` (fewer commitments, smaller statements); their prove
+times are not re-measured yet. Record new numbers in
+[cozk_experiments.md](cozk_experiments.md).
 
 ## 6. Trust boundaries and known limitations
 
@@ -160,7 +177,7 @@ Warm-key prove times (rapidsnark, mean of 3; full tables in
 |---|---|
 | Bridge inclusion/release proofs | **TODO** — `NoteDeposit` trusts an operator signature (dev: nothing); `NoteWithdraw`'s bridge-out amount is unbound off-chain |
 | Trusted setup | snarkjs single-party dev setup; the cozk2p SRS is a fixed-seed dev SRS. Both need ceremonies before real value |
-| Equal-price limitation | settle circuits equate the collateral price with the execution price; cross-price matches cannot settle ([paper_deviations.md](paper_deviations.md) D6) |
+| Equal-price limitation | settle circuits equate the collateral price with the execution price; cross-price matches cannot settle. The rule is also LOAD-BEARING for soundness: without a quantity commitment, only the equal price pins the hidden `q` ([paper_deviations.md](paper_deviations.md) D6, D17) |
 | `settle_small` asymmetry | does not self-prove "I am smaller" (F3, open) |
 | Android | no on-device proving; order placement is disabled there |
 

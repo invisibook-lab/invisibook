@@ -531,18 +531,24 @@ mod tests {
         out
     }
 
-    /// Prove + verify the comparison statement and pin the 3-signal public
-    /// vector [cmp, order_a, order_b] the chain rebuilds.
+    /// Prove + verify the comparison statement and pin the 5-signal public
+    /// vector [cmp, locked_a, locked_b, price, a_is_seller] the chain
+    /// rebuilds. A sells (locks q), B buys (locks q·price).
     fn cmp_prove_and_check(a: u64, b: u64, expected_cmp: i8) {
-        use crate::wallet::{poseidon_commit, settle_cmp_fr};
+        use crate::wallet::{needed_collateral, poseidon_commit, settle_cmp_fr};
         let (r_a, r_b) = (r_bytes(0x0A00), r_bytes(0x0B00));
+        let price = 3u64;
+        let locked_a = poseidon_commit(needed_collateral(a, price, true), &r_a);
+        let locked_b = poseidon_commit(needed_collateral(b, price, false), &r_b);
         let input = serde_json::json!({
             "cmp": fr_to_decimal_string(&settle_cmp_fr(expected_cmp)),
-            "order_a_commitment": fr_to_decimal_string(&poseidon_commit(a, &r_a)),
-            "order_b_commitment": fr_to_decimal_string(&poseidon_commit(b, &r_b)),
-            "a": a.to_string(),
+            "locked_a": fr_to_decimal_string(&locked_a),
+            "locked_b": fr_to_decimal_string(&locked_b),
+            "price": price.to_string(),
+            "a_is_seller": "1",
+            "q_a": a.to_string(),
             "r_a": fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&r_a)),
-            "b": b.to_string(),
+            "q_b": b.to_string(),
             "r_b": fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&r_b)),
         });
         let params = cached_params("settle_cozk");
@@ -551,8 +557,10 @@ mod tests {
         assert!(verify_proof(&proof, &params.vk).unwrap());
         let expected: Vec<Fr> = vec![
             settle_cmp_fr(expected_cmp),
-            poseidon_commit(a, &r_a),
-            poseidon_commit(b, &r_b),
+            locked_a,
+            locked_b,
+            Fr::from(price),
+            Fr::from(1u64),
         ];
         assert_eq!(proof.public_inputs, expected);
     }
@@ -567,15 +575,18 @@ mod tests {
     /// A lying cmp claim is unsatisfiable.
     #[test]
     fn settle_cmp_fails_on_wrong_claim() {
-        use crate::wallet::{poseidon_commit, settle_cmp_fr};
+        use crate::wallet::{needed_collateral, poseidon_commit, settle_cmp_fr};
         let (r_a, r_b) = (r_bytes(0x0A00), r_bytes(0x0B00));
+        let price = 3u64;
         let input = serde_json::json!({
             "cmp": fr_to_decimal_string(&settle_cmp_fr(-1)), // lie: a > b
-            "order_a_commitment": fr_to_decimal_string(&poseidon_commit(80, &r_a)),
-            "order_b_commitment": fr_to_decimal_string(&poseidon_commit(60, &r_b)),
-            "a": "80",
+            "locked_a": fr_to_decimal_string(&poseidon_commit(needed_collateral(80, price, true), &r_a)),
+            "locked_b": fr_to_decimal_string(&poseidon_commit(needed_collateral(60, price, false), &r_b)),
+            "price": price.to_string(),
+            "a_is_seller": "1",
+            "q_a": "80",
             "r_a": fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&r_a)),
-            "b": "60",
+            "q_b": "60",
             "r_b": fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&r_b)),
         });
         let params = cached_params("settle_cozk");

@@ -5,7 +5,7 @@
 //! with the ark-compressed proof and verifying key bytes. Reusing the serde
 //! layer (instead of a hand-rolled binary layout) keeps the Go side free of
 //! field-element encoding concerns and reuses `SettlePublic::to_vec`'s
-//! canonical ordering — the single source of truth for the 15 signals.
+//! canonical ordering — the single source of truth for the 5 signals.
 //!
 //! Build as a staticlib (`cargo build --release --lib`) and link from Go
 //! with `-tags cozk2p` (see `chain/core/plonkverify_cgo.go`).
@@ -120,8 +120,8 @@ mod tests {
     /// bytes in, JSON statement in, return code out.
     #[test]
     fn ffi_roundtrip_accepts_and_rejects() {
-        let (a, b, _price, _a_is_seller) = sample_trade();
-        let public = compute_public(&a, &b);
+        let (a, b, price, a_is_seller) = sample_trade();
+        let public = compute_public(&a, &b, price, a_is_seller).unwrap();
         let (pk, vk) = dev_keys(&default_cache_dir()).unwrap();
         let proof = prove_single(&a, &b, &public, &pk).unwrap();
 

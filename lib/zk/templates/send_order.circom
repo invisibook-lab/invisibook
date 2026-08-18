@@ -9,16 +9,15 @@ include "note.circom";
 // the plaintext fee, with the collateral amount computed IN-CIRCUIT from
 // the hidden quantity and the public price.
 //
-// Public: [anchor, nf_0, nf_1, lock_asset_id, cm_q, locked_commitment,
+// Public: [anchor, nf_0, nf_1, lock_asset_id, locked_commitment,
 //          fee, cm_change, price, side, bind]
 //   anchor            — historical tree root the spends reference;
 //   nf_0, nf_1        — the two input slots' nullifiers (dummies allowed);
 //   lock_asset_id     — the collateral token (buy → token2, sell → token1);
-//   cm_q              — the order's quantity commitment P2(q, r_q), the
-//                       value the settlement comparison later opens;
-//   locked_commitment — P2(locked_value, r_locked), the order-bound
-//                       collateral (lives on the order row, outside the
-//                       pool); locked_value = q·price (buy) or q (sell);
+//   locked_commitment — P2(locked_value, r_locked), the order's ONLY
+//                       commitment (locked-only model); locked_value =
+//                       q·price (buy) or q (sell) pins the hidden
+//                       quantity q through the side-dependent equation;
 //   fee               — plaintext fee, really destroyed from the pool and
 //                       claimable by the block producer;
 //   cm_change         — change note back to the spender (always minted);
@@ -32,7 +31,6 @@ template SendOrder(DEPTH) {
     signal input nf_0;
     signal input nf_1;
     signal input lock_asset_id;
-    signal input cm_q;
     signal input locked_commitment;
     signal input fee;
     signal input cm_change;
@@ -51,7 +49,6 @@ template SendOrder(DEPTH) {
 
     // Order + change openings.
     signal input q;
-    signal input r_q;
     signal input r_locked;
     signal input npk_change;
     signal input v_change;
@@ -77,14 +74,11 @@ template SendOrder(DEPTH) {
     spend[0].nf === nf_0;
     spend[1].nf === nf_1;
 
-    // Open the quantity commitment; 64-bit q and price keep the product
-    // integer-exact in the field.
+    // 64-bit q and price keep the collateral product integer-exact.
     component q_range = Num2Bits(64);
     q_range.in <== q;
     component price_range = Num2Bits(64);
     price_range.in <== price;
-    signal cm_q_check <== Poseidon(2)([q, r_q]);
-    cm_q_check === cm_q;
 
     // Collateral: q·price for a buy, q for a sell — the paper's
     // admission-time full backing. Bounded to 64 bits so conservation is
@@ -110,4 +104,4 @@ template SendOrder(DEPTH) {
     signal bind_sq <== bind * bind;
 }
 
-component main {public [anchor, nf_0, nf_1, lock_asset_id, cm_q, locked_commitment, fee, cm_change, price, side, bind]} = SendOrder(20);
+component main {public [anchor, nf_0, nf_1, lock_asset_id, locked_commitment, fee, cm_change, price, side, bind]} = SendOrder(20);

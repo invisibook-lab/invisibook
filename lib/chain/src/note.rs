@@ -177,9 +177,9 @@ pub fn note_deposit_bind(
     ])
 }
 
-/// Bind for a SendOrder v2 request (Go: `core.sendOrderV2Bind`). The order
-/// id, nullifiers, and the three output commitments weld the proof to the
-/// exact signed request.
+/// Bind for a SendOrder v2 request (Go: `core.sendOrderBind`). The order
+/// id, nullifiers, and the two output commitments weld the proof to the
+/// exact signed request (locked-only model: no quantity commitment).
 #[allow(clippy::too_many_arguments)]
 pub fn send_order_bind(
     chain_id: u64,
@@ -187,7 +187,6 @@ pub fn send_order_bind(
     lock_token: &str,
     nf0_hex: &str,
     nf1_hex: &str,
-    cm_q_hex: &str,
     locked_commitment_hex: &str,
     fee: u64,
     cm_change_hex: &str,
@@ -201,7 +200,6 @@ pub fn send_order_bind(
         lock_token.as_bytes(),
         nf0_hex.as_bytes(),
         nf1_hex.as_bytes(),
-        cm_q_hex.as_bytes(),
         locked_commitment_hex.as_bytes(),
         &fee.to_be_bytes(),
         cm_change_hex.as_bytes(),
@@ -229,9 +227,9 @@ pub fn claim_fees_bind(
 }
 
 /// Bind for a SettleSmall request (Go: `core.settleSmallBind`). The other
-/// publics (cm_q, collateral, price, side, asset) are rebuilt by the chain
-/// from its own order state; bind welds the proof to the pair and the
-/// payout note.
+/// publics (collateral, price, side, asset) are rebuilt by the chain from
+/// its own order state; bind welds the proof to the pair and the payout
+/// note.
 pub fn settle_small_bind(
     chain_id: u64,
     order_id: &str,
@@ -249,12 +247,12 @@ pub fn settle_small_bind(
     ])
 }
 
-/// Bind for a SettleLarge request (Go: `core.settleLargeBind`).
+/// Bind for a SettleLarge request (Go: `core.settleLargeBind`). Locked-only
+/// model: the residual is a single collateral commitment.
 pub fn settle_large_bind(
     chain_id: u64,
     order_id: &str,
     match_order_id: &str,
-    cm_q_residual_hex: &str,
     cm_locked_residual_hex: &str,
     cm_note_out_hex: &str,
 ) -> Fr {
@@ -265,7 +263,6 @@ pub fn settle_large_bind(
         &BIND_VERSION.to_be_bytes(),
         order_id.as_bytes(),
         match_order_id.as_bytes(),
-        cm_q_residual_hex.as_bytes(),
         cm_locked_residual_hex.as_bytes(),
         cm_note_out_hex.as_bytes(),
     ])

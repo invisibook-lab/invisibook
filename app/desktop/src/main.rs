@@ -396,7 +396,6 @@ fn App() -> Element {
                                     Some(rem) => ostore.upsert(OrderOpening {
                                         order_id: order_id.clone(),
                                         q: rem.order_amount,
-                                        r_q: rem.order_random_hex.clone(),
                                         locked_amount: rem.locked_amount,
                                         r_locked: rem.locked_random_hex.clone(),
                                         lock_token: settle::lock_token(&my_order),

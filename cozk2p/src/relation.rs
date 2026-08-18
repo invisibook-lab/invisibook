@@ -1,23 +1,37 @@
 //! The 2-party comparison relation — the paper's π_cmp (§VI-A), expressed
-//! as a jellyfish PLONK circuit. Same 3-public statement as the
+//! as a jellyfish PLONK circuit. Same 5-public statement as the
 //! single-prover `settle_cozk.circom`:
 //!
 //! ```text
-//!  0 cmp       sign(a - b) in {-1, 0, 1} (as Fr: p-1, 0, 1)
-//!  1 order_a   on-chain order A amount commitment Poseidon(a, r_a)
-//!  2 order_b   on-chain order B amount commitment Poseidon(b, r_b)
+//!  0 cmp          sign(q_a - q_b) in {-1, 0, 1} (as Fr: p-1, 0, 1)
+//!  1 locked_a     on-chain order A collateral commitment P2(needed_a, r_a)
+//!  2 locked_b     on-chain order B collateral commitment P2(needed_b, r_b)
+//!  3 price        the shared execution price (equal-price matching)
+//!  4 a_is_seller  1 when A sells token1; B is always the opposite side
 //! ```
+//!
+//! LOCKED-ONLY MODEL: orders commit ONLY their collateral
+//! `locked = P2(needed, r_locked)` with the side-dependent equation
+//! `needed(q, s) = q·price + s·(q − q·price)` (a seller locks q, a buyer
+//! q·price). The equation is injective in q for price > 0, so opening each
+//! collateral against its in-circuit `needed` pins the compared quantities
+//! (input legitimacy); price and a_is_seller therefore enter the statement.
 //!
 //! Everything after the comparison — payouts, residual re-commitments — is
 //! single-party work (`settle_small.circom` / `settle_large.circom`): once
 //! cmp is public and the smaller side reveals its opening over the
 //! settlement channel, each party holds its complete witness alone. The
-//! MPC layer therefore never touches notes, collateral, or the pool.
+//! MPC layer therefore never touches notes or the pool.
 //!
-//! Private inputs: trader A owns side-a signals, trader B side-b. Amounts
-//! enter as 64 little-endian bits each (the owner bit-decomposes locally),
-//! so the collaborative witness computation is pure share arithmetic.
+//! Private inputs: trader A owns side-a signals, trader B side-b.
+//! Quantities enter as 64 little-endian bits each (the owner bit-decomposes
+//! locally), so the collaborative witness computation is pure share
+//! arithmetic. `price` and `a_is_seller` are PUBLIC wires used as they are:
+//! a prover cannot lie about a public input and the chain builds both from
+//! the order rows (a u64 price, a 0-1 flag), so neither is re-checked
+//! in-circuit — the same policy the statement applies to cmp's encoding.
 
+use anyhow::{Result, anyhow};
 use ark_bn254::Fr;
 use ark_ff::Zero;
 use mpc_relation::{Variable, errors::CircuitError, traits::Circuit};
@@ -25,17 +39,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     gadgets::{AMOUNT_BITS, cmp_from_bits, enforce_bits, le_bits_to_field, poseidon_hash2},
-    poseidon,
+    poseidon::{commit, hash2},
 };
 
-/// One trader's private comparison inputs. `r_order` is the 32-byte
-/// blinding factor, big-endian reduced into Fr (wallet convention).
+/// One trader's private comparison inputs. `r_locked` is the 32-byte
+/// blinding factor of its on-chain collateral commitment, big-endian
+/// reduced into Fr (wallet convention).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SidePrivate {
-    /// Hidden order amount (token1 quantity).
+    /// Hidden order quantity (token1 units) backing the collateral.
     pub order_amount: u64,
-    /// Blinding of the current on-chain order commitment.
-    pub r_order: [u8; 32],
+    /// Blinding of the current on-chain collateral commitment.
+    pub r_locked: [u8; 32],
 }
 
 /// Serde adapter: Fr as the chain's 64-char big-endian hex string.
@@ -70,19 +85,21 @@ fn de_cmp<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i8, D::Error> {
 
 /// The public statement both traders agree on and the chain verifies.
 /// Commitments serialize as the chain's 64-char hex strings; field names
-/// stay in lockstep with Go's `settle2pPublic`.
+/// AND their order stay in lockstep with Go's `settle2pPublic`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettlePublic {
     #[serde(deserialize_with = "de_cmp")]
     pub cmp: i8,
     #[serde(with = "fr_hex")]
-    pub order_a: Fr,
+    pub locked_a: Fr,
     #[serde(with = "fr_hex")]
-    pub order_b: Fr,
+    pub locked_b: Fr,
+    pub price: u64,
+    pub a_is_seller: bool,
 }
 
 impl SettlePublic {
-    /// Flatten to the canonical 3-element public-input vector.
+    /// Flatten to the canonical 5-element public-input vector.
     pub fn to_vec(&self) -> Vec<Fr> {
         let cmp_fr = match self.cmp {
             1 => Fr::from(1u64),
@@ -90,7 +107,13 @@ impl SettlePublic {
             -1 => -Fr::from(1u64),
             _ => unreachable!("cmp is always in {{-1,0,1}}"),
         };
-        vec![cmp_fr, self.order_a, self.order_b]
+        vec![
+            cmp_fr,
+            self.locked_a,
+            self.locked_b,
+            Fr::from(self.price),
+            Fr::from(self.a_is_seller as u64),
+        ]
     }
 
     /// Poseidon-fold fingerprint of the canonical public vector. Used to
@@ -101,7 +124,7 @@ impl SettlePublic {
         let vec = self.to_vec();
         let mut h = Fr::from(vec.len() as u64);
         for v in vec {
-            h = poseidon::hash2(h, v);
+            h = hash2(h, v);
         }
         h
     }
@@ -113,35 +136,59 @@ fn rand_fr(r: &[u8; 32]) -> Fr {
     Fr::from_be_bytes_mod_order(r)
 }
 
+/// The collateral equation `needed(q, s) = q·price + s·(q − q·price)`: a
+/// seller locks (or moves) `q` token1, a buyer `q·price` token2. THE one
+/// native mirror of the in-circuit chain — the session's own checks and the
+/// benches call it too. Computed over u128 and rejected above u64, because
+/// every settle circuit is 64-bit and a wider value could never settle.
+pub fn needed_collateral(q: u64, price: u64, is_seller: bool) -> Result<u64> {
+    let v: u128 = if is_seller {
+        q as u128
+    } else {
+        q as u128 * price as u128
+    };
+    u64::try_from(v).map_err(|_| anyhow!("collateral value {v} exceeds 64 bits"))
+}
+
 /// Compute the public statement from both sides' plaintext inputs — the
 /// native mirror of the circuit; the collaborative flow computes the same
-/// values under MPC.
-pub fn compute_public(a: &SidePrivate, b: &SidePrivate) -> SettlePublic {
+/// values under MPC. A's side flag is `a_is_seller`; B is the opposite.
+/// Fails when either side's collateral does not fit 64 bits.
+pub fn compute_public(
+    a: &SidePrivate,
+    b: &SidePrivate,
+    price: u64,
+    a_is_seller: bool,
+) -> Result<SettlePublic> {
     let (av, bv) = (a.order_amount, b.order_amount);
     let cmp: i8 = match av.cmp(&bv) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
     };
-    SettlePublic {
+    Ok(SettlePublic {
         cmp,
-        order_a: poseidon::commit(av, &a.r_order),
-        order_b: poseidon::commit(bv, &b.r_order),
-    }
+        locked_a: commit(needed_collateral(av, price, a_is_seller)?, &a.r_locked),
+        locked_b: commit(needed_collateral(bv, price, !a_is_seller)?, &b.r_locked),
+        price,
+        a_is_seller,
+    })
 }
 
-/// Wire indices of the 3 public inputs, in canonical order.
+/// Wire indices of the 5 public inputs, in canonical order.
 pub struct PublicWires {
     pub cmp: Variable,
-    pub order_a: Variable,
-    pub order_b: Variable,
+    pub locked_a: Variable,
+    pub locked_b: Variable,
+    pub price: Variable,
+    pub a_is_seller: Variable,
 }
 
-/// Wire indices of one side's private inputs: the amount's 64-bit LE
-/// decomposition plus the order blinding.
+/// Wire indices of one side's private inputs: the quantity's 64-bit LE
+/// decomposition plus the collateral blinding.
 pub struct SideWires {
     pub amount_bits: Vec<Variable>,
-    pub r_order: Variable,
+    pub r_locked: Variable,
 }
 
 /// The plaintext values of one side's private wires, in allocation order.
@@ -152,7 +199,7 @@ pub fn side_private_values(side: &SidePrivate) -> Vec<Fr> {
     for i in 0..AMOUNT_BITS {
         vals.push(Fr::from((side.order_amount >> i) & 1));
     }
-    vals.push(rand_fr(&side.r_order));
+    vals.push(rand_fr(&side.r_locked));
     vals
 }
 
@@ -165,11 +212,11 @@ pub fn side_wires_from_vars(vars: &[Variable]) -> SideWires {
     assert_eq!(vars.len(), SIDE_PRIVATE_LEN);
     let mut it = vars.iter().copied();
     let amount_bits: Vec<Variable> = (&mut it).take(AMOUNT_BITS).collect();
-    let r_order = it.next().unwrap();
+    let r_locked = it.next().unwrap();
     assert!(it.next().is_none());
     SideWires {
         amount_bits,
-        r_order,
+        r_locked,
     }
 }
 
@@ -222,11 +269,13 @@ fn settle_relation_impl<Cs: Circuit<Fr>>(
     b: &SideWires,
     sat: &mut SatisfiabilityWitness,
 ) -> Result<(), CircuitError> {
-    // 1. Booleanity of every amount bit (both sides) — this is also the
-    //    64-bit range check that makes the comparison an integer one.
-    for side in [a, b] {
-        enforce_bits(cs, &side.amount_bits)?;
-        sat.bool_vars.extend_from_slice(&side.amount_bits);
+    // 1. Booleanity of every quantity bit (both sides) — these ARE secret
+    //    witnesses, and their 64-bit ranges keep the comparison an integer
+    //    one and the collateral products integer-exact. The public `price`
+    //    and `a_is_seller` wires need no such check (see the module docs).
+    for bits in [&a.amount_bits[..], &b.amount_bits[..]] {
+        enforce_bits(cs, bits)?;
+        sat.bool_vars.extend_from_slice(bits);
     }
 
     let mut eq = |cs: &mut Cs, x: Variable, y: Variable| -> Result<(), CircuitError> {
@@ -235,21 +284,33 @@ fn settle_relation_impl<Cs: Circuit<Fr>>(
         Ok(())
     };
 
-    // 2. Reconstruct amounts from bits.
-    let a_amt = le_bits_to_field(cs, &a.amount_bits)?;
-    let b_amt = le_bits_to_field(cs, &b.amount_bits)?;
+    // 2. Reconstruct the quantities from their bits.
+    let q_a = le_bits_to_field(cs, &a.amount_bits)?;
+    let q_b = le_bits_to_field(cs, &b.amount_bits)?;
 
-    // 3. The compared values open the on-chain order commitments
-    //    (paper Property 1(i): input legitimacy).
-    let order_a_hash = poseidon_hash2(cs, a_amt, a.r_order)?;
-    eq(cs, order_a_hash, public.order_a)?;
-    let order_b_hash = poseidon_hash2(cs, b_amt, b.r_order)?;
-    eq(cs, order_b_hash, public.order_b)?;
-
-    // 4. cmp = (a > b) - (a < b) must equal the public claim.
-    let (lt, eq_flag) = cmp_from_bits(cs, &a.amount_bits, &b.amount_bits)?;
+    // 3. The compared quantities back the on-chain collateral commitments
+    //    (paper Property 1(i): input legitimacy). Per side s in {0, 1}:
+    //    needed = q·price + s·(q − q·price); then P2(needed, r) == locked.
+    //    A's side flag IS the public a_is_seller wire; B's is 1 − s_a.
+    let s_a = public.a_is_seller;
     let one_var = cs.one();
     let zero = cs.zero();
+    let s_b = cs.sub(one_var, s_a)?;
+    let needed = |cs: &mut Cs, q: Variable, s: Variable| -> Result<Variable, CircuitError> {
+        let q_price = cs.mul(q, public.price)?;
+        let diff = cs.sub(q, q_price)?;
+        let term = cs.mul(s, diff)?;
+        cs.add(q_price, term)
+    };
+    let needed_a = needed(cs, q_a, s_a)?;
+    let needed_b = needed(cs, q_b, s_b)?;
+    let locked_a_hash = poseidon_hash2(cs, needed_a, a.r_locked)?;
+    eq(cs, locked_a_hash, public.locked_a)?;
+    let locked_b_hash = poseidon_hash2(cs, needed_b, b.r_locked)?;
+    eq(cs, locked_b_hash, public.locked_b)?;
+
+    // 4. cmp = (q_a > q_b) - (q_a < q_b) must equal the public claim.
+    let (lt, eq_flag) = cmp_from_bits(cs, &a.amount_bits, &b.amount_bits)?;
     // gt = 1 - lt - eq
     let gt = cs.lc(
         &[one_var, lt, eq_flag, zero],
@@ -271,21 +332,50 @@ mod tests {
     use super::*;
     use crate::setup::sample_trade;
 
+    /// The one collateral equation: a seller locks q, a buyer q·price, and
+    /// anything wider than u64 is rejected (the circuits are 64-bit).
+    #[test]
+    fn needed_collateral_scales_and_bounds() {
+        assert_eq!(needed_collateral(60, 3, true).unwrap(), 60);
+        assert_eq!(needed_collateral(60, 3, false).unwrap(), 180);
+        assert!(needed_collateral(u64::MAX, 2, false).is_err());
+    }
+
     #[test]
     fn compute_public_sample() {
-        let (a, b, _price, _a_is_seller) = sample_trade();
-        let p = compute_public(&a, &b);
+        let (a, b, price, a_is_seller) = sample_trade();
+        let p = compute_public(&a, &b, price, a_is_seller).unwrap();
         assert_eq!(p.cmp, 1); // a=80 > b=60
-        assert_eq!(p.to_vec().len(), 3);
+        assert_eq!(p.to_vec().len(), 5);
+        // The commitments open with needed(q, side): A sells 80 (locks 80),
+        // B buys 60 at price 3 (locks 180).
+        assert_eq!(p.locked_a, commit(80, &a.r_locked));
+        assert_eq!(p.locked_b, commit(180, &b.r_locked));
     }
 
     #[test]
     fn serde_round_trip_and_cmp_bounds() {
-        let (a, b, _price, _a_is_seller) = sample_trade();
-        let p = compute_public(&a, &b);
+        let (a, b, price, a_is_seller) = sample_trade();
+        let p = compute_public(&a, &b, price, a_is_seller).unwrap();
         let json = serde_json::to_string(&p).unwrap();
         let back: SettlePublic = serde_json::from_str(&json).unwrap();
         assert_eq!(back.to_vec(), p.to_vec());
+
+        // The serde field ORDER is normative (Go mirrors it): cmp, locked_a,
+        // locked_b, price, a_is_seller.
+        let keys = [
+            "\"cmp\"",
+            "\"locked_a\"",
+            "\"locked_b\"",
+            "\"price\"",
+            "\"a_is_seller\"",
+        ];
+        let mut last = 0;
+        for key in keys {
+            let idx = json.find(key).expect("field must serialize");
+            assert!(idx >= last, "field {key} out of order in {json}");
+            last = idx;
+        }
 
         // Out-of-range cmp is rejected at the deserialization boundary.
         let bad = json.replace("\"cmp\":1", "\"cmp\":2");

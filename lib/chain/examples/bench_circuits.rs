@@ -3,7 +3,6 @@
 
 use std::time::Instant;
 
-use ark_bn254::Fr;
 use invisibook_lib::{
     note::{asset_id, fr_from_be_bytes, note_commit, npk_from_sk},
     note_prover::{
@@ -111,7 +110,6 @@ fn main() {
                     anchor,
                     lock_asset: usdt,
                     q: 10,
-                    r_q: fr_from_be_bytes(&rep(0xB1)),
                     r_locked: fr_from_be_bytes(&rep(0xB2)),
                     price: 3,
                     side_sell: false,
@@ -135,8 +133,7 @@ fn main() {
             prove_settle_small(
                 SettleSmallWitness {
                     q: 60,
-                    r_q: fr_from_be_bytes(&rep(0x71)),
-                    locked: [(60, fr_from_be_bytes(&rep(0x72))), (0, Fr::from(0u64))],
+                    r_locked: fr_from_be_bytes(&rep(0x72)),
                     price: 3,
                     side_sell: true,
                     pay_asset: eth,
@@ -158,13 +155,11 @@ fn main() {
             prove_settle_large(
                 SettleLargeWitness {
                     q: 80,
-                    r_q: fr_from_be_bytes(&rep(0x75)),
+                    r_locked: fr_from_be_bytes(&rep(0x76)),
                     q_ctr: 60,
-                    r_q_ctr: fr_from_be_bytes(&rep(0x71)),
-                    locked: [(240, fr_from_be_bytes(&rep(0x76))), (0, Fr::from(0u64))],
+                    r_locked_ctr: fr_from_be_bytes(&rep(0x71)),
                     price: 3,
                     side_sell: false,
-                    r_q_residual: fr_from_be_bytes(&rep(0x77)),
                     r_locked_residual: fr_from_be_bytes(&rep(0x78)),
                     pay_asset: usdt,
                     npk_ctr: npk,

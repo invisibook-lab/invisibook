@@ -2,9 +2,8 @@
 //!
 //! Mirrors `light_poseidon::Poseidon::new_circom(2)` exactly (state width
 //! t=3, domain tag 0, 8 full + 57 partial rounds, x^5 S-box), which is the
-//! commitment hash used across the chain (`Cash.Amount`, order commitments).
-//! Golden vector: `hash2(0, 0)` must equal the chain's
-//! `PoseidonZeroCommitmentHex` constant.
+//! commitment hash used across the chain (collateral and note commitments).
+//! Golden vector: `hash2(0, 0)` — see the unit test below.
 
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, Field, PrimeField};
@@ -72,8 +71,8 @@ pub fn fr_to_hex(f: &Fr) -> String {
 mod tests {
     use super::*;
 
-    /// The chain's hardcoded `PoseidonZeroCommitmentHex` — proves this
-    /// implementation matches light-poseidon/circom exactly.
+    /// Golden vector of the circom parameterization: `Poseidon(2)([0, 0])`.
+    /// Proves this implementation matches light-poseidon/circom exactly.
     #[test]
     fn zero_commitment_matches_chain_constant() {
         let zero = hash2(Fr::from(0u64), Fr::from(0u64));

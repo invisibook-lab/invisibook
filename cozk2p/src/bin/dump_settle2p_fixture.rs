@@ -72,9 +72,10 @@ async fn main() -> Result<()> {
         return Ok(());
     };
 
-    // Same sample trade as keygen: A (maker) has 80, B 60 → cmp = 1.
-    let (a, b, _price, _a_is_seller) = sample_trade();
-    let public = compute_public(&a, &b);
+    // Same sample trade as keygen: A (maker) SELLS 80 at price 3, B BUYS
+    // 60 → cmp = 1 (locked-only model: A locks 80, B locks 180).
+    let (a, b, price, a_is_seller) = sample_trade();
+    let public = compute_public(&a, &b, price, a_is_seller)?;
 
     // Two in-process SPDZ parties, each holding only its own side.
     let (r0, r1) = execute_mock_mpc(|fabric| {
@@ -95,13 +96,15 @@ async fn main() -> Result<()> {
     ensure!(p0 == p1, "the two parties revealed different proofs");
     verify_settle(&vk, &public, &r0).context("locally verifying the collaborative proof")?;
 
-    // The commitment hexes are what the chain reads from its own order rows,
-    // so the Go test can rebuild the statement the way the writing does and
-    // check it against `public`.
+    // The commitment hexes are what the chain reads from its own order rows
+    // (`Order.LockedCommitment`), so the Go test can rebuild the statement
+    // the way the writing does and check it against `public`.
     let fixture = json!({
         "cmp": public.cmp,
-        "order_a_commitment_hex": fr_to_hex(&public.order_a),
-        "order_b_commitment_hex": fr_to_hex(&public.order_b),
+        "locked_a_hex": fr_to_hex(&public.locked_a),
+        "locked_b_hex": fr_to_hex(&public.locked_b),
+        "price": price,
+        "a_is_seller": a_is_seller,
         "proof_hex": hex::encode(&p0),
         "public": serde_json::to_value(&public)?,
         "vk_path": vk_path.as_ref().map(|p| p.display().to_string()),

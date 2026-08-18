@@ -1,8 +1,9 @@
 //! Grep-gate for the Phase 5 cash→note migration: the deleted cash-model
 //! identifiers must NEVER reappear in source, and the Poseidon(0,0)
-//! zero-commitment constant may exist ONLY where it pads the order's
-//! 2-slot collateral shape. Runs as a plain test so a regression fails CI
-//! without any extra tooling.
+//! zero-commitment constant may exist ONLY at its allow-listed site (the
+//! locked-only model removed every pad that used it, so all that is left is
+//! one Poseidon golden vector). Runs as a plain test so a regression fails
+//! CI without any extra tooling.
 
 use std::{
     fs,
@@ -31,23 +32,13 @@ const FORBIDDEN: &[&str] = &[
     "FindNonSpentCash",
 ];
 
-/// Files allowed to mention the Poseidon(0,0) zero commitment — exactly
-/// the definition sites and the collateral-pad users.
+/// Files allowed to mention the Poseidon(0,0) zero commitment. The
+/// locked-only model removed every pad that used it, so ONE site remains:
+/// the Rust Poseidon golden vector that pins the circom parameterization.
 const ZERO_COMMITMENT_ALLOWED: &[&str] = &[
-    // Go: constant definition + the 2-slot collateral pad + its unit test.
-    "chain/core/zkverify.go",
-    "chain/core/orderbook.go",
-    "chain/core/zkverify_test.go",
-    // Rust: the app-side pad constant and the session-side pad check.
-    "app/ui/src/settle.rs",
-    "cozk2p/src/session.rs",
+    // Golden vector of cozk2p's native Poseidon: hash2(0, 0) must match the
+    // value light-poseidon/circom produce.
     "cozk2p/src/poseidon.rs",
-    // The spend circuits treat the padded slot as a spent-nothing input.
-    "lib/zk/templates/commitments.circom",
-    // Wallet-side helper rendering of Poseidon(0,0) (dev utility).
-    "lib/zk/examples/show_zero_commit.rs",
-    // Chain client docs referencing the pad convention.
-    "lib/chain/src/chain.rs",
 ];
 
 /// Source sub-trees to scan, relative to the repo root.
@@ -143,9 +134,10 @@ fn cash_model_identifiers_are_gone() {
     );
 }
 
-/// The Poseidon(0,0) zero commitment exists ONLY as the collateral pad
-/// (definition sites + 2-slot pad users). Any new use needs an explicit
-/// allow-list entry AND a design reason.
+/// The Poseidon(0,0) zero commitment exists ONLY at its allow-listed site.
+/// The locked-only model removed every pad that consumed it, so the value
+/// survives purely as a Poseidon golden vector. Any new use needs an
+/// explicit allow-list entry AND a design reason.
 #[test]
 fn zero_commitment_only_pads_collateral() {
     // The constant in both of its renderings (decimal and hex).

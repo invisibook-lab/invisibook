@@ -1,7 +1,7 @@
 # Chain Design
 
-> **Status:** Current (2026-08-16, note model). For every place this
-> design differs from the paper, see
+> **Status:** Current (2026-08-17, locked-only model). For every place
+> this design differs from the paper, see
 > [paper_deviations.md](paper_deviations.md).
 
 ## 1. Overview
@@ -11,9 +11,10 @@ The `chain/` component is Invisibook's L2 chain. It is built on the
 It hosts a **privacy-preserving order book**: the chain publishes each
 order's trading pair, side, limit price, and fee in plaintext, and never
 publishes a quantity or a balance. Value exists only in a shielded note
-pool; an order carries its quantity and its collateral as Poseidon
-commitments; every state transition that touches hidden value must come
-with a Groth16 or PLONK proof that the chain verifies.
+pool; an order carries its collateral as one Poseidon commitment, and
+its hidden quantity is implied by that commitment; every state
+transition that touches hidden value must come with a Groth16 or PLONK
+proof that the chain verifies.
 
 The chain exposes two yu *tripods* — `orderbook` and `account` — plus a
 pluggable consensus tripod. A tripod bundles persistent state, writings
@@ -30,8 +31,11 @@ the tripods (DB paths, verifying keys, genesis pool notes).
 
 Design invariants:
 
-1. **No plaintext value.** `Order.Amount` (= cm_q) and
-   `Order.LockedCommitment` are Poseidon commitments. Balances are pool
+1. **No plaintext value.** An order carries its collateral as ONE
+   Poseidon commitment (`Order.LockedCommitment`); the hidden quantity
+   is implied by the side-dependent collateral equation
+   `needed = q·price + side·(q − q·price)`
+   ([paper_deviations.md](paper_deviations.md) D17). Balances are pool
    notes: only commitments and nullifiers appear on chain.
 2. **Full collateral at admission.** `SendOrder` verifies the
    `send_order` proof, which shows the spent notes cover
@@ -115,11 +119,11 @@ out, mint change).
 **`SendOrder`** ([orderbook.go](../chain/core/orderbook.go)) — spends
 two pool note slots by nullifier (anchor must be known, nullifiers
 unspent), verifies the `send_order` proof against the rebuilt publics
-`[anchor, nf_0, nf_1, lock_asset, cm_q, locked_commitment, fee,
-cm_change, price, side, bind]`, checks the owner's ed25519 signature
-over the whole request, mints the change note, accrues the plaintext fee
-to the block producer, stores the order
-(`Amount = cm_q`, `LockedCommitment`), and runs `matchOrder`.
+`[anchor, nf_0, nf_1, lock_asset, locked_commitment, fee, cm_change,
+price, side, bind]`, checks the owner's ed25519 signature over the
+whole request, mints the change note, accrues the plaintext fee to the
+block producer, stores the order (its single `LockedCommitment`), and
+runs `matchOrder`.
 
 **Matching** — equal price required, then block height, then fee, then
 intra-block index ([paper_deviations.md](paper_deviations.md) D6). A
@@ -129,9 +133,10 @@ are locked (no cancel path).
 **`SubmitCompareCoZk2p`** ([orderbook_cozk.go](../chain/core/orderbook_cozk.go),
 [orderbook_cozk2p.go](../chain/core/orderbook_cozk2p.go)) — records the
 2-party comparison: verifies both traders' ed25519 signatures over the
-canonical compare message and the collaborative PLONK π_cmp (3 publics:
-`cmp`, the two order commitments; verifier linked via cgo behind the
-`cozk2p` build tag), stores `cmp`, and moves both orders to `Settling`.
+canonical compare message and the collaborative PLONK π_cmp (5 publics:
+`cmp`, the two collateral commitments, `price`, `a_is_seller`; verifier
+linked via cgo behind the `cozk2p` build tag), stores `cmp`, and moves
+both orders to `Settling`.
 `SubmitCompareCoZk` is the Groth16 single-prover variant of the same
 gate (fixtures/tests).
 
@@ -140,19 +145,20 @@ gate (fixtures/tests).
 leg alone can never pay out — [paper_deviations.md](paper_deviations.md)
 D3). It verifies BOTH legs before touching state: each leg's owner
 signature plus its `settle_small` (π_A) or `settle_large` (π_B) proof,
-with publics rebuilt from the order rows (`cm_q`, the 2-slot collateral
-`[LockedCommitment, Poseidon(0,0)]`, price, side, pay asset, outputs,
-bind). The pipeline is journaled for crash consistency across the two
+with publics rebuilt from the order rows (the single `LockedCommitment`,
+price, side, pay asset, outputs, bind; π_B additionally opens the
+counterparty's `LockedCommitment`). The pipeline is journaled for
+crash consistency across the two
 databases: a settlement-journal row (orders.db) records the intent, the
 payout mint is idempotent per settlement id (accounts.db, one
 transaction with a settlement-seen row), and the order-side transitions
 commit in one orders.db transaction with the journal — a crash between
 the databases is completed exactly once by a retry or by the boot-time
 recovery (`recoverPendingSettlements`). The fully filled side closes;
-the larger side relists **in place**: same order id,
-`Amount`/`LockedCommitment` swapped to the residual commitments, match
-link cleared, status back to `Pending`, block height (time priority)
-retained, immediate re-match attempted.
+the larger side relists **in place**: same order id, `LockedCommitment`
+swapped to the residual collateral commitment, match link cleared,
+status back to `Pending`, block height (time priority) retained,
+immediate re-match attempted.
 
 **`ClaimFees`** ([fees.go](../chain/core/fees.go)) — a block producer
 mints its accrued plaintext fees as a pool note with a `claim_fees`
@@ -190,22 +196,23 @@ Alice sells 2 ETH at price 3; Bob buys 1 ETH at price 3 (the
 wallet (lib + app)                         chain
 ──────────────────                         ─────
 prove send_order        ──SendOrder──────▶ verify sig + proof, spend nfs,
-(spend notes, cm_q,                        mint change note, store order,
+(spend notes,                              mint change note, store order,
  locked_commitment)                        match → both orders Matched
 
 ⟨2-party MPC compare session over QUIC (cozk2p)⟩
 π_cmp + dual signatures ──SubmitCompareCoZk2p──▶ verify sigs + π_cmp,
                                            record cmp, both → Settling
 ⟨session blocks until Settling is confirmed — F1 gate⟩
-⟨smaller side reveals (q, r) to the larger side, P2P⟩
+⟨smaller side reveals (q, r_locked) to the larger side, P2P⟩
 ⟨each side proves its own settle circuit; legs exchanged P2P⟩
 
 either party            ──SettlePair─────▶ verify BOTH legs, mint BOTH
                                            payout notes atomically,
                                            Bob's order → Done,
                                            Alice's order relisted in
-                                           place with residual
-                                           commitments (Pending)
+                                           place with the residual
+                                           collateral commitment
+                                           (Pending)
 ```
 
 What the chain reveals: pair, side, price, fee, the match, `cmp`, and
@@ -222,9 +229,8 @@ type Order struct {
     Type             TradeType  // Buy=0, Sell=1
     Subject          TradePair  // {Token1, Token2}
     Price            *big.Int   // plaintext; must fit u64
-    Amount           CipherText // cm_q (Poseidon commitment)
     Pubkey           string     // owner ed25519, authenticates updates
-    LockedCommitment string     // collateral commitment (2-slot padded)
+    LockedCommitment string     // the order's ONLY commitment: P2(needed, r)
     Fee              uint64     // plaintext, accrues to the producer
     BlockHeight      uint32     // time priority (kept across relist)
     IntraBlockIndex  uint32
@@ -232,6 +238,10 @@ type Order struct {
     MatchOrder       OrderID
 }
 ```
+
+There is no `Amount` field: the hidden quantity has no commitment of
+its own. `LockedCommitment` pins it through the collateral equation
+(D17).
 
 ### 4.2 Writings / readings
 

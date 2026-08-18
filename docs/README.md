@@ -1,6 +1,6 @@
 # Invisibook Documentation
 
-> **Status:** Current (2026-08-16). This file is the index. Start here.
+> **Status:** Current (2026-08-17). This file is the index. Start here.
 
 ## Reading order
 
@@ -17,7 +17,7 @@
 
 | Document | Language | Status | Content |
 |---|---|---|---|
-| [paper_deviations.md](paper_deviations.md) | EN | **Current** | Implementation vs. the paper, item by item (D1–D16) |
+| [paper_deviations.md](paper_deviations.md) | EN | **Current** | Implementation vs. the paper, item by item (D1–D17) |
 | [chain_design.md](chain_design.md) | EN | **Current** | L2 chain: tripods, note pool, matching, compare gate, atomic `SettlePair` |
 | [zk_design.md](zk_design.md) | EN | **Current** | Note primitives (golden spec), Groth16 circuit catalog, binds, proving/verifying toolchain |
 | [cozk2p_design.md](cozk2p_design.md) | EN | **Current** | 2-party SPDZ + collaborative PLONK compare session, stdio protocol, trust caveats |
@@ -49,9 +49,10 @@ document.
    deviations get a new `D#` entry in the same change.
 4. **Terminology.** One name per concept, everywhere:
    *note* (a shielded pool UTXO), *note opening* (`(sk, token, v, r)`),
-   *order opening* (`(q, r_q, locked_amount, r_locked)`),
-   *collateral commitment* (`Order.LockedCommitment`, 2-slot padded
-   with `Poseidon(0,0)`), *compare gate* (`SubmitCompareCoZk2p` /
+   *order opening* (`(q, locked_amount, r_locked)`),
+   *collateral commitment* (`Order.LockedCommitment` — the order's
+   ONLY commitment, locked-only model, D17),
+   *compare gate* (`SubmitCompareCoZk2p` /
    `SubmitCompareCoZk`), *two-phase settlement* (compare anchored on
    chain before any reveal — F1), *settle leg* (one side's signed
    settle proof), *atomic `SettlePair`* (both legs in one writing —

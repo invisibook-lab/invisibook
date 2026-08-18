@@ -77,9 +77,9 @@ pub fn classify_submit_error(msg: &str) -> SubmitError {
 
 // ────────────────────── Request/Response Types ──────────────────────
 
-/// Mirror of chain Go `SendOrderRequest` (v2): spend two pool notes, commit
-/// the order quantity as `amount` (cm_q), lock its collateral, destroy the
-/// plaintext `fee`, and mint the change note.
+/// Mirror of chain Go `SendOrderRequest` (v2): spend two pool notes, lock
+/// the order's collateral (its ONLY commitment — locked-only model),
+/// destroy the plaintext `fee`, and mint the change note.
 #[derive(Debug, Clone, Serialize)]
 pub struct SendOrderParams {
     pub id: OrderID,
@@ -88,7 +88,6 @@ pub struct SendOrderParams {
     pub subject: TradePairJson,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price: Option<u64>,
-    pub amount: CipherText, // cm_q
     pub pubkey: String,
     pub signature: String,
     pub anchor: String,
@@ -133,7 +132,6 @@ pub fn send_order_signing_message(params: &SendOrderParams) -> Vec<u8> {
     put_signing_field(&mut buf, &params.subject.token1);
     put_signing_field(&mut buf, &params.subject.token2);
     put_signing_field(&mut buf, &price);
-    put_signing_field(&mut buf, &params.amount);
     put_signing_field(&mut buf, &params.pubkey);
     put_signing_field(&mut buf, &params.anchor);
     put_signing_field(&mut buf, &params.input_nullifiers[0]);
@@ -232,7 +230,6 @@ pub struct SettleSmallParams {
 pub struct SettleLargeParams {
     pub order_id: OrderID,
     pub match_order_id: OrderID,
-    pub cm_q_residual: String,
     pub cm_locked_residual: String,
     pub cm_note_out: String,
     pub signature: String,
@@ -240,9 +237,9 @@ pub struct SettleLargeParams {
 }
 
 /// One leg of a `SettlePair` — mirror of Go `SettlePairLeg`. The residual
-/// fields are set ONLY for the larger side (π_B); a fully filled leg (π_A,
-/// and both legs when cmp == 0) leaves them empty, and they are omitted from
-/// the wire JSON to match the Go `omitempty` tags. Each leg carries its own
+/// field is set ONLY for the larger side (π_B); a fully filled leg (π_A,
+/// and both legs when cmp == 0) leaves it empty, and it is omitted from
+/// the wire JSON to match the Go `omitempty` tag. Each leg carries its own
 /// owner signature (over the SettleSmall/SettleLarge message), so a pair
 /// needs no new signed message.
 #[derive(Debug, Clone, Serialize)]
@@ -250,8 +247,6 @@ pub struct SettlePairLegParams {
     pub cm_note_out: String,
     pub signature: String,
     pub zk_proof: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub cm_q_residual: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub cm_locked_residual: String,
 }
@@ -264,16 +259,14 @@ impl SettlePairLegParams {
             cm_note_out,
             signature,
             zk_proof,
-            cm_q_residual: String::new(),
             cm_locked_residual: String::new(),
         }
     }
 
-    /// A larger leg (π_B): pays the fill as a note and relists the residual.
-    /// `signature` is over the SettleLarge message.
+    /// A larger leg (π_B): pays the fill as a note and relists the residual
+    /// collateral. `signature` is over the SettleLarge message.
     pub fn large(
         cm_note_out: String,
-        cm_q_residual: String,
         cm_locked_residual: String,
         signature: String,
         zk_proof: String,
@@ -282,7 +275,6 @@ impl SettlePairLegParams {
             cm_note_out,
             signature,
             zk_proof,
-            cm_q_residual,
             cm_locked_residual,
         }
     }
@@ -335,7 +327,6 @@ pub fn settle_large_message(params: &SettleLargeParams) -> Vec<u8> {
         &[
             &params.order_id,
             &params.match_order_id,
-            &params.cm_q_residual,
             &params.cm_locked_residual,
             &params.cm_note_out,
         ],
@@ -395,7 +386,6 @@ pub struct QueryOrderItem {
     pub subject: QueryTradePair,
     #[serde(default, deserialize_with = "deserialize_price")]
     pub price: Option<u64>,
-    pub amount: CipherText,
     pub pubkey: String,
     #[serde(default)]
     pub locked_commitment: String,
@@ -561,9 +551,8 @@ impl ChainClient {
         hex::encode(kp.sign(message))
     }
 
-    /// Submits a new order to the chain. When `change` is provided (split
     /// Submits a SendOrder v2 request. The caller assembles `params`
-    /// (nullifiers, cm_q, locked commitment, fee, change commitment) and the
+    /// (nullifiers, locked commitment, fee, change commitment) and the
     /// send_order proof; this method signs the canonical message and submits.
     /// The error is CLASSIFIED (see `SubmitError`): the caller must keep its
     /// wallet records on an `Uncertain` outcome — the transaction may have
@@ -985,7 +974,6 @@ fn query_item_to_order(item: QueryOrderItem) -> Order {
             token2: item.subject.token2,
         },
         price: item.price,
-        amount: item.amount,
         pubkey: item.pubkey,
         locked_commitment: item.locked_commitment,
         fee: item.fee,
@@ -1062,7 +1050,6 @@ mod tests {
         let large = SettleLargeParams {
             order_id: "order-a-id".into(),
             match_order_id: "order-b-id".into(),
-            cm_q_residual: "88".repeat(32),
             cm_locked_residual: "99".repeat(32),
             cm_note_out: "aa".repeat(32),
             signature: String::new(),
@@ -1072,16 +1059,12 @@ mod tests {
     }
 
     /// SettlePair wire JSON must match the Go request: a fully filled leg
-    /// omits the residual fields (Go `omitempty`), a larger leg includes
-    /// them, and the field names line up with the Go json tags.
+    /// omits the residual field (Go `omitempty`), a larger leg includes
+    /// it, and the field names line up with the Go json tags.
     #[test]
     fn settle_pair_leg_json_lockstep() {
         let small = SettlePairLegParams::small("11".repeat(32), "sig-b".into(), "pf".into());
         let sj = serde_json::to_value(&small).unwrap();
-        assert!(
-            sj.get("cm_q_residual").is_none(),
-            "small leg must omit residual q"
-        );
         assert!(
             sj.get("cm_locked_residual").is_none(),
             "small leg must omit residual collateral"
@@ -1090,13 +1073,11 @@ mod tests {
 
         let large = SettlePairLegParams::large(
             "22".repeat(32),
-            "33".repeat(32),
             "44".repeat(32),
             "sig-a".into(),
             "pf".into(),
         );
         let lj = serde_json::to_value(&large).unwrap();
-        assert_eq!(lj["cm_q_residual"], "33".repeat(32));
         assert_eq!(lj["cm_locked_residual"], "44".repeat(32));
 
         let pair = SettlePairParams {
@@ -1202,7 +1183,6 @@ mod tests {
                 token2: "USDT".to_string(),
             },
             price: Some(3500),
-            amount: "a".repeat(64),
             pubkey: "alice-pk".to_string(),
             signature: String::new(),
             anchor: "b".repeat(64),
@@ -1219,7 +1199,7 @@ mod tests {
     /// asserts the identical bytes.
     #[test]
     fn send_order_signing_message_lockstep_vectors() {
-        let want = "00000018696e76697369626f6f6b2d73656e642d6f726465722d7632000000076f726465722d3100000001300000000345544800000004555344540000000433353030000000406161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100000008616c6963652d706b00000040626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262620000004063636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363000000406464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646400000040656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565650000000800000000000000070000004066666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666";
+        let want = "00000018696e76697369626f6f6b2d73656e642d6f726465722d7632000000076f726465722d310000000130000000034554480000000455534454000000043335303000000008616c6963652d706b00000040626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262620000004063636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363000000406464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646400000040656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565650000000800000000000000070000004066666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666";
         assert_eq!(
             hex::encode(send_order_signing_message(&full_send_order_params())),
             want
