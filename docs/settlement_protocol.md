@@ -155,6 +155,9 @@ the steps of §2.2:
 
 | step | ms |
 |---|---|
+| 0 `SendOrder` prove (rapidsnark) | 202 |
+| 0 `SendOrder` submit → `Pending` (block wait) | 4 008 |
+| 0 matching → both `Matched` (block wait) | 4 007 |
 | 1 preamble fingerprint | 2 |
 | 2 share inputs + collateral binding (2 Poseidon over shares) | 59 |
 | 3 three-way compare | 20 |
@@ -167,6 +170,7 @@ the steps of §2.2:
 | 9 own settle leg (rapidsnark) + 9' leg exchange | 1 (A) / 142 (B) |
 | R + 10 rendezvous, `SettlePair` submit, confirm | 12 147 |
 | **`run_settle` total** | **22 353** |
+| **full trade, both orders** | **36 798** |
 
 Step 5 is 36 % of the settlement and every other cryptographic step
 together is under 100 ms. Steps 6 and 10 — pure block waits — are 81 %.
@@ -260,6 +264,9 @@ Same run conditions as §2.4, trader A's column. Rows are the steps of
 
 | step | ms |
 |---|---|
+| 0 `SendOrder` prove (rapidsnark) | 327 |
+| 0 `SendOrder` submit → `Pending` (block wait) | 4 008 |
+| 0 matching → both `Matched` (block wait) | 4 006 |
 | 1 preamble fingerprint | 2 |
 | 2 share inputs + collateral binding (2 Poseidon over shares) | 66 |
 | 3 three-way compare | 16 |
@@ -271,6 +278,7 @@ Same run conditions as §2.4, trader A's column. Rows are the steps of
 | **session subprocess total** | **27 015** |
 | R rendezvous + final confirm | 6 253 |
 | **`run_settle` total** | **33 268** |
+| **full trade, both orders** | **47 814** |
 
 Step 6 is 62 % of the settlement; the whole rest of the cryptography is
 285 ms.
