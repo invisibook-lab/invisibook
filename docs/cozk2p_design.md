@@ -3,8 +3,8 @@
 > **Status:** Current (2026-08-17, locked-only model + two-phase
 > session). For every place this design differs from the paper, see
 > [paper_deviations.md](paper_deviations.md). The 3-party co-snarks
-> experiment it replaced is described in
-> [cozk_design.md](cozk_design.md) (historical).
+> experiment it replaced lives only in git history (branch
+> `cozk-settlement`).
 
 The two matched traders jointly prove the quantity comparison with
 **no helper node** — the exact application setting (a trade has two
@@ -213,7 +213,7 @@ re-audited this path. Standing of the previously known gaps:
 The `cozk-merged-settle` branch adds a SECOND settlement flavor next to
 the split flow above. One collaborative TurboPlonk proof covers the
 comparison AND both settlement legs — the note-model successor of the
-old 15-signal joint statement (see [cozk_design.md](cozk_design.md)).
+old 15-signal joint statement (branch `cozk-settlement`, historical).
 The split flow stays unchanged; a config switch selects the flavor, so
 the two paths give a direct A/B benchmark.
 

@@ -20,7 +20,6 @@ This is a **separate workspace** from `lib/` on purpose: it pins
 `nightly-2025-02-20` (rustup auto-installs it) because ark-mpc uses the
 unstable `inherent_associated_types` feature that regressed on newer
 nightlies, and it lives on the ark 0.4 ecosystem while `lib/` is on 0.5.
-The 3-party path (`lib/cozk`) is unchanged; the two coexist.
 
 ## Test
 

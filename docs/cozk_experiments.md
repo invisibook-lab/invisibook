@@ -2,14 +2,15 @@
 
 > **Status:** Current as a measurement record (last updated 2026-08-16).
 > Early sections measure the historical 3-party REP3 path and the old
-> joint settle relation ([cozk_design.md](cozk_design.md), historical);
+> joint settle relation (removed with the cash model; see the
+> `cozk-settlement` branch in git history);
 > the final section measures the current hardened note flow. Each
 > section states its own setup.
 
 
 Two collaborative provers are measured: the **3-party REP3** path
-(`lib/cozk`, co-snarks, Groth16 — a historical experiment, not on this
-branch; see [cozk_design.md](cozk_design.md)) and the **2-party SPDZ**
+(`lib/cozk`, co-snarks, Groth16 — a historical experiment that lives
+only on the `cozk-settlement` branch) and the **2-party SPDZ**
 path (`cozk2p/`, mpc-jellyfish, TurboPlonk — see
 [cozk2p_design.md](cozk2p_design.md)). §"2-party" compares them.
 
@@ -95,7 +96,7 @@ go-rapidsnark — the chain's verification path, on-chain proof size, and gas
 cost are identical to the single-prover circuits. The entire cost of hiding
 the amounts is on the proving side; the verifier sees nothing different. This
 is exactly what the indistinguishability argument in
-[cozk_design.md](cozk_design.md) §7 needs: a constant-size proof plus public
+the historical design needs: a constant-size proof plus public
 commitments, simulatable and hiding.
 
 ### Communication (co-zk, per node, in-memory accounting)
