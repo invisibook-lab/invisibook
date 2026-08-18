@@ -47,6 +47,7 @@ use crate::{
         input_fingerprint, open_expect_zero, sanity_check_input, scalar_to_u64, scalars_to_sig,
         scale_leg, sig_to_scalars,
     },
+    stats::{StepTimer, StepTimings},
 };
 
 /// The payload the host app must sign for the merged writing: the full
@@ -96,6 +97,10 @@ pub struct SessionResultPair {
     /// latency, not cryptography).
     #[serde(default)]
     pub onchain_wait_ms: f64,
+    /// Wall-clock of every protocol step, labelled to match
+    /// `docs/settlement_protocol.md` §3.2.
+    #[serde(default)]
+    pub steps: StepTimings,
 }
 
 /// Lift a public field element into the fabric's authenticated domain.
@@ -161,6 +166,8 @@ where
     let i_am_seller = i_am_a == input.a_is_seller;
     let a_is_seller = input.a_is_seller;
     let price = input.price;
+    // Per-step stopwatch; labels match docs/settlement_protocol.md §3.2.
+    let mut step = StepTimer::new();
 
     // ── Preamble: agree on the chain-sourced statement ──
     emit("preamble", "cross-checking public statement with peer");
@@ -193,6 +200,8 @@ where
         recv_npk: recv_npk_fr,
         r_note,
     };
+
+    step.lap("1 preamble fingerprint");
 
     // ── Share both sides' inputs (canonical order: A's group, then B's) ──
     emit(
@@ -244,9 +253,11 @@ where
     let bind_lb = &poseidon_hash(&fabric, &needed_b, r_lck_b) - locked_b_pub;
     open_expect_zero(&bind_la, "order A collateral binding").await?;
     open_expect_zero(&bind_lb, "order B collateral binding").await?;
+    step.lap("2 share inputs + collateral binding");
 
     // ── Three-way comparison, opening only cmp ──
     let cmp = compare_three_way(&fabric, v_a, v_b).await?;
+    step.lap("3 three-way compare");
     emit("compare", &format!("cmp = {cmp}"));
 
     // ── Compute the output commitments over shares and open them ──
@@ -303,6 +314,8 @@ where
         asset_recv_b,
     };
 
+    step.lap("4 output commitments in MPC + opens");
+
     // ── Signature ferry + in-fabric exchange over the full statement ──
     emit("sig", "requesting settle-pair signature from the host");
     let need = NeedSigPair {
@@ -329,6 +342,8 @@ where
         mine_sig == &my_sig,
         "own signature did not round-trip through the fabric"
     );
+
+    step.lap("5 signature ferry + exchange");
 
     // ── Collaborative prove of the merged relation + local verify ──
     emit(
@@ -429,10 +444,13 @@ where
         sig_a: sig_a.clone(),
         sig_b: sig_b.clone(),
     };
+    step.lap("6 collaborative prove + local verify + WAL v1");
+
     emit("settle-onchain", "landing the merged settlement on chain");
     let onchain_start = std::time::Instant::now();
     tokio::task::block_in_place(|| sig_io.confirm_settle_onchain(&ready))?;
     let onchain_wait_ms = onchain_start.elapsed().as_secs_f64() * 1e3;
+    step.lap("7 on-chain settlement anchor (host wait)");
 
     // ── Post-finality reveal: the smaller side reveals the fill so the
     //    larger side learns its payout amount and residual opening. Bound
@@ -464,6 +482,7 @@ where
 
     // ── WAL v2: complete ──
     write_wal(&my_outcome)?;
+    step.lap("8 post-finality fill reveal + WAL v2");
 
     Ok(SessionResultPair {
         cmp,
@@ -474,5 +493,6 @@ where
         my: my_outcome,
         timings,
         onchain_wait_ms,
+        steps: step.finish(),
     })
 }

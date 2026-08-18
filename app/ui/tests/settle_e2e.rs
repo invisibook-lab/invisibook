@@ -487,6 +487,10 @@ async fn settle_e2e_scenario(mode: SettleMode) {
         compare_onchain_wait_ms: f64,
         #[serde(default)]
         leg_exchange_ms: f64,
+        /// Per-protocol-step wall clock, in protocol order, as the session
+        /// recorded it (labels match docs/settlement_protocol.md).
+        #[serde(default)]
+        steps: Vec<(String, f64)>,
         #[serde(default)]
         total_ms: f64,
     }
@@ -524,6 +528,15 @@ async fn settle_e2e_scenario(mode: SettleMode) {
     );
     row("session subprocess total", sa.total_ms, sb.total_ms);
     row("run_settle total (both, concurrent)", settle_ms, settle_ms);
+
+    // Per-protocol-step breakdown: one row per numbered step of
+    // docs/settlement_protocol.md, in the order the session crosses them.
+    eprintln!("\n──────── per protocol step (ms) ────────");
+    eprintln!("{:<44} {:>10} {:>10}", "step", "alice", "bob");
+    for (i, (label, ms_a)) in sa.steps.iter().enumerate() {
+        let ms_b = sb.steps.get(i).map(|(_, v)| *v).unwrap_or(0.0);
+        row(label, *ms_a, ms_b);
+    }
     eprintln!("════════════════════════════════════════════════════\n");
 
     // Scratch cleanup (the chain process is killed by ChainGuard on drop).

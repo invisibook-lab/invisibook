@@ -147,6 +147,31 @@ order_id, match_order_id, cm_locked_residual, cm_note_out]`. Each leg's
 Groth16 proof carries a `bind` public input over the same fields plus the
 chain id (§5.0).
 
+### 2.4 Measured latency, step by step
+
+One `settle_e2e_relist` run (24-core box, 3 s blocks, dev SRS + mock
+Beaver triples), trader A's column; B differs only where noted. Rows are
+the steps of §2.2:
+
+| step | ms |
+|---|---|
+| 1 preamble fingerprint | 2 |
+| 2 share inputs + collateral binding (2 Poseidon over shares) | 59 |
+| 3 three-way compare | 20 |
+| 4 signature ferry + exchange | 1 |
+| 5 collaborative prove π_cmp + local verify | 3 716 |
+| 6 on-chain compare anchor (host/chain wait) | 6 011 |
+| 7 smaller-side reveal | 5 |
+| 8 payout-note keys + WAL | 1 |
+| **session subprocess total** | **10 206** |
+| 9 own settle leg (rapidsnark) + 9' leg exchange | 1 (A) / 142 (B) |
+| R + 10 rendezvous, `SettlePair` submit, confirm | 12 147 |
+| **`run_settle` total** | **22 353** |
+
+Step 5 is 36 % of the settlement and every other cryptographic step
+together is under 100 ms. Steps 6 and 10 — pure block waits — are 81 %.
+
+
 ## 3. The MERGED protocol
 
 ONE collaborative proof covers the comparison AND both settlement
@@ -227,6 +252,38 @@ signatures cover the SAME length-prefixed message
 cm_note_out_a, cm_note_out_b, cm_locked_residual_a,
 cm_locked_residual_b]`. `zk_proof` is the hex ark-compressed merged
 PLONK proof.
+
+### 3.4 Measured latency, step by step
+
+Same run conditions as §2.4, trader A's column. Rows are the steps of
+§3.2:
+
+| step | ms |
+|---|---|
+| 1 preamble fingerprint | 2 |
+| 2 share inputs + collateral binding (2 Poseidon over shares) | 66 |
+| 3 three-way compare | 16 |
+| 4 output commitments in MPC + opens (10 Poseidon over shares) | 200 |
+| 5 signature ferry + exchange | 1 |
+| 6 collaborative prove of the merged relation + local verify + WAL v1 | 20 618 |
+| 7 on-chain settlement anchor (host/chain wait) | 6 010 |
+| 8 post-finality fill reveal + WAL v2 | 2 |
+| **session subprocess total** | **27 015** |
+| R rendezvous + final confirm | 6 253 |
+| **`run_settle` total** | **33 268** |
+
+Step 6 is 62 % of the settlement; the whole rest of the cryptography is
+285 ms.
+
+**Step 4 against step 6 is the sharpest number in this document.** Step
+4 computes 10 Poseidon hashes over SPDZ shares in 200 ms. Step 6 proves
+a relation whose 12 Poseidon gadgets are ~5 650 of its 6 259 gates, and
+costs 20 618 ms. Hashing over shares and *proving* that same hashing
+over shares differ by about two orders of magnitude. That is why the
+split flow keeps every hash either over shares (step 2) or in
+single-prover rapidsnark (step 9, ~90 ms), and sends only a 2 048-gate
+comparison through collaborative proving.
+
 
 ## 4. MPC sub-protocols and their checks
 

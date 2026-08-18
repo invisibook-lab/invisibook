@@ -53,6 +53,7 @@ use crate::{
     poseidon::{asset_fr, commit, fr_to_hex, hash2, note_commit},
     prove::{ProveTimings, prove_collaborative_timed, verify_settle},
     relation::{SettlePublic, SidePrivate, needed_collateral},
+    stats::{StepTimer, StepTimings},
 };
 
 /// This trader's private witness material (locked-only model): the opening
@@ -171,6 +172,10 @@ pub struct SessionResult {
     /// report it separately from the MPC/prove phases).
     #[serde(default)]
     pub onchain_wait_ms: f64,
+    /// Wall-clock of every protocol step, labelled to match
+    /// `docs/settlement_protocol.md` §2.2.
+    #[serde(default)]
+    pub steps: StepTimings,
 }
 
 /// The payload the host app must sign: just the comparison result (the
@@ -387,6 +392,8 @@ where
         "role does not match fabric party id"
     );
     let i_am_seller = i_am_a == input.a_is_seller;
+    // Per-step stopwatch; labels match docs/settlement_protocol.md §2.2.
+    let mut step = StepTimer::new();
 
     // ── Preamble: agree on the chain-sourced statement ──
     emit("preamble", "cross-checking public statement with peer");
@@ -398,6 +405,8 @@ where
         fp_a == fp_b,
         "the two traders read different on-chain statements — refusing to continue (stale chain read?)"
     );
+
+    step.lap("1 preamble fingerprint");
 
     // ── Share witnesses and bind them to the on-chain commitments ──
     emit(
@@ -435,9 +444,11 @@ where
     let bind_b = &poseidon_hash(&fabric, &needed_b, &r_b) - locked_b_pub;
     open_expect_zero(&bind_a, "order A collateral binding").await?;
     open_expect_zero(&bind_b, "order B collateral binding").await?;
+    step.lap("2 share inputs + collateral binding");
 
     // ── Three-way comparison of the quantities, opening only cmp ──
     let cmp = compare_three_way(&fabric, &q_a, &q_b).await?;
+    step.lap("3 three-way compare");
     emit("compare", &format!("cmp = {cmp}"));
 
     // ── Signature ferry + in-fabric exchange (over the compared result;
@@ -464,6 +475,8 @@ where
         "own signature did not round-trip through the fabric"
     );
 
+    step.lap("4 signature ferry + exchange");
+
     // ── Collaborative prove of π_cmp + verify-before-release ──
     emit("prove", "collaboratively proving the comparison");
     let public = SettlePublic {
@@ -486,6 +499,7 @@ where
     ark_serialize::CanonicalSerialize::serialize_compressed(&proof, &mut proof_bytes)
         .context("serializing proof")?;
     let proof_hex = hex::encode(proof_bytes);
+    step.lap("5 collaborative prove + local verify");
 
     // ── F1 gate: the reveal must NOT precede the compare landing ON-CHAIN.
     //    The host submits SubmitCompare (π_cmp + both signatures) and BLOCKS
@@ -506,6 +520,7 @@ where
     let onchain_start = std::time::Instant::now();
     tokio::task::block_in_place(|| sig_io.confirm_compare_onchain(&ready))?;
     let onchain_wait_ms = onchain_start.elapsed().as_secs_f64() * 1e3;
+    step.lap("6 on-chain compare anchor (host wait)");
 
     // ── The smaller party reveals its opening (compare is now ON-CHAIN;
     //    the larger side's π_B must open the smaller's commitment) ──
@@ -543,6 +558,8 @@ where
             (q_ctr, q_ctr, hex::encode(r))
         }
     };
+
+    step.lap("7 smaller-side reveal");
 
     // ── Derive my incoming payout note's opening + my residuals ──
     emit("outputs", "deriving payout-note openings");
@@ -656,6 +673,7 @@ where
 
     // ── WAL v2: complete (my settle proof needs the counterparty's pair) ──
     write_wal(&my_outcome)?;
+    step.lap("8 payout-note keys + WAL");
 
     Ok(SessionResult {
         cmp,
@@ -666,6 +684,7 @@ where
         my: my_outcome,
         timings,
         onchain_wait_ms,
+        steps: step.finish(),
     })
 }
 
