@@ -251,11 +251,19 @@ the cryptographic cost of the whole settlement is ~4 s of MPC/PLONK plus
 
 ### Merged vs split settlement (A/B, `settle_e2e_relist` twins)
 
+> **These rows PREDATE the locked-only migration of the merged relation.**
+> They were measured against the 15-signal merged statement (16 384-gate
+> padded domain). The relation now carries 11 signals and a measured
+> 6 259 gates (8 192 padded — one power of two less; see
+> [settlement_protocol.md](settlement_protocol.md) §5.4), so every merged
+> column below is an UPPER bound. Re-run both twins before quoting them
+> again.
+
 The merged path ([cozk2p_design.md](cozk2p_design.md) §8) proves the
 comparison AND both settle legs in ONE collaborative proof
-(`relation_pair`, 16 384 gates vs the compare's 2 048). Same trade, same
-machine (24 cores, 29 GB, otherwise idle), same chain (3 s blocks), both
-flavors verified on chain. Numbers from one run of each e2e twin
+(`relation_pair`, then 16 384 gates vs the compare's 2 048). Same trade,
+same machine (24 cores, 29 GB, otherwise idle), same chain (3 s blocks),
+both flavors verified on chain. Numbers from one run of each e2e twin
 (2026-08-17, branch `cozk-merged-settle`):
 
 | step (ms) | split alice | split bob | merged alice | merged bob |

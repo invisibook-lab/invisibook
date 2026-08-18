@@ -5,10 +5,10 @@
 //!
 //! Differences from the split session (`session.rs`):
 //!
-//! - The output commitments (both payout notes, both residual pairs) are
-//!   COMPUTED UNDER MPC and opened: they depend on both parties' secrets
-//!   (`fill = min(q_a, q_b)`), and opening a hiding commitment reveals
-//!   nothing.
+//! - The four output commitments (both payout notes, both residual
+//!   COLLATERAL commitments) are COMPUTED UNDER MPC and opened: they depend
+//!   on both parties' secrets (`fill = min(q_a, q_b)`), and opening a
+//!   hiding commitment reveals nothing.
 //! - Neither quantity is revealed to anyone before the settlement is
 //!   FINAL on chain (stronger than the split flow's F1, which reveals the
 //!   smaller opening after the compare anchor). Only after the host
@@ -183,15 +183,12 @@ where
         canonical.copy_from_slice(&be);
         canonical
     };
-    let r_q_res = draw();
     let r_locked_res = draw();
     let r_note = draw();
     let recv_npk_fr = commitment_fr(&input.my_recv_npk, "my_recv_npk")?;
     let my_side = PairSidePrivate {
         order_amount: input.my.order_amount,
-        r_order: hex32(&input.my.r_order, "r_order")?,
         r_locked: hex32(&input.my.r_locked, "r_locked")?,
-        r_q_res,
         r_locked_res,
         recv_npk: recv_npk_fr,
         r_note,
@@ -205,18 +202,17 @@ where
     let zero = Scalar::from(0u64);
     let my_vals: Vec<Scalar<G1Projective>> = vec![
         Scalar::from(input.my.order_amount),
-        Scalar::new(blinding_fr(&my_side.r_order)),
         Scalar::new(blinding_fr(&my_side.r_locked)),
-        Scalar::new(blinding_fr(&r_q_res)),
         Scalar::new(blinding_fr(&r_locked_res)),
         Scalar::new(recv_npk_fr),
         Scalar::new(blinding_fr(&r_note)),
     ];
+    let group_len = my_vals.len();
     let share_group = |owner: u64| -> Vec<AuthenticatedScalarResult<G1Projective>> {
         let vals = if (owner == PARTY0) == i_am_a {
             my_vals.clone()
         } else {
-            vec![zero; 7]
+            vec![zero; group_len]
         };
         vals.into_iter()
             .map(|v| fabric.share_scalar(v, owner))
@@ -224,22 +220,15 @@ where
     };
     let ga = share_group(PARTY0);
     let gb = share_group(PARTY1);
-    let (v_a, r_ord_a, r_lck_a, r_qr_a, r_lr_a, npk_a, r_nt_a) =
-        (&ga[0], &ga[1], &ga[2], &ga[3], &ga[4], &ga[5], &ga[6]);
-    let (v_b, r_ord_b, r_lck_b, r_qr_b, r_lr_b, npk_b, r_nt_b) =
-        (&gb[0], &gb[1], &gb[2], &gb[3], &gb[4], &gb[5], &gb[6]);
+    let (v_a, r_lck_a, r_lr_a, npk_a, r_nt_a) = (&ga[0], &ga[1], &ga[2], &ga[3], &ga[4]);
+    let (v_b, r_lck_b, r_lr_b, npk_b, r_nt_b) = (&gb[0], &gb[1], &gb[2], &gb[3], &gb[4]);
 
     // ── Bind the shared witnesses to the on-chain commitments (early
-    //    abort on a lying counterparty, before any expensive phase) ──
-    let order_a_pub = Scalar::new(commitment_fr(&input.order_a, "order_a")?);
-    let order_b_pub = Scalar::new(commitment_fr(&input.order_b, "order_b")?);
-    let bind_a = &poseidon_hash(&fabric, v_a, r_ord_a) - order_a_pub;
-    let bind_b = &poseidon_hash(&fabric, v_b, r_ord_b) - order_b_pub;
-    open_expect_zero(&bind_a, "order A commitment binding").await?;
-    open_expect_zero(&bind_b, "order B commitment binding").await?;
-
-    // Collateral binding: needed = q (seller) or q*price (buyer); the
-    // side flags and price are public, so scaling is share-local.
+    //    abort on a lying counterparty, before any expensive phase).
+    //    Locked-only model: the collateral commitment is each order's ONLY
+    //    commitment, and `needed` = q (seller) or q*price (buyer). The side
+    //    flags and the price are public, so the scaling is share-local (no
+    //    Beaver triples). ──
     let needed = |q: &AuthenticatedScalarResult<G1Projective>, is_seller: bool| {
         if is_seller {
             q.clone()
@@ -249,12 +238,12 @@ where
     };
     let needed_a = needed(v_a, a_is_seller);
     let needed_b = needed(v_b, !a_is_seller);
-    let locked_a_pub = Scalar::new(commitment_fr(&input.locked_a[0], "locked_a")?);
-    let locked_b_pub = Scalar::new(commitment_fr(&input.locked_b[0], "locked_b")?);
+    let locked_a_pub = Scalar::new(commitment_fr(&input.locked_a, "locked_a")?);
+    let locked_b_pub = Scalar::new(commitment_fr(&input.locked_b, "locked_b")?);
     let bind_la = &poseidon_hash(&fabric, &needed_a, r_lck_a) - locked_a_pub;
     let bind_lb = &poseidon_hash(&fabric, &needed_b, r_lck_b) - locked_b_pub;
-    open_expect_zero(&bind_la, "collateral A commitment binding").await?;
-    open_expect_zero(&bind_lb, "collateral B commitment binding").await?;
+    open_expect_zero(&bind_la, "order A collateral binding").await?;
+    open_expect_zero(&bind_lb, "order B collateral binding").await?;
 
     // ── Three-way comparison, opening only cmp ──
     let cmp = compare_three_way(&fabric, v_a, v_b).await?;
@@ -269,6 +258,8 @@ where
     let fill_share = if cmp >= 0 { v_b.clone() } else { v_a.clone() };
     let q_res_a = v_a - &fill_share;
     let q_res_b = v_b - &fill_share;
+    // Residual COLLATERAL only — the locked-only model has no residual
+    // quantity commitment.
     let locked_res_a = needed(&q_res_a, a_is_seller);
     let locked_res_b = needed(&q_res_b, !a_is_seller);
     // The seller receives the token2 leg (fill*price), the buyer the
@@ -293,8 +284,6 @@ where
         (ctr_recv_asset, my_recv_asset)
     };
 
-    let cm_qr_a = poseidon_hash(&fabric, &q_res_a, r_qr_a);
-    let cm_qr_b = poseidon_hash(&fabric, &q_res_b, r_qr_b);
     let cm_lr_a = poseidon_hash(&fabric, &locked_res_a, r_lr_a);
     let cm_lr_b = poseidon_hash(&fabric, &locked_res_b, r_lr_b);
     let cm_note_a = mpc_note_commit(&fabric, npk_a, asset_recv_a, &recv_a, r_nt_a);
@@ -304,14 +293,10 @@ where
         cmp,
         cm_note_out_a: open_value(&cm_note_a, "payout note A").await?,
         cm_note_out_b: open_value(&cm_note_b, "payout note B").await?,
-        cm_q_res_a: open_value(&cm_qr_a, "residual quantity A").await?,
         cm_locked_res_a: open_value(&cm_lr_a, "residual collateral A").await?,
-        cm_q_res_b: open_value(&cm_qr_b, "residual quantity B").await?,
         cm_locked_res_b: open_value(&cm_lr_b, "residual collateral B").await?,
-        cm_q_a: commitment_fr(&input.order_a, "order_a")?,
-        cm_q_b: commitment_fr(&input.order_b, "order_b")?,
-        locked_a: commitment_fr(&input.locked_a[0], "locked_a")?,
-        locked_b: commitment_fr(&input.locked_b[0], "locked_b")?,
+        locked_a: commitment_fr(&input.locked_a, "locked_a")?,
+        locked_b: commitment_fr(&input.locked_b, "locked_b")?,
         price,
         a_is_seller,
         asset_recv_a,
@@ -374,11 +359,15 @@ where
     } else {
         public.cm_note_out_b
     };
-    let (my_cm_q_res, my_cm_locked_res) = if i_am_a {
-        (public.cm_q_res_a, public.cm_locked_res_a)
+    let my_cm_locked_res = if i_am_a {
+        public.cm_locked_res_a
     } else {
-        (public.cm_q_res_b, public.cm_locked_res_b)
+        public.cm_locked_res_b
     };
+    // The smaller side fully fills, so the chain closes its order and it
+    // keeps no residual at all. The larger side's residual AMOUNTS stay
+    // zero until the post-finality fill reveal (WAL v2); its residual
+    // COLLATERAL commitment is already known — the MPC opened it.
     let mut my_outcome = MyOutcome {
         is_a: i_am_a,
         i_am_smaller,
@@ -396,19 +385,10 @@ where
         // both notes from the jointly proven statement.
         ctr_recv_npk: String::new(),
         ctr_r_recv: String::new(),
+        // No reveal of the counterparty's opening happens in this flow.
         ctr_order_amount: 0,
-        ctr_r_order: String::new(),
+        ctr_r_locked: String::new(),
         new_order_amount: 0,
-        r_order_new: if i_am_smaller {
-            String::new()
-        } else {
-            hex::encode(r_q_res)
-        },
-        new_order_commitment: if i_am_smaller {
-            String::new()
-        } else {
-            fr_to_hex(&my_cm_q_res)
-        },
         new_locked_amount: 0,
         r_locked_new: if i_am_smaller {
             String::new()
@@ -421,13 +401,6 @@ where
             fr_to_hex(&my_cm_locked_res)
         },
     };
-    // Smaller side fully fills: no residuals at all (chain closes it).
-    if i_am_smaller {
-        my_outcome.new_order_amount = 0;
-        my_outcome.new_locked_amount = 0;
-    } else {
-        // Residual amounts become known after the fill reveal (WAL v2).
-    }
 
     // ── WAL v1: my note secrets on disk BEFORE the proof leaves ──
     let write_wal = |outcome: &MyOutcome| -> Result<()> {

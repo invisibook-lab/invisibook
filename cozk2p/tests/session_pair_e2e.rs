@@ -43,16 +43,14 @@ impl PairSigIo for TestPairSigIo {
     }
 }
 
-/// The sample trade: A (maker) sells 80 token1 at price 3, B buys 60.
-/// cmp = 1, fill = 60; A receives 180 USDT, keeps 20 on the book; B
-/// receives 60 ETH and closes.
+/// The sample trade: A (maker) sells 80 token1 at price 3 (locks 80), B
+/// buys 60 (locks 180). cmp = 1, fill = 60; A receives 180 USDT and keeps
+/// 20 on the book; B receives 60 ETH and closes. Locked-only model: each
+/// order's collateral commitment is its ONLY on-chain commitment.
 fn inputs() -> (SessionInput, SessionInput) {
     let price = 3u64;
-    let order_a = fr_to_hex(&commit(80, &[0xA1; 32]));
-    let order_b = fr_to_hex(&commit(60, &[0xB1; 32]));
-    let zero = fr_to_hex(&commit(0, &[0u8; 32]));
-    let locked_a = [fr_to_hex(&commit(80, &[0xA3; 32])), zero.clone()];
-    let locked_b = [fr_to_hex(&commit(180, &[0xB3; 32])), zero];
+    let locked_a = fr_to_hex(&commit(80, &[0xA3; 32]));
+    let locked_b = fr_to_hex(&commit(180, &[0xB3; 32]));
 
     let npk_hex = |seed: u8| fr_to_hex(&commit(seed as u64, &[seed; 32]));
     let base = |role: &str, my: MyPrivate| SessionInput {
@@ -68,8 +66,6 @@ fn inputs() -> (SessionInput, SessionInput) {
         my_recv_token: if role == "trader-a" { "USDT" } else { "ETH" }.into(),
         price,
         a_is_seller: true,
-        order_a: order_a.clone(),
-        order_b: order_b.clone(),
         locked_a: locked_a.clone(),
         locked_b: locked_b.clone(),
         my_recv_npk: npk_hex(if role == "trader-a" { 0x51 } else { 0x52 }),
@@ -79,8 +75,6 @@ fn inputs() -> (SessionInput, SessionInput) {
         "trader-a",
         MyPrivate {
             order_amount: 80,
-            r_order: hex::encode([0xA1u8; 32]),
-            locked_amount: 80,
             r_locked: hex::encode([0xA3u8; 32]),
         },
     );
@@ -88,8 +82,6 @@ fn inputs() -> (SessionInput, SessionInput) {
         "trader-b",
         MyPrivate {
             order_amount: 60,
-            r_order: hex::encode([0xB1u8; 32]),
-            locked_amount: 180,
             r_locked: hex::encode([0xB3u8; 32]),
         },
     );
@@ -188,13 +180,18 @@ async fn merged_session_happy_path() {
     assert!(result_b.my.i_am_smaller);
     assert_eq!(result_b.my.fill, 60);
     assert_eq!(result_b.my.recv_amount, 60); // ETH leg
-    assert_eq!(result_b.my.new_order_commitment, "");
+    assert_eq!(result_b.my.new_locked_amount, 0);
+    assert_eq!(result_b.my.new_locked_commitment, "");
 
-    // The merged flow never exchanges note secrets.
+    // The merged flow never exchanges note secrets and never reveals the
+    // counterparty's opening.
     assert_eq!(result_a.my.ctr_recv_npk, "");
     assert_eq!(result_b.my.ctr_recv_npk, "");
+    assert_eq!(result_a.my.ctr_order_amount, 0);
+    assert_eq!(result_a.my.ctr_r_locked, "");
 
-    // A's residual openings match the opened public commitments.
+    // A's residual COLLATERAL opening matches the opened public commitment
+    // (the only re-commitment in the locked-only model).
     let hex32 = |s: &str| -> [u8; 32] {
         let raw = hex::decode(s).unwrap();
         let mut out = [0u8; 32];
@@ -202,22 +199,24 @@ async fn merged_session_happy_path() {
         out
     };
     assert_eq!(
-        result_a.my.new_order_commitment,
-        fr_to_hex(&commit(20, &hex32(&result_a.my.r_order_new)))
-    );
-    assert_eq!(
-        result_a.my.new_order_commitment,
-        fr_to_hex(&result_a.public.cm_q_res_a)
-    );
-    assert_eq!(
         result_a.my.new_locked_commitment,
         fr_to_hex(&commit(20, &hex32(&result_a.my.r_locked_new)))
     );
+    assert_eq!(
+        result_a.my.new_locked_commitment,
+        fr_to_hex(&result_a.public.cm_locked_res_a)
+    );
 
-    // Both WALs exist and are complete (v2: amounts filled in).
+    // Both WALs exist and are complete (v2: amounts filled in), and carry
+    // NO residual-quantity commitment fields.
     for (dir, expect_recv) in [(&dir_a, 180u64), (&dir_b, 60u64)] {
         let raw = fs::read_to_string(dir.join("witness.json")).expect("witness.json must exist");
         let w: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(w["my"]["recv_amount"].as_u64().unwrap(), expect_recv);
+        let my = w["my"].as_object().unwrap();
+        assert!(
+            !my.contains_key("new_order_commitment") && !my.contains_key("r_order_new"),
+            "no residual quantity commitment may exist in the WAL"
+        );
     }
 }

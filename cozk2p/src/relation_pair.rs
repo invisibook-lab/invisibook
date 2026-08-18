@@ -3,42 +3,46 @@
 //! benchmark counterpart of the split flow (pi_cmp + settle_small +
 //! settle_large). Nothing after this proof needs a reveal of either
 //! trader's quantity: the fill, both payout notes, and both residual
-//! commitments are computed inside the MPC.
+//! collateral commitments are computed inside the MPC.
 //!
-//! Public statement (15 signals, canonical order — the chain rebuilds
-//! signals 7..15 from its own order rows and takes 0..7 from the request):
+//! Public statement (11 signals, canonical order — the chain rebuilds
+//! signals 5..11 from its own order rows and takes 0..5 from the request):
 //!
 //! ```text
 //!  0 cmp              sign(q_a - q_b) in {-1, 0, 1} (as Fr: p-1, 0, 1)
 //!  1 cm_note_out_a    payout note minted TO trader A (B pays it)
 //!  2 cm_note_out_b    payout note minted TO trader B (A pays it)
-//!  3 cm_q_res_a       A's residual quantity commitment  (chain uses iff cmp = +1)
-//!  4 cm_locked_res_a  A's residual collateral commitment
-//!  5 cm_q_res_b       B's residual quantity commitment  (chain uses iff cmp = -1)
-//!  6 cm_locked_res_b  B's residual collateral commitment
-//!  7 cm_q_a           on-chain order A quantity commitment P2(q_a, r_q_a)
-//!  8 cm_q_b           on-chain order B quantity commitment
-//!  9 locked_a         order A's collateral commitment (Order.LockedCommitment)
-//! 10 locked_b         order B's collateral commitment
-//! 11 price            execution price (equal-price rule; chain-validated u64)
-//! 12 a_is_seller      1 when A sells token1
-//! 13 asset_recv_a     assetID of the token A receives (= B's lock token)
-//! 14 asset_recv_b     assetID of the token B receives (= A's lock token)
+//!  3 cm_locked_res_a  A's residual COLLATERAL commitment (chain uses iff cmp = +1)
+//!  4 cm_locked_res_b  B's residual COLLATERAL commitment (chain uses iff cmp = -1)
+//!  5 locked_a         order A's collateral commitment (Order.LockedCommitment)
+//!  6 locked_b         order B's collateral commitment
+//!  7 price            execution price (equal-price rule; chain-validated u64)
+//!  8 a_is_seller      1 when A sells token1
+//!  9 asset_recv_a     assetID of the token A receives (= B's lock token)
+//! 10 asset_recv_b     assetID of the token B receives (= A's lock token)
 //! ```
 //!
-//! Collateral pad slots (`P2(0,0)`) are NOT part of this statement: the
-//! merged relation opens `Order.LockedCommitment` directly against the
-//! amount the collateral equation requires, so the 2-slot padding of the
-//! Groth16 settle circuits has nothing to add here.
+//! LOCKED-ONLY MODEL: an order commits ONLY its collateral
+//! `locked = P2(needed, r_locked)` with the side-dependent equation
+//! `needed(q, s) = q·price + s·(q − q·price)` (a seller locks q, a buyer
+//! q·price). The equation is injective in q for price > 0, so opening each
+//! collateral against its in-circuit `needed` pins the compared quantities
+//! (input legitimacy). There is no quantity commitment and no residual
+//! quantity commitment: the residual collateral commitment is the ONLY
+//! re-commitment the relisted order carries.
 //!
-//! Range-safety: every derived amount is bounded by 64-bit-checked
-//! inputs, so all arithmetic is integer-exact in Fr —
-//! `fill = min(q_a, q_b) < 2^64`; the buyer-side collateral equation
-//! forces `q_buyer * price` to equal the opened admission-time collateral
-//! (64-bit-checked by send_order), hence `fill * price` and every residual
-//! collateral are `< 2^64` too. `price < 2^64` is re-checked in-circuit
-//! from owner-supplied bits.
+//! `price` and `a_is_seller` are PUBLIC wires used as they are: a prover
+//! cannot lie about a public input and the chain builds both from the order
+//! rows (a u64 price, a 0-1 flag), so neither is re-checked in-circuit —
+//! the same policy the split relation applies.
+//!
+//! Range-safety: every derived amount is bounded by 64-bit-checked inputs,
+//! so all arithmetic is integer-exact in Fr — `fill = min(q_a, q_b) < 2^64`;
+//! the buyer-side collateral equation forces `q_buyer * price` to equal the
+//! opened admission-time collateral (64-bit-checked by send_order), hence
+//! `fill * price` and every residual collateral are `< 2^64` too.
 
+use anyhow::Result;
 use ark_bn254::Fr;
 use ark_ff::Zero;
 use mpc_relation::{Variable, errors::CircuitError, traits::Circuit};
@@ -47,21 +51,18 @@ use serde::{Deserialize, Serialize};
 use crate::{
     gadgets::{AMOUNT_BITS, cmp_from_bits, enforce_bits, le_bits_to_field, poseidon_hash2},
     poseidon,
-    relation::{SatisfiabilityWitness, de_cmp, fr_hex, rand_fr},
+    relation::{SatisfiabilityWitness, de_cmp, fr_hex, needed_collateral, rand_fr},
 };
 
 /// One trader's private inputs to the merged relation. All blindings are
 /// 32-byte big-endian values reduced into Fr (wallet convention).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PairSidePrivate {
-    /// Hidden order quantity (token1 denomination).
+    /// Hidden order quantity (token1 units) backing the collateral.
     pub order_amount: u64,
-    /// Blinding of the on-chain order quantity commitment.
-    pub r_order: [u8; 32],
-    /// Blinding of the on-chain collateral commitment (locked slot 0).
+    /// Blinding of the on-chain collateral commitment — the order's ONLY
+    /// commitment in the locked-only model.
     pub r_locked: [u8; 32],
-    /// Fresh blinding for this side's residual quantity commitment.
-    pub r_q_res: [u8; 32],
     /// Fresh blinding for this side's residual collateral commitment.
     pub r_locked_res: [u8; 32],
     /// This side's receiving key for its incoming payout note.
@@ -73,7 +74,7 @@ pub struct PairSidePrivate {
 
 /// The public statement both traders agree on and the chain verifies.
 /// Commitments and asset ids serialize as the chain's 64-char hex; field
-/// names stay in lockstep with Go's `settlePair2pPublic`.
+/// names AND their order stay in lockstep with Go's `settlePair2pPublic`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PairPublic {
     #[serde(deserialize_with = "de_cmp")]
@@ -83,17 +84,9 @@ pub struct PairPublic {
     #[serde(with = "fr_hex")]
     pub cm_note_out_b: Fr,
     #[serde(with = "fr_hex")]
-    pub cm_q_res_a: Fr,
-    #[serde(with = "fr_hex")]
     pub cm_locked_res_a: Fr,
     #[serde(with = "fr_hex")]
-    pub cm_q_res_b: Fr,
-    #[serde(with = "fr_hex")]
     pub cm_locked_res_b: Fr,
-    #[serde(with = "fr_hex")]
-    pub cm_q_a: Fr,
-    #[serde(with = "fr_hex")]
-    pub cm_q_b: Fr,
     #[serde(with = "fr_hex")]
     pub locked_a: Fr,
     #[serde(with = "fr_hex")]
@@ -107,10 +100,10 @@ pub struct PairPublic {
 }
 
 /// Number of public signals in the merged statement.
-pub const PAIR_PUBLIC_LEN: usize = 15;
+pub const PAIR_PUBLIC_LEN: usize = 11;
 
 impl PairPublic {
-    /// Flatten to the canonical 15-element public-input vector.
+    /// Flatten to the canonical 11-element public-input vector.
     pub fn to_vec(&self) -> Vec<Fr> {
         let cmp_fr = match self.cmp {
             1 => Fr::from(1u64),
@@ -122,12 +115,8 @@ impl PairPublic {
             cmp_fr,
             self.cm_note_out_a,
             self.cm_note_out_b,
-            self.cm_q_res_a,
             self.cm_locked_res_a,
-            self.cm_q_res_b,
             self.cm_locked_res_b,
-            self.cm_q_a,
-            self.cm_q_b,
             self.locked_a,
             self.locked_b,
             Fr::from(self.price),
@@ -164,12 +153,13 @@ pub struct PairStatementInputs {
 /// Plaintext mirror of the in-circuit settlement arithmetic. Returns the
 /// full public statement from both sides' secrets — used by keygen, tests,
 /// fixtures, and the single-prover baseline; the collaborative flow
-/// computes the same values over shares.
+/// computes the same values over shares. Fails when any collateral or
+/// payout value would exceed 64 bits (the relation is 64-bit throughout).
 pub fn compute_pair_public(
     a: &PairSidePrivate,
     b: &PairSidePrivate,
     inputs: &PairStatementInputs,
-) -> PairPublic {
+) -> Result<PairPublic> {
     let (qa, qb) = (a.order_amount, b.order_amount);
     let cmp: i8 = match qa.cmp(&qb) {
         std::cmp::Ordering::Less => -1,
@@ -178,66 +168,50 @@ pub fn compute_pair_public(
     };
     let fill = qa.min(qb);
     let (q_res_a, q_res_b) = (qa - fill, qb - fill);
-    // Collateral / payout denominations: a seller locks and pays token1
-    // quantities; a buyer locks and pays token2 = quantity * price.
-    let locked_needed =
-        |q: u64, is_seller: bool| -> u64 { if is_seller { q } else { q * inputs.price } };
-    let recv = |is_seller: bool| -> u64 {
-        // The seller receives the token2 leg, the buyer the token1 leg.
-        if is_seller { fill * inputs.price } else { fill }
-    };
-    PairPublic {
+    let a_sells = inputs.a_is_seller;
+    // The payout leg is the OPPOSITE denomination of the locked one: a
+    // seller receives token2 (fill·price), a buyer token1 (fill). Both go
+    // through the one collateral equation, so the u64 bound applies to
+    // every minted note as well.
+    let recv = |is_seller: bool| needed_collateral(fill, inputs.price, !is_seller);
+    Ok(PairPublic {
         cmp,
         cm_note_out_a: poseidon::note_commit(
             a.recv_npk,
             inputs.asset_recv_a,
-            recv(inputs.a_is_seller),
+            recv(a_sells)?,
             &a.r_note,
         ),
         cm_note_out_b: poseidon::note_commit(
             b.recv_npk,
             inputs.asset_recv_b,
-            recv(!inputs.a_is_seller),
+            recv(!a_sells)?,
             &b.r_note,
         ),
-        cm_q_res_a: poseidon::hash2(Fr::from(q_res_a), rand_fr(&a.r_q_res)),
-        cm_locked_res_a: poseidon::hash2(
-            Fr::from(locked_needed(q_res_a, inputs.a_is_seller)),
-            rand_fr(&a.r_locked_res),
+        cm_locked_res_a: poseidon::commit(
+            needed_collateral(q_res_a, inputs.price, a_sells)?,
+            &a.r_locked_res,
         ),
-        cm_q_res_b: poseidon::hash2(Fr::from(q_res_b), rand_fr(&b.r_q_res)),
-        cm_locked_res_b: poseidon::hash2(
-            Fr::from(locked_needed(q_res_b, !inputs.a_is_seller)),
-            rand_fr(&b.r_locked_res),
+        cm_locked_res_b: poseidon::commit(
+            needed_collateral(q_res_b, inputs.price, !a_sells)?,
+            &b.r_locked_res,
         ),
-        cm_q_a: poseidon::commit(qa, &a.r_order),
-        cm_q_b: poseidon::commit(qb, &b.r_order),
-        locked_a: poseidon::hash2(
-            Fr::from(locked_needed(qa, inputs.a_is_seller)),
-            rand_fr(&a.r_locked),
-        ),
-        locked_b: poseidon::hash2(
-            Fr::from(locked_needed(qb, !inputs.a_is_seller)),
-            rand_fr(&b.r_locked),
-        ),
+        locked_a: poseidon::commit(needed_collateral(qa, inputs.price, a_sells)?, &a.r_locked),
+        locked_b: poseidon::commit(needed_collateral(qb, inputs.price, !a_sells)?, &b.r_locked),
         price: inputs.price,
         a_is_seller: inputs.a_is_seller,
         asset_recv_a: inputs.asset_recv_a,
         asset_recv_b: inputs.asset_recv_b,
-    }
+    })
 }
 
-/// Wire indices of the 15 public inputs, in canonical order.
+/// Wire indices of the 11 public inputs, in canonical order.
 pub struct PairPublicWires {
     pub cmp: Variable,
     pub cm_note_out_a: Variable,
     pub cm_note_out_b: Variable,
-    pub cm_q_res_a: Variable,
     pub cm_locked_res_a: Variable,
-    pub cm_q_res_b: Variable,
     pub cm_locked_res_b: Variable,
-    pub cm_q_a: Variable,
-    pub cm_q_b: Variable,
     pub locked_a: Variable,
     pub locked_b: Variable,
     pub price: Variable,
@@ -246,7 +220,7 @@ pub struct PairPublicWires {
     pub asset_recv_b: Variable,
 }
 
-/// Group the 15 canonical public wires. `vars` must be the public
+/// Group the 11 canonical public wires. `vars` must be the public
 /// variables in canonical order.
 pub fn pair_public_wires_from_vars(vars: &[Variable]) -> PairPublicWires {
     assert_eq!(vars.len(), PAIR_PUBLIC_LEN);
@@ -254,40 +228,29 @@ pub fn pair_public_wires_from_vars(vars: &[Variable]) -> PairPublicWires {
         cmp: vars[0],
         cm_note_out_a: vars[1],
         cm_note_out_b: vars[2],
-        cm_q_res_a: vars[3],
-        cm_locked_res_a: vars[4],
-        cm_q_res_b: vars[5],
-        cm_locked_res_b: vars[6],
-        cm_q_a: vars[7],
-        cm_q_b: vars[8],
-        locked_a: vars[9],
-        locked_b: vars[10],
-        price: vars[11],
-        a_is_seller: vars[12],
-        asset_recv_a: vars[13],
-        asset_recv_b: vars[14],
+        cm_locked_res_a: vars[3],
+        cm_locked_res_b: vars[4],
+        locked_a: vars[5],
+        locked_b: vars[6],
+        price: vars[7],
+        a_is_seller: vars[8],
+        asset_recv_a: vars[9],
+        asset_recv_b: vars[10],
     }
 }
 
 /// Wire indices of one side's private inputs: the quantity's 64-bit LE
-/// decomposition plus the five blindings and the receiving key.
+/// decomposition, the two collateral blindings, and the payout-note pair.
 pub struct PairSideWires {
     pub amount_bits: Vec<Variable>,
-    pub r_order: Variable,
     pub r_locked: Variable,
-    pub r_q_res: Variable,
     pub r_locked_res: Variable,
     pub recv_npk: Variable,
     pub r_note: Variable,
 }
 
 /// Number of private wires per side.
-pub const PAIR_SIDE_PRIVATE_LEN: usize = AMOUNT_BITS + 6;
-
-/// Number of extra shared wires: the price's 64-bit LE decomposition,
-/// supplied by trader A (both know the price; the recomposition equality
-/// against the public price wire makes a wrong supply unsatisfiable).
-pub const PAIR_EXTRA_LEN: usize = AMOUNT_BITS;
+pub const PAIR_SIDE_PRIVATE_LEN: usize = AMOUNT_BITS + 4;
 
 /// The plaintext values of one side's private wires, in allocation order.
 /// Order MUST match `pair_side_wires_from_vars` and be identical between
@@ -297,20 +260,11 @@ pub fn pair_side_private_values(side: &PairSidePrivate) -> Vec<Fr> {
     for i in 0..AMOUNT_BITS {
         vals.push(Fr::from((side.order_amount >> i) & 1));
     }
-    vals.push(rand_fr(&side.r_order));
     vals.push(rand_fr(&side.r_locked));
-    vals.push(rand_fr(&side.r_q_res));
     vals.push(rand_fr(&side.r_locked_res));
     vals.push(side.recv_npk);
     vals.push(rand_fr(&side.r_note));
     vals
-}
-
-/// The plaintext values of the extra wires (price bits, LE).
-pub fn pair_extra_values(price: u64) -> Vec<Fr> {
-    (0..AMOUNT_BITS)
-        .map(|i| Fr::from((price >> i) & 1))
-        .collect()
 }
 
 /// Rebuild `PairSideWires` from `PAIR_SIDE_PRIVATE_LEN` freshly created
@@ -319,18 +273,14 @@ pub fn pair_side_wires_from_vars(vars: &[Variable]) -> PairSideWires {
     assert_eq!(vars.len(), PAIR_SIDE_PRIVATE_LEN);
     let mut it = vars.iter().copied();
     let amount_bits: Vec<Variable> = (&mut it).take(AMOUNT_BITS).collect();
-    let r_order = it.next().unwrap();
     let r_locked = it.next().unwrap();
-    let r_q_res = it.next().unwrap();
     let r_locked_res = it.next().unwrap();
     let recv_npk = it.next().unwrap();
     let r_note = it.next().unwrap();
     assert!(it.next().is_none());
     PairSideWires {
         amount_bits,
-        r_order,
         r_locked,
-        r_q_res,
         r_locked_res,
         recv_npk,
         r_note,
@@ -339,16 +289,14 @@ pub fn pair_side_wires_from_vars(vars: &[Variable]) -> PairSideWires {
 
 /// Encode the merged settlement constraints over already-allocated wires.
 /// Works on any `Circuit<Fr>` implementation (single-prover or MPC).
-/// `price_bits` are the `PAIR_EXTRA_LEN` extra wires.
 pub fn build_pair_relation<Cs: Circuit<Fr>>(
     cs: &mut Cs,
     public: &PairPublicWires,
     a: &PairSideWires,
     b: &PairSideWires,
-    price_bits: &[Variable],
 ) -> Result<(), CircuitError> {
     let mut sat = SatisfiabilityWitness::default();
-    pair_relation_impl(cs, public, a, b, price_bits, &mut sat, &mut |_, _| {})
+    pair_relation_impl(cs, public, a, b, &mut sat, &mut |_, _| {})
 }
 
 /// [`build_pair_relation`] with a step tracer: after each constraint
@@ -359,11 +307,10 @@ pub fn build_pair_relation_traced<Cs: Circuit<Fr>>(
     public: &PairPublicWires,
     a: &PairSideWires,
     b: &PairSideWires,
-    price_bits: &[Variable],
     trace: &mut dyn FnMut(&str, usize),
 ) -> Result<(), CircuitError> {
     let mut sat = SatisfiabilityWitness::default();
-    pair_relation_impl(cs, public, a, b, price_bits, &mut sat, trace)
+    pair_relation_impl(cs, public, a, b, &mut sat, trace)
 }
 
 /// [`build_pair_relation`] that also returns the [`SatisfiabilityWitness`]
@@ -374,45 +321,37 @@ pub fn build_pair_relation_collecting<Cs: Circuit<Fr>>(
     public: &PairPublicWires,
     a: &PairSideWires,
     b: &PairSideWires,
-    price_bits: &[Variable],
 ) -> Result<SatisfiabilityWitness, CircuitError> {
     let mut sat = SatisfiabilityWitness::default();
-    pair_relation_impl(cs, public, a, b, price_bits, &mut sat, &mut |_, _| {})?;
+    pair_relation_impl(cs, public, a, b, &mut sat, &mut |_, _| {})?;
     Ok(sat)
 }
 
-/// Shared body of the two builders. Every `enforce_equal`/`enforce_bool`
-/// is mirrored into `sat` so the exact set of checks that make the circuit
-/// satisfiable can be re-tested on the witness shares.
+/// Shared body of the builders. Every `enforce_equal`/`enforce_bool` is
+/// mirrored into `sat` so the exact set of checks that make the circuit
+/// satisfiable can be re-tested on the witness shares. `trace` is called
+/// after each step with the running gate count (no-op in production).
 fn pair_relation_impl<Cs: Circuit<Fr>>(
     cs: &mut Cs,
     public: &PairPublicWires,
     a: &PairSideWires,
     b: &PairSideWires,
-    price_bits: &[Variable],
     sat: &mut SatisfiabilityWitness,
     trace: &mut dyn FnMut(&str, usize),
 ) -> Result<(), CircuitError> {
-    assert_eq!(price_bits.len(), PAIR_EXTRA_LEN);
     trace("start", cs.num_gates());
     let one_var = cs.one();
     let zero = cs.zero();
 
-    // 1. Booleanity: both quantities' bits, the price bits, and the public
-    //    side flag. These are also the 64-bit range checks that make every
-    //    product below integer-exact.
-    for bits in [&a.amount_bits, &b.amount_bits] {
+    // 1. Booleanity of every quantity bit (both sides) — these ARE secret
+    //    witnesses, and their 64-bit ranges keep the comparison an integer
+    //    one and every product below integer-exact. The public `price` and
+    //    `a_is_seller` wires need no such check (see the module docs).
+    for bits in [&a.amount_bits[..], &b.amount_bits[..]] {
         enforce_bits(cs, bits)?;
         sat.bool_vars.extend_from_slice(bits);
     }
-    enforce_bits(cs, price_bits)?;
-    sat.bool_vars.extend_from_slice(price_bits);
-    cs.enforce_bool(public.a_is_seller)?;
-    sat.bool_vars.push(public.a_is_seller);
-    trace(
-        "1 booleanity q_a+q_b+price (192 bits) + side flag",
-        cs.num_gates(),
-    );
+    trace("1 booleanity q_a+q_b (128 bits)", cs.num_gates());
 
     let mut eq = |cs: &mut Cs, x: Variable, y: Variable| -> Result<(), CircuitError> {
         cs.enforce_equal(x, y)?;
@@ -420,60 +359,44 @@ fn pair_relation_impl<Cs: Circuit<Fr>>(
         Ok(())
     };
 
-    // 2. Reconstruct the amounts; the price recomposition must equal the
-    //    public price wire (so A cannot supply wrong bits).
+    // 2. Reconstruct the quantities from their bits.
     let q_a = le_bits_to_field(cs, &a.amount_bits)?;
     let q_b = le_bits_to_field(cs, &b.amount_bits)?;
-    let price_v = le_bits_to_field(cs, price_bits)?;
-    eq(cs, price_v, public.price)?;
-    trace("2 recompositions + price equality", cs.num_gates());
+    trace("2 recomposition q_a+q_b", cs.num_gates());
 
-    // 3. Open both on-chain order quantity commitments.
-    let h_qa = poseidon_hash2(cs, q_a, a.r_order)?;
-    eq(cs, h_qa, public.cm_q_a)?;
-    let h_qb = poseidon_hash2(cs, q_b, b.r_order)?;
-    eq(cs, h_qb, public.cm_q_b)?;
-    trace("3 OPEN cm_q_a + cm_q_b", cs.num_gates());
-
-    // s_a = a_is_seller, s_b = 1 - s_a.
+    // s_a = a_is_seller (public), s_b = 1 - s_a: B is always the opposite
+    // side of the book.
     let s_a = public.a_is_seller;
-    let s_b = cs.lc(
-        &[one_var, s_a, zero, zero],
-        &[
-            Fr::from(1u64),
-            -Fr::from(1u64),
-            Fr::from(0u64),
-            Fr::from(0u64),
-        ],
-    )?;
+    let s_b = cs.sub(one_var, s_a)?;
 
     // Side-dependent collateral denomination:
     // needed = q*price + s*(q - q*price)  (seller locks q, buyer q*price).
     let needed = |cs: &mut Cs, q: Variable, s: Variable| -> Result<Variable, CircuitError> {
-        let qp = cs.mul(q, price_v)?;
-        let d = cs.sub(q, qp)?;
-        let m = cs.mul(s, d)?;
-        cs.add(qp, m)
+        let q_price = cs.mul(q, public.price)?;
+        let diff = cs.sub(q, q_price)?;
+        let term = cs.mul(s, diff)?;
+        cs.add(q_price, term)
     };
 
-    // 4. Open both collateral commitments against the amount the
-    //    admission-time equation requires. There is no separate collateral
-    //    witness: Poseidon collision resistance pins `needed` to the value
-    //    send_order range-checked to 64 bits, which also bounds every
-    //    product derived from it below 2^64.
+    // 3. Open both collateral commitments against the amount the
+    //    admission-time equation requires (paper Property 1(i): input
+    //    legitimacy). The collateral value is NOT a witness: Poseidon
+    //    collision resistance pins `needed` to the value send_order
+    //    range-checked to 64 bits, which also bounds every product derived
+    //    from it below 2^64.
     let needed_a = needed(cs, q_a, s_a)?;
-    let h_la = poseidon_hash2(cs, needed_a, a.r_locked)?;
-    eq(cs, h_la, public.locked_a)?;
+    let locked_a_hash = poseidon_hash2(cs, needed_a, a.r_locked)?;
+    eq(cs, locked_a_hash, public.locked_a)?;
+    trace("3 needed(q_a) + OPEN locked_a", cs.num_gates());
     let needed_b = needed(cs, q_b, s_b)?;
-    let h_lb = poseidon_hash2(cs, needed_b, b.r_locked)?;
-    eq(cs, h_lb, public.locked_b)?;
-    trace(
-        "4 collateral equations + OPEN locked_a + locked_b",
-        cs.num_gates(),
-    );
+    let locked_b_hash = poseidon_hash2(cs, needed_b, b.r_locked)?;
+    eq(cs, locked_b_hash, public.locked_b)?;
+    trace("4 needed(q_b) + OPEN locked_b", cs.num_gates());
 
-    // 5. cmp = (q_a > q_b) - (q_a < q_b) must equal the public claim.
+    // 4. cmp = (q_a > q_b) - (q_a < q_b) must equal the public claim.
     let (lt, eq_flag) = cmp_from_bits(cs, &a.amount_bits, &b.amount_bits)?;
+    trace("5 MSB-first compare scan", cs.num_gates());
+    // gt = 1 - lt - eq
     let gt = cs.lc(
         &[one_var, lt, eq_flag, zero],
         &[
@@ -485,22 +408,23 @@ fn pair_relation_impl<Cs: Circuit<Fr>>(
     )?;
     let cmp_expected = cs.sub(gt, lt)?;
     eq(cs, cmp_expected, public.cmp)?;
-    trace("5 MSB-first compare scan + cmp equality", cs.num_gates());
+    trace("6 cmp equality", cs.num_gates());
 
-    // 6. Fill and residual quantities: fill = min(q_a, q_b).
+    // 5. Fill and residual quantities: fill = q_b + lt·(q_a − q_b) is
+    //    min(q_a, q_b), since `lt` is exactly the q_a < q_b flag.
     let d_ab = cs.sub(q_a, q_b)?;
     let m_lt = cs.mul(lt, d_ab)?;
     let fill = cs.add(q_b, m_lt)?;
     let q_res_a = cs.sub(q_a, fill)?;
     let q_res_b = cs.sub(q_b, fill)?;
-    trace("6 fill = min(q_a, q_b)", cs.num_gates());
-    let h_qra = poseidon_hash2(cs, q_res_a, a.r_q_res)?;
-    eq(cs, h_qra, public.cm_q_res_a)?;
-    let h_qrb = poseidon_hash2(cs, q_res_b, b.r_q_res)?;
-    eq(cs, h_qrb, public.cm_q_res_b)?;
-    trace("7 OPEN cm_q_res_a + cm_q_res_b", cs.num_gates());
+    trace(
+        "7 fill = min(q_a, q_b) + residual quantities",
+        cs.num_gates(),
+    );
 
-    // 7. Residual collateral, re-committed under fresh blindings.
+    // 6. Residual COLLATERAL, re-committed under fresh blindings — the
+    //    only re-commitment in the locked-only model (the residual
+    //    quantity itself is plain wallet bookkeeping).
     let locked_res_a = needed(cs, q_res_a, s_a)?;
     let h_lra = poseidon_hash2(cs, locked_res_a, a.r_locked_res)?;
     eq(cs, h_lra, public.cm_locked_res_a)?;
@@ -509,9 +433,9 @@ fn pair_relation_impl<Cs: Circuit<Fr>>(
     eq(cs, h_lrb, public.cm_locked_res_b)?;
     trace("8 residual collateral + OPEN both", cs.num_gates());
 
-    // 8. Payout notes: the seller receives the token2 leg (fill*price),
-    //    the buyer the token1 leg (fill). recv = fill + s*(fill*price - fill).
-    let fill_t2 = cs.mul(fill, price_v)?;
+    // 7. Payout notes: the seller receives the token2 leg (fill·price),
+    //    the buyer the token1 leg (fill). recv = fill + s·(fill·price − fill).
+    let fill_t2 = cs.mul(fill, public.price)?;
     let d_fill = cs.sub(fill_t2, fill)?;
     let ra = cs.mul(s_a, d_fill)?;
     let recv_a = cs.add(fill, ra)?;
@@ -520,7 +444,7 @@ fn pair_relation_impl<Cs: Circuit<Fr>>(
     trace("9 recv values", cs.num_gates());
 
     // NoteCommit chain: P2(P2(P2(P2(TAG_CM=3, npk), asset), v), r).
-    let tag_cm = cs.add_constant(zero, &Fr::from(crate::poseidon::TAG_CM))?;
+    let tag_cm = cs.add_constant(zero, &Fr::from(poseidon::TAG_CM))?;
     let note_commit = |cs: &mut Cs,
                        npk: Variable,
                        asset: Variable,
@@ -549,33 +473,50 @@ mod tests {
     #[test]
     fn compute_pair_public_sample() {
         let (a, b, inputs) = sample_pair_trade();
-        let p = compute_pair_public(&a, &b, &inputs);
+        let p = compute_pair_public(&a, &b, &inputs).unwrap();
         assert_eq!(p.cmp, 1); // a=80 > b=60
         assert_eq!(p.to_vec().len(), PAIR_PUBLIC_LEN);
-        // a sells 80 ETH, locked 80; b buys 60, locked 180 at price 3.
+        // a sells 80 ETH (locks 80); b buys 60 at price 3 (locks 180).
+        assert_eq!(p.locked_a, poseidon::commit(80, &a.r_locked));
+        assert_eq!(p.locked_b, poseidon::commit(180, &b.r_locked));
         // fill = 60: a receives 180 (token2), b receives 60 (token1).
         let expect_note_a = poseidon::note_commit(a.recv_npk, inputs.asset_recv_a, 180, &a.r_note);
         assert_eq!(p.cm_note_out_a, expect_note_a);
         let expect_note_b = poseidon::note_commit(b.recv_npk, inputs.asset_recv_b, 60, &b.r_note);
         assert_eq!(p.cm_note_out_b, expect_note_b);
-        // Residuals: a keeps 20 (locked 20), b keeps 0 (locked 0).
-        assert_eq!(
-            p.cm_q_res_a,
-            poseidon::hash2(Fr::from(20u64), rand_fr(&a.r_q_res))
-        );
-        assert_eq!(
-            p.cm_locked_res_b,
-            poseidon::hash2(Fr::from(0u64), rand_fr(&b.r_locked_res))
-        );
+        // Residual collateral: a keeps 20 token1 locked, b keeps nothing.
+        assert_eq!(p.cm_locked_res_a, poseidon::commit(20, &a.r_locked_res));
+        assert_eq!(p.cm_locked_res_b, poseidon::commit(0, &b.r_locked_res));
     }
 
     #[test]
     fn serde_round_trip_and_cmp_bounds() {
         let (a, b, inputs) = sample_pair_trade();
-        let p = compute_pair_public(&a, &b, &inputs);
+        let p = compute_pair_public(&a, &b, &inputs).unwrap();
         let json = serde_json::to_string(&p).unwrap();
         let back: PairPublic = serde_json::from_str(&json).unwrap();
         assert_eq!(back.to_vec(), p.to_vec());
+
+        // The serde field ORDER is normative (Go mirrors it).
+        let keys = [
+            "\"cmp\"",
+            "\"cm_note_out_a\"",
+            "\"cm_note_out_b\"",
+            "\"cm_locked_res_a\"",
+            "\"cm_locked_res_b\"",
+            "\"locked_a\"",
+            "\"locked_b\"",
+            "\"price\"",
+            "\"a_is_seller\"",
+            "\"asset_recv_a\"",
+            "\"asset_recv_b\"",
+        ];
+        let mut last = 0;
+        for key in keys {
+            let idx = json.find(key).expect("field must serialize");
+            assert!(idx >= last, "field {key} out of order in {json}");
+            last = idx;
+        }
 
         // Out-of-range cmp is rejected at the deserialization boundary.
         let bad = json.replace("\"cmp\":1", "\"cmp\":2");
@@ -587,15 +528,19 @@ mod tests {
         let (mut a, mut b, inputs) = sample_pair_trade();
         a.order_amount = 60;
         b.order_amount = 60;
-        let p = compute_pair_public(&a, &b, &inputs);
+        let p = compute_pair_public(&a, &b, &inputs).unwrap();
         assert_eq!(p.cmp, 0);
-        assert_eq!(
-            p.cm_q_res_a,
-            poseidon::hash2(Fr::from(0u64), rand_fr(&a.r_q_res))
-        );
-        assert_eq!(
-            p.cm_q_res_b,
-            poseidon::hash2(Fr::from(0u64), rand_fr(&b.r_q_res))
-        );
+        assert_eq!(p.cm_locked_res_a, poseidon::commit(0, &a.r_locked_res));
+        assert_eq!(p.cm_locked_res_b, poseidon::commit(0, &b.r_locked_res));
+    }
+
+    /// A collateral or payout value wider than u64 is rejected before any
+    /// commitment is formed (the relation is 64-bit throughout).
+    #[test]
+    fn oversized_collateral_is_rejected() {
+        let (mut a, b, mut inputs) = sample_pair_trade();
+        inputs.a_is_seller = false; // A now BUYS, so it locks q·price.
+        a.order_amount = u64::MAX;
+        assert!(compute_pair_public(&a, &b, &inputs).is_err());
     }
 }

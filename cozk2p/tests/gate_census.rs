@@ -10,8 +10,8 @@ use cozk2p::{
         side_wires_from_vars,
     },
     relation_pair::{
-        PairPublicWires, PairSideWires, build_pair_relation_traced, pair_extra_values,
-        pair_public_wires_from_vars, pair_side_private_values, pair_side_wires_from_vars,
+        PairPublicWires, PairSideWires, build_pair_relation_traced, pair_public_wires_from_vars,
+        pair_side_private_values, pair_side_wires_from_vars,
     },
     sample_pair_trade, sample_trade,
 };
@@ -33,11 +33,18 @@ fn print_deltas(name: &str, marks: &[(String, usize)], finalized: usize) {
     );
 }
 
-/// π_cmp: the compare-only relation.
+/// Allocate a list of plaintext values as private variables.
+fn alloc(cs: &mut PlonkCircuit<ark_bn254::Fr>, vals: Vec<ark_bn254::Fr>) -> Vec<Variable> {
+    vals.into_iter()
+        .map(|v| cs.create_variable(v).unwrap())
+        .collect()
+}
+
+/// π_cmp: the compare-only relation (5 publics, locked-only model).
 #[test]
 fn census_compare_relation() {
-    let (a, b, _price, _a_is_seller) = sample_trade();
-    let public = compute_public(&a, &b);
+    let (a, b, price, a_is_seller) = sample_trade();
+    let public = compute_public(&a, &b, price, a_is_seller).unwrap();
 
     let mut cs = PlonkCircuit::<ark_bn254::Fr>::new_turbo_plonk();
     let pub_vars: Vec<Variable> = public
@@ -47,13 +54,10 @@ fn census_compare_relation() {
         .collect();
     let pw = PublicWires {
         cmp: pub_vars[0],
-        order_a: pub_vars[1],
-        order_b: pub_vars[2],
-    };
-    let alloc = |cs: &mut PlonkCircuit<ark_bn254::Fr>, vals: Vec<ark_bn254::Fr>| -> Vec<Variable> {
-        vals.into_iter()
-            .map(|v| cs.create_variable(v).unwrap())
-            .collect()
+        locked_a: pub_vars[1],
+        locked_b: pub_vars[2],
+        price: pub_vars[3],
+        a_is_seller: pub_vars[4],
     };
     let a_vars = alloc(&mut cs, side_private_values(&a));
     let b_vars = alloc(&mut cs, side_private_values(&b));
@@ -70,11 +74,11 @@ fn census_compare_relation() {
     print_deltas("pi_cmp (compare relation)", &marks, cs.num_gates());
 }
 
-/// The merged pair relation.
+/// The merged pair relation (11 publics, locked-only model).
 #[test]
 fn census_pair_relation() {
     let (a, b, inputs) = sample_pair_trade();
-    let public = compute_pair_public(&a, &b, &inputs);
+    let public = compute_pair_public(&a, &b, &inputs).unwrap();
 
     let mut cs = PlonkCircuit::<ark_bn254::Fr>::new_turbo_plonk();
     let pub_vars: Vec<Variable> = public
@@ -83,19 +87,13 @@ fn census_pair_relation() {
         .map(|v| cs.create_public_variable(v).unwrap())
         .collect();
     let pw: PairPublicWires = pair_public_wires_from_vars(&pub_vars);
-    let alloc = |cs: &mut PlonkCircuit<ark_bn254::Fr>, vals: Vec<ark_bn254::Fr>| -> Vec<Variable> {
-        vals.into_iter()
-            .map(|v| cs.create_variable(v).unwrap())
-            .collect()
-    };
     let a_vars = alloc(&mut cs, pair_side_private_values(&a));
     let b_vars = alloc(&mut cs, pair_side_private_values(&b));
-    let price_vars = alloc(&mut cs, pair_extra_values(public.price));
     let aw: PairSideWires = pair_side_wires_from_vars(&a_vars);
     let bw: PairSideWires = pair_side_wires_from_vars(&b_vars);
 
     let mut marks: Vec<(String, usize)> = Vec::new();
-    build_pair_relation_traced(&mut cs, &pw, &aw, &bw, &price_vars, &mut |label, gates| {
+    build_pair_relation_traced(&mut cs, &pw, &aw, &bw, &mut |label, gates| {
         marks.push((label.to_string(), gates));
     })
     .unwrap();

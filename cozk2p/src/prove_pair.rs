@@ -20,9 +20,9 @@ use crate::{
     prove::{ProveTimings, check_witness_valid},
     relation::SatisfiabilityWitness,
     relation_pair::{
-        PAIR_EXTRA_LEN, PAIR_SIDE_PRIVATE_LEN, PairPublic, PairSidePrivate, build_pair_relation,
-        build_pair_relation_collecting, pair_extra_values, pair_public_wires_from_vars,
-        pair_side_private_values, pair_side_wires_from_vars,
+        PAIR_SIDE_PRIVATE_LEN, PairPublic, PairSidePrivate, build_pair_relation,
+        build_pair_relation_collecting, pair_public_wires_from_vars, pair_side_private_values,
+        pair_side_wires_from_vars,
     },
 };
 
@@ -52,12 +52,10 @@ pub fn build_pair_single_prover_circuit(
     };
     let a_vars = alloc(pair_side_private_values(a))?;
     let b_vars = alloc(pair_side_private_values(b))?;
-    let price_vars = alloc(pair_extra_values(public.price))?;
     let aw = pair_side_wires_from_vars(&a_vars);
     let bw = pair_side_wires_from_vars(&b_vars);
 
-    build_pair_relation(&mut cs, &pw, &aw, &bw, &price_vars)
-        .map_err(|e| anyhow!("building relation: {e}"))?;
+    build_pair_relation(&mut cs, &pw, &aw, &bw).map_err(|e| anyhow!("building relation: {e}"))?;
     cs.finalize_for_arithmetization()
         .map_err(|e| anyhow!("finalizing circuit: {e}"))?;
     Ok(cs)
@@ -65,9 +63,7 @@ pub fn build_pair_single_prover_circuit(
 
 /// Build the collaborative circuit on an `MpcFabric`. `my_side` is this
 /// party's plaintext inputs; the counterparty's arrive as SPDZ shares.
-/// Both parties MUST call this with the same `public`. The price bits are
-/// supplied by PARTY0 (both know the price; the in-circuit recomposition
-/// equality pins them to the public price wire).
+/// Both parties MUST call this with the same `public`.
 pub fn build_pair_mpc_circuit(
     fabric: &MpcFabric<G1Projective>,
     my_party: u64,
@@ -97,7 +93,7 @@ fn build_pair_mpc_circuit_sat(
     let pw = pair_public_wires_from_vars(&pub_vars);
 
     // Shared wire groups, in fixed allocation order (op-id alignment):
-    // side A (PARTY0), side B (PARTY1), price bits (PARTY0).
+    // side A (PARTY0), then side B (PARTY1).
     let mut alloc_group = |owner: u64, values: Vec<Fr>, len: usize| -> Result<Vec<Variable>> {
         debug_assert_eq!(values.len(), len);
         values
@@ -118,16 +114,10 @@ fn build_pair_mpc_circuit_sat(
     };
     let a_vars = alloc_group(PARTY0, side_values(PARTY0), PAIR_SIDE_PRIVATE_LEN)?;
     let b_vars = alloc_group(PARTY1, side_values(PARTY1), PAIR_SIDE_PRIVATE_LEN)?;
-    let price_values = if my_party == PARTY0 {
-        pair_extra_values(public.price)
-    } else {
-        vec![Fr::from(0u64); PAIR_EXTRA_LEN]
-    };
-    let price_vars = alloc_group(PARTY0, price_values, PAIR_EXTRA_LEN)?;
     let aw = pair_side_wires_from_vars(&a_vars);
     let bw = pair_side_wires_from_vars(&b_vars);
 
-    let sat = build_pair_relation_collecting(&mut cs, &pw, &aw, &bw, &price_vars)
+    let sat = build_pair_relation_collecting(&mut cs, &pw, &aw, &bw)
         .map_err(|e| anyhow!("building relation: {e}"))?;
     cs.finalize_for_arithmetization()
         .map_err(|e| anyhow!("finalizing circuit: {e}"))?;

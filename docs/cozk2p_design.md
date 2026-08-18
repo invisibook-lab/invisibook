@@ -160,9 +160,12 @@ cozk2p/
 │   ├── mpc_poseidon.rs        # Poseidon over authenticated shares
 │   ├── mpc_compare.rs         # three-way compare over shares
 │   ├── relation.rs            # SidePrivate/SettlePublic, build_settle_relation
+│   ├── relation_pair.rs       # the MERGED 11-signal relation (§8.1)
 │   ├── session.rs             # THE session (§2): preamble → … → leg exchange
-│   ├── setup.rs               # dev SRS + PK/VK cache
+│   ├── session_pair.rs        # the MERGED session (§8.2)
+│   ├── setup.rs               # dev SRS + PK/VK cache (both relations)
 │   ├── prove.rs               # circuit builders, collaborative + single provers
+│   ├── prove_pair.rs          # the same, for the merged relation
 │   ├── net.rs                 # QUIC connect with spawn-order tolerance
 │   ├── ffi.rs                 # cgo verifier export (§4)
 │   ├── stats.rs               # peak-RSS helper
@@ -170,10 +173,14 @@ cozk2p/
 │       ├── settle2p_session.rs    # the subprocess the app spawns (stdio protocol)
 │       ├── settle2p_party.rs      # bare one-trader prover (no session)
 │       ├── dump_settle2p_fixture.rs  # chain VK + Go-test fixture
+│       ├── dump_settlepair2p_fixture.rs  # the same, merged path (§8.3)
 │       └── bench_settle2p.rs      # benchmark harness
 └── tests/
     ├── session_2p.rs          # happy path, abort-before-reveal (F1), leg exchange
-    └── settle_2p.rs           # relation satisfiability, tamper, cmp branches
+    ├── session_pair_e2e.rs    # merged session happy path + WAL assertions
+    ├── settle_2p.rs           # relation satisfiability, tamper, cmp branches
+    ├── settle_pair_2p.rs      # the same, merged relation
+    └── gate_census.rs         # measured per-step gate table for both relations
 ```
 
 Numbers: [cozk_experiments.md](cozk_experiments.md).
@@ -219,37 +226,42 @@ the two paths give a direct A/B benchmark.
 
 ### 8.1 The merged relation (`relation_pair.rs`)
 
-15 public signals (order is normative; the chain rebuilds 7..14 from
-its order rows and takes 0..6 from the request):
+11 public signals (order is normative; the chain rebuilds 5..10 from
+its order rows and takes 0..4 from the request):
 
 ```
  0 cmp              sign(q_a − q_b) in {−1, 0, 1}
  1 cm_note_out_a    payout note minted TO trader A (B pays it)
  2 cm_note_out_b    payout note minted TO trader B (A pays it)
- 3 cm_q_res_a       A's residual quantity commitment (used iff cmp = +1)
- 4 cm_locked_res_a  A's residual collateral commitment
- 5 cm_q_res_b       B's residual quantity commitment (used iff cmp = −1)
- 6 cm_locked_res_b  B's residual collateral commitment
- 7 cm_q_a           order A quantity commitment (on chain)
- 8 cm_q_b           order B quantity commitment (on chain)
- 9 locked_a         order A collateral commitment (on chain)
-10 locked_b         order B collateral commitment (on chain)
-11 price            execution price (equal-price rule)
-12 a_is_seller      1 when A sells token1
-13 asset_recv_a     assetID of the token A receives
-14 asset_recv_b     assetID of the token B receives
+ 3 cm_locked_res_a  A's residual COLLATERAL commitment (used iff cmp = +1)
+ 4 cm_locked_res_b  B's residual COLLATERAL commitment (used iff cmp = −1)
+ 5 locked_a         order A collateral commitment (on chain)
+ 6 locked_b         order B collateral commitment (on chain)
+ 7 price            execution price (equal-price rule)
+ 8 a_is_seller      1 when A sells token1
+ 9 asset_recv_a     assetID of the token A receives
+10 asset_recv_b     assetID of the token B receives
 ```
 
-Constraints: booleanity + recomposition of `q_a`, `q_b`, and the price
-bits; Poseidon opens of both order and both collateral commitments (the
-collateral value is not a witness — the circuit computes `needed =
-q·price + side·(q − q·price)` and opens the commitment against it); the
-MSB-scan comparison; `fill = min(q_a, q_b)`; residual quantity and
-collateral commitments for BOTH sides (the filled side commits zero);
-and the two payout-note chains `NoteCommit(npk, asset, recv, r)`.
-16 Poseidon gadgets; 16 384 gates after padding — inside the existing
-`MAX_DEGREE = 32768` SRS. Keys are cached under a separate
-`settlepair2p-*` tag.
+Per side, 68 private wires: `q` as 64 owner-supplied LE bits, `r_locked`,
+`r_locked_res`, `npk`, `r_note`.
+
+Constraints: booleanity + recomposition of `q_a` and `q_b`; a Poseidon
+open of each order's collateral commitment (the collateral value is not
+a witness — the circuit computes `needed = q·price + side·(q − q·price)`
+and opens the commitment against it, which pins the quantity too); the
+MSB-scan comparison; `fill = min(q_a, q_b)`; a residual COLLATERAL
+commitment for BOTH sides (the filled side commits zero); and the two
+payout-note chains `NoteCommit(npk, asset, recv, r)`. Like §3, `price`
+and `a_is_seller` are public wires used as they are — no price bits, no
+booleanity gate on the side flag.
+
+12 Poseidon gadgets; measured 6 259 gates, 8 192 after padding — well
+inside the existing `MAX_DEGREE = 32768` SRS. Keys are cached under a
+separate `settlepair2p-*` tag (currently
+`settlepair2p-8192x11-1b00cc02c-v2`). The locked-only model halved the
+padded domain: the four quantity commitments and the price bits of the
+older 15-signal statement are gone.
 
 Range safety: every derived amount is bounded by a 64-bit-checked
 input. The buyer-side collateral equation pins `q·price` to the opened
@@ -261,25 +273,27 @@ stay below 2^64 without extra bit witnesses.
 Same preamble, witness binding, and comparison as §2. Then, INSTEAD of
 reveal + solo settle proofs + leg exchange:
 
-1. Compute the six output commitments OVER SHARES (Poseidon on the
-   fabric; the fill selection is public once `cmp` is open) and open
+1. Compute the four output commitments OVER SHARES — 10 Poseidon on the
+   fabric: 2 residual-collateral commitments plus 2 four-hash note
+   chains; the fill selection is public once `cmp` is open — and open
    them. Opening a hiding commitment reveals nothing.
-2. Ferry ONE signature per trader over the full 15-signal statement
+2. Ferry ONE signature per trader over the full 11-signal statement
    (domain `invisibook-settle-pair-cozk2p-v1`).
 3. Collaboratively prove the merged relation; verify locally.
 4. Hand `{cmp, public, proof, sig_a, sig_b}` to the host. The host
    submits `SettlePairCoZk2p` and BLOCKS until the settlement is FINAL.
 5. Only after finality does the smaller side reveal the fill (bound to
    the MPC shares — a lying reveal aborts), so the larger side learns
-   its payout amount and residual opening.
+   its payout amount and residual amounts. Its residual COLLATERAL
+   commitment and blinding are already on disk from step 1.
 
 Privacy delta vs. the split flow: no quantity is revealed to anyone
-before the settlement is final, and the reveal shrinks from `(q, r)` to
-the fill value alone. The F1 anchor becomes the settlement itself.
-Griefing caveat: a counterparty that vanishes after finality but before
-the fill reveal leaves the larger side with a minted note of unknown
-amount; the WAL keeps the session recoverable, and the amount can be
-re-learned only from the counterparty.
+before the settlement is final, and the reveal shrinks from
+`(q, r_locked)` to the fill value alone. The F1 anchor becomes the
+settlement itself. Griefing caveat: a counterparty that vanishes after
+finality but before the fill reveal leaves the larger side with a minted
+note of unknown amount; the WAL keeps the session recoverable, and the
+amount can be re-learned only from the counterparty.
 
 ### 8.3 Chain writing (`SettlePairCoZk2p`)
 

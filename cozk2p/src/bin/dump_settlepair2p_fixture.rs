@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
 
     // Same sample trade as keygen: A sells 80 at price 3, B buys 60.
     let (a, b, inputs) = sample_pair_trade();
-    let public = compute_pair_public(&a, &b, &inputs);
+    let public = compute_pair_public(&a, &b, &inputs)?;
 
     // Two in-process SPDZ parties, each holding only its own side.
     let (r0, r1) = execute_mock_mpc(|fabric| {
@@ -99,15 +99,11 @@ async fn main() -> Result<()> {
     // exactly as the writing does and compare against `public`.
     let fixture = json!({
         "cmp": public.cmp,
-        "order_a_commitment_hex": fr_to_hex(&public.cm_q_a),
-        "order_b_commitment_hex": fr_to_hex(&public.cm_q_b),
         "locked_a_hex": fr_to_hex(&public.locked_a),
         "locked_b_hex": fr_to_hex(&public.locked_b),
         "cm_note_out_a_hex": fr_to_hex(&public.cm_note_out_a),
         "cm_note_out_b_hex": fr_to_hex(&public.cm_note_out_b),
-        "cm_q_res_a_hex": fr_to_hex(&public.cm_q_res_a),
         "cm_locked_res_a_hex": fr_to_hex(&public.cm_locked_res_a),
-        "cm_q_res_b_hex": fr_to_hex(&public.cm_q_res_b),
         "cm_locked_res_b_hex": fr_to_hex(&public.cm_locked_res_b),
         "price": public.price,
         "a_is_seller": public.a_is_seller,
