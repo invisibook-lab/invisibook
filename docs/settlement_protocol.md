@@ -328,22 +328,39 @@ opened proof locally before releasing it to its host.
 - **NoteCommit(npk, asset, v, r)** — the pool note chain
   `P2(P2(P2(P2(3, npk), asset), v), r)`.
 
+Every count below is MEASURED, not estimated:
+
+- PLONK relations: the real circuit builders carry a step tracer that
+  reads `num_gates()` after each constraint group
+  (`cargo test -p cozk2p --test gate_census -- --nocapture`). The unit
+  is TurboPlonk gates; `finalize_for_arithmetization` pads the total to
+  the next power-of-two evaluation domain.
+- Groth16 circuits: `scripts/circom_step_census.py` compiles CUMULATIVE
+  variants of each circuit (the body truncated after each step) with
+  circom 2.2.3 and takes the per-step delta of NON-LINEAR R1CS
+  constraints (the Groth16 cost metric). The final variant is
+  cross-checked against compiling the pristine file — the script fails
+  on any drift.
+
 ### 5.1 π_cmp — the compare relation (collaborative PLONK; Groth16 twin `settle_cozk.circom`)
 
 Publics (3): `[cmp, cm_q_a, cm_q_b]`.
 Private (per side, supplied by its owner): `q` as 64 LE bits, `r_q`.
 
-| # | Constraint | Purpose |
-|---|---|---|
-| 1 | booleanity of all 128 amount bits | [RANGE] for both quantities |
-| 2 | `q_a = Σ bits·2^i`, `q_b = Σ bits·2^i` | recomposition |
-| 3 | [OPEN(cm_q_a; q_a, r_a)] | compared value = the on-chain commitment (input legitimacy) |
-| 4 | [OPEN(cm_q_b; q_b, r_b)] | same for B |
-| 5 | MSB-first scan, per bit: `m = a_i·b_i`; `xnor = 1 − a_i − b_i + 2m`; `lt += eq_prefix·(b_i − m)`; `eq_prefix ·= xnor` | strict-less and equal flags |
-| 6 | `gt = 1 − lt − eq`; `cmp === gt − lt` | the public claim is exactly `sign(q_a − q_b)` |
+| # | Constraint | Purpose | gates |
+|---|---|---|---|
+| 1 | booleanity of all 128 amount bits | [RANGE] for both quantities | 128 |
+| 2 | `q_a = Σ bits·2^i`, `q_b = Σ bits·2^i` | recomposition | 44 |
+| 3 | [OPEN(cm_q_a; q_a, r_a)] | compared value = the on-chain commitment (input legitimacy) | 472 |
+| 4 | [OPEN(cm_q_b; q_b, r_b)] | same for B | 472 |
+| 5 | MSB-first scan, per bit: `m = a_i·b_i`; `xnor = 1 − a_i − b_i + 2m`; `lt += eq_prefix·(b_i − m)`; `eq_prefix ·= xnor` | strict-less and equal flags | 384 |
+| 6 | `gt = 1 − lt − eq`; `cmp === gt − lt` | the public claim is exactly `sign(q_a − q_b)` | 3 |
 
-2 048 gates. The Groth16 twin proves the identical statement with
-`LessThan(64)` comparators; the chain accepts either.
+Measured total: 5 (allocation) + 1 503 = **1 508 gates**, padded to
+**2 048** by finalization. The Groth16 twin (`settle_cozk.circom`)
+proves the identical statement with `LessThan(64)` comparators —
+measured **744 non-linear R1CS constraints** (ranges 128, the two opens
+243 each, the comparison 130); the chain accepts either.
 
 ### 5.2 `settle_small` — π_A, the fully filled side (Groth16)
 
@@ -351,14 +368,18 @@ Publics (8): `[cm_q, locked_0, locked_1, price, side, pay_asset,
 cm_note_out, bind]`. Private: `q, r_q, locked_v[2], locked_r[2],
 npk_ctr, r_note`.
 
-| # | Constraint | Purpose |
-|---|---|---|
-| 1 | `side·(1 − side) === 0` | side flag is boolean |
-| 2 | [RANGE(q)], [OPEN(cm_q; q, r_q)] | own quantity opens the on-chain commitment |
-| 3 | [RANGE(locked_v[i])], [OPEN(locked_i; locked_v[i], locked_r[i])] for i = 0, 1 | both collateral slots open (slot 1 is the `P2(0,0)` pad) |
-| 4 | [RANGE(price)]; `locked_v[0] + locked_v[1] === q·price + side·(q − q·price)` | the collateral equals the FULL executed value at the execution price |
-| 5 | `NoteCommit(npk_ctr, pay_asset, locked_sum, r_note) === cm_note_out` | the WHOLE collateral becomes the counterparty's payout note (its fresh `npk, r` arrive over the settlement channel) |
-| 6 | [BIND] over `(chain_id, "settle_small", order_id, match_order_id, cm_note_out)` | anti-replay weld |
+| # | Constraint | Purpose | constraints |
+|---|---|---|---|
+| 1 | `side·(1 − side) === 0` | side flag is boolean | 1 |
+| 2 | [RANGE(q)], [OPEN(cm_q; q, r_q)] | own quantity opens the on-chain commitment | 307 |
+| 3 | [RANGE(locked_v[i])], [OPEN(locked_i; locked_v[i], locked_r[i])] for i = 0, 1 | both collateral slots open (slot 1 is the `P2(0,0)` pad) | 614 |
+| 4 | [RANGE(price)]; `locked_v[0] + locked_v[1] === q·price + side·(q − q·price)` | the collateral equals the FULL executed value at the execution price | 66 |
+| 5 | `NoteCommit(npk_ctr, pay_asset, locked_sum, r_note) === cm_note_out` | the WHOLE collateral becomes the counterparty's payout note (its fresh `npk, r` arrive over the settlement channel) | 1 036 |
+| 6 | [BIND] over `(chain_id, "settle_small", order_id, match_order_id, cm_note_out)` | anti-replay weld | 1 |
+
+Measured total: **2 025 non-linear R1CS constraints**. (One `Poseidon(2)`
+is 243; `NoteCommit` = 4 chained hashes + its internal `Num2Bits(64)` =
+1 036.)
 
 Note the deliberate asymmetry: π_A does NOT self-prove `q ≤ q_ctr`.
 The chain's recorded `cmp` decides which circuit each side may use
@@ -371,18 +392,19 @@ cm_q_residual, cm_locked_residual, pay_asset, cm_note_out, bind]`.
 Private: `q, r_q, q_ctr, r_q_ctr, locked_v[2], locked_r[2],
 r_q_residual, r_locked_residual, npk_ctr, r_note`.
 
-| # | Constraint | Purpose |
-|---|---|---|
-| 1 | `side·(1 − side) === 0` | boolean side flag |
-| 2 | [RANGE(q)], [OPEN(cm_q; q, r_q)] | own quantity opens own commitment |
-| 3 | [RANGE(q_ctr)], [OPEN(cm_q_ctr; q_ctr, r_q_ctr)] | the REVEALED opening must match the COUNTERPARTY's on-chain commitment — the fill cannot be understated |
-| 4 | `q_res = q − q_ctr`; [RANGE(q_res)] | the 64-bit range of the difference IS the `q ≥ q_ctr` proof (a wrap-around would exceed 64 bits) |
-| 5 | [OPEN(cm_q_residual; q_res, r_q_residual)] | residual quantity re-committed under a fresh blinding (unlinkable relist) |
-| 6 | [RANGE(locked_v[i])], [OPEN(locked_i; ...)] for i = 0, 1 | collateral slots open |
-| 7 | [RANGE(price)]; `locked_sum === q·price + side·(q − q·price)` | admission-time collateral equation |
-| 8 | `locked_res = q_res·price + side·(q_res − q_res·price)`; [OPEN(cm_locked_residual; locked_res, r_locked_residual)] | residual collateral re-committed |
-| 9 | `fill = locked_sum − locked_res`; `NoteCommit(npk_ctr, pay_asset, fill, r_note) === cm_note_out` | exactly the filled value moves to the counterparty |
-| 10 | [BIND] over `(chain_id, "settle_large", order_id, match_order_id, cm_q_residual, cm_locked_residual, cm_note_out)` | anti-replay weld |
+| # | Constraint | Purpose | constraints |
+|---|---|---|---|
+| 1 | `side·(1 − side) === 0` | boolean side flag | 1 |
+| 2 | [RANGE(q)], [RANGE(q_ctr)] | 64-bit ranges of both quantities | 128 |
+| 3 | [OPEN(cm_q; q, r_q)], [OPEN(cm_q_ctr; q_ctr, r_q_ctr)] | own opening, and the REVEALED opening must match the COUNTERPARTY's on-chain commitment — the fill cannot be understated | 486 |
+| 4 | `q_res = q − q_ctr`; [RANGE(q_res)]; [OPEN(cm_q_residual; q_res, r_q_residual)] | the 64-bit range of the difference IS the `q ≥ q_ctr` proof (a wrap-around would exceed 64 bits); residual re-committed under a fresh blinding | 307 |
+| 5 | [RANGE(locked_v[i])], [OPEN(locked_i; ...)] for i = 0, 1 | collateral slots open | 614 |
+| 6 | [RANGE(price)]; `locked_sum === q·price + side·(q − q·price)` | admission-time collateral equation | 66 |
+| 7 | `locked_res = q_res·price + side·(q_res − q_res·price)`; [OPEN(cm_locked_residual; locked_res, r_locked_residual)] | residual collateral re-committed | 245 |
+| 8 | `fill = locked_sum − locked_res`; `NoteCommit(npk_ctr, pay_asset, fill, r_note) === cm_note_out` | exactly the filled value moves to the counterparty | 1 036 |
+| 9 | [BIND] over `(chain_id, "settle_large", order_id, match_order_id, cm_q_residual, cm_locked_residual, cm_note_out)` | anti-replay weld | 1 |
+
+Measured total: **2 884 non-linear R1CS constraints**.
 
 ### 5.4 The merged relation (collaborative PLONK, `relation_pair.rs`)
 
@@ -393,21 +415,23 @@ Private per side (owner-supplied): `q` as 64 LE bits, `r_q`,
 `r_locked`, `r_q_res`, `r_locked_res`, `npk` (own receiving key),
 `r_note`. Extra: 64 price bits supplied by A.
 
-| # | Constraint | Purpose |
-|---|---|---|
-| 1 | booleanity of `q_a`, `q_b`, and price bits (3×64); `a_is_seller` boolean | [RANGE] for every multiplied value |
-| 2 | recompositions; `Σ price_bits·2^i === price` (public wire) | A cannot supply wrong price bits |
-| 3 | [OPEN(cm_q_a; q_a, r_q_a)], [OPEN(cm_q_b; q_b, r_q_b)] | both on-chain order commitments open |
-| 4 | `needed_x = q_x·price + s_x·(q_x − q_x·price)` with `s_a = a_is_seller`, `s_b = 1 − s_a`; [OPEN(locked_x; needed_x, r_locked_x)] | the collateral value is NOT a witness: collision resistance pins it to the amount `send_order` range-checked at admission — which also bounds every derived product below 2^64 |
-| 5 | MSB-first scan on the bit vectors (as §5.1); `cmp === gt − lt` | public comparison claim |
-| 6 | `fill = q_b + lt·(q_a − q_b)` | `fill = min(q_a, q_b)` |
-| 7 | `q_res_x = q_x − fill`; [OPEN(cm_q_res_x; q_res_x, r_q_res_x)] for both sides | residual quantities (the filled side commits 0) |
-| 8 | `locked_res_x = needed(q_res_x, s_x)`; [OPEN(cm_locked_res_x; locked_res_x, r_locked_res_x)] | residual collateral, both sides |
-| 9 | `fill_t2 = fill·price`; `recv_a = fill + s_a·(fill_t2 − fill)`; `recv_b = fill + s_b·(fill_t2 − fill)` | the seller receives the token2 leg, the buyer the token1 leg |
-| 10 | `NoteCommit(npk_a, asset_recv_a, recv_a, r_note_a) === cm_note_out_a`; same for B | both payout notes, minted from the joint statement |
+| # | Constraint | Purpose | gates |
+|---|---|---|---|
+| 1 | booleanity of `q_a`, `q_b`, and price bits (3×64); `a_is_seller` boolean | [RANGE] for every multiplied value | 193 |
+| 2 | recompositions; `Σ price_bits·2^i === price` (public wire) | A cannot supply wrong price bits | 67 |
+| 3 | [OPEN(cm_q_a; q_a, r_q_a)], [OPEN(cm_q_b; q_b, r_q_b)] | both on-chain order commitments open | 944 |
+| 4 | `needed_x = q_x·price + s_x·(q_x − q_x·price)` with `s_a = a_is_seller`, `s_b = 1 − s_a`; [OPEN(locked_x; needed_x, r_locked_x)] | the collateral value is NOT a witness: collision resistance pins it to the amount `send_order` range-checked at admission — which also bounds every derived product below 2^64 | 953 |
+| 5 | MSB-first scan on the bit vectors (as §5.1); `cmp === gt − lt` | public comparison claim | 387 |
+| 6 | `fill = q_b + lt·(q_a − q_b)` | `fill = min(q_a, q_b)` | 5 |
+| 7 | `q_res_x = q_x − fill`; [OPEN(cm_q_res_x; q_res_x, r_q_res_x)] for both sides | residual quantities (the filled side commits 0) | 944 |
+| 8 | `locked_res_x = needed(q_res_x, s_x)`; [OPEN(cm_locked_res_x; locked_res_x, r_locked_res_x)] | residual collateral, both sides | 952 |
+| 9 | `fill_t2 = fill·price`; `recv_a = fill + s_a·(fill_t2 − fill)`; `recv_b = fill + s_b·(fill_t2 − fill)` | the seller receives the token2 leg, the buyer the token1 leg | 6 |
+| 10 | `NoteCommit(npk_a, asset_recv_a, recv_a, r_note_a) === cm_note_out_a`; same for B | both payout notes, minted from the joint statement | 3 771 |
 
-16 Poseidon gadgets; 16 384 gates. No [BIND]: the dual signatures over
-the full statement (§3.3) are the anti-replay weld. Range safety of the
+Measured total: 17 (allocation) + 8 222 = **8 239 gates**, padded to
+**16 384** by finalization (16 Poseidon gadgets at 471/472 gates each
+dominate). No [BIND]: the dual signatures over the full statement
+(§3.3) are the anti-replay weld. Range safety of the
 derived values (`fill_t2`, `locked_res`) follows from constraint 4 —
 they are all bounded by the opened admission-time collateral.
 
