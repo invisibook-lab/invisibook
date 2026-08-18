@@ -269,6 +269,31 @@ branch `cozk-merged-settle`):
 | session subprocess total | 13 842 | 13 842 | 29 029 | 29 037 |
 | run_settle total (concurrent) | 25 959 | 25 959 | 35 358 | 35 358 |
 
+Where that wall clock goes, by category (`run_settle`, both parties
+concurrent):
+
+| category | split | merged |
+|---|---|---|
+| collaborative MPC / PLONK | 5.2 s (**20 %**) | 22.1 s (**63 %**) |
+| chain block waits | 20.1 s (**78 %**) | 12.3 s (**35 %**) |
+| — on-chain anchor confirmation | 8.0 s | 6.0 s |
+| — rendezvous + submit + final confirm | 12.1 s | 6.3 s |
+| protocol overhead + local Groth16 legs | 0.6 s (2.3 %) | 0.9 s (2.6 %) |
+| **settlement total** | **26.0 s** | **35.4 s** |
+| full trade, incl. order placement and matching | 40.6 s | 50.0 s |
+
+Inside the cryptographic slice (the fabric evaluates lazily, so `build`
+and `prove` mostly enqueue the dataflow graph and `open` drains it —
+every Beaver round plus the MAC-checked reveal lands there):
+
+| MPC phase | split | merged |
+|---|---|---|
+| circuit build | 0.12 s | 0.48 s |
+| collaborative prove | 1.54 s | 5.23 s |
+| proof open (drain + reveal) | 3.56 s | 16.39 s |
+| padded gate count | 2 048 | 8 192 |
+| **cost per gate** | **2.55 ms** | **2.70 ms** |
+
 Reading of the numbers:
 
 - **Cryptographic wall clock: ~5.2 s split vs ~22.1 s merged (~4.2x).**
@@ -296,6 +321,11 @@ Reading of the numbers:
   opening to the fill value alone.
 - Peak RSS per merged party: ~5 GB (vs ~1.7 GB split) — the MPC witness
   and the SRS-sized FFTs dominate, and both halve with the domain.
+- **Cost per gate is now flat across the two circuits** (2.55 vs
+  2.70 ms). Against the 16 384-gate statement it read 1.78 vs
+  4.14 ms/gate, so the superlinearity in the old numbers came from the
+  larger domain (~10 GB peak RSS), not from collaborative proving
+  itself.
 
 CAVEAT: one run per flavor on a dev SRS with mock Beaver triples. The
 `on-chain anchor wait` rows differ (8 s split vs 6 s merged) only
