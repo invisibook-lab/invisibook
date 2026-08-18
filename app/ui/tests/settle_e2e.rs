@@ -16,8 +16,8 @@
 //!    and the ATOMIC SettlePair (F2) — Bob's order Done, Alice relisted
 //!    in place with a 1-ETH remainder, both payout notes minted together.
 //!
-//! Ignored by default: the two collaborative provers together need ~15 GB
-//! of RAM. Build the prerequisites, then run explicitly:
+//! Ignored by default: it needs a chain, two collaborative provers, and
+//! about 4 GB of RAM. Build the prerequisites, then run explicitly:
 //!
 //! ```text
 //! make build-chain-cozk2p build-settle2p
@@ -255,7 +255,7 @@ async fn leaf_count(client: &ChainClient) -> u64 {
 /// atomic SettlePair. Both traders' `run_settle` run concurrently; the
 /// cross-quantity match drives the relist path (Bob Done, Alice relisted).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs the chain + settle2p_session prover and ~15 GB RAM; run with --ignored --test-threads=1"]
+#[ignore = "needs the chain + settle2p_session prover and ~4 GB RAM; run with --ignored --test-threads=1"]
 async fn settle_e2e_relist() {
     settle_e2e_scenario().await;
 }
