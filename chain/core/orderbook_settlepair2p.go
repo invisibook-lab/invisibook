@@ -19,22 +19,21 @@ import (
 // two paths coexist for benchmarking.
 
 // SettlePairCoZk2pRequest carries the merged settlement of a matched pair.
-// All four residual commitments are ALWAYS present — the merged statement
-// commits the fully filled side's residual to zero — but only the larger
-// side's pair is applied to its order row. `ZkProof` is hex of the
-// ark-compressed PLONK proof both traders revealed.
+// LOCKED-ONLY MODEL: an order commits only its collateral, so each side
+// contributes ONE residual commitment. Both are ALWAYS present — the merged
+// statement commits the fully filled side's residual collateral to zero —
+// but only the larger side's is applied to its order row. `ZkProof` is hex
+// of the ark-compressed PLONK proof both traders revealed.
 type SettlePairCoZk2pRequest struct {
 	OrderAID OrderID `json:"order_a_id" validate:"required"`
 	OrderBID OrderID `json:"order_b_id" validate:"required"`
 	Cmp      int     `json:"cmp"        validate:"oneof=-1 0 1"`
 
-	// MPC-computed output commitments (statement signals 1..6).
+	// MPC-computed output commitments (statement signals 1..4).
 	// cm_note_out_a is the payout note minted TO trader A, and vice versa.
 	CmNoteOutA        string `json:"cm_note_out_a"        validate:"required,len=64"`
 	CmNoteOutB        string `json:"cm_note_out_b"        validate:"required,len=64"`
-	CmQResidualA      string `json:"cm_q_residual_a"      validate:"required,len=64"`
 	CmLockedResidualA string `json:"cm_locked_residual_a" validate:"required,len=64"`
-	CmQResidualB      string `json:"cm_q_residual_b"      validate:"required,len=64"`
 	CmLockedResidualB string `json:"cm_locked_residual_b" validate:"required,len=64"`
 
 	// ed25519 signatures (128-char hex) over the canonical merged settle
@@ -53,23 +52,18 @@ func SettlePairCoZk2pMessage(req *SettlePairCoZk2pRequest) []byte {
 	return settleSigMessage("invisibook-settle-pair-cozk2p-v1",
 		string(req.OrderAID), string(req.OrderBID), strconv.Itoa(req.Cmp),
 		req.CmNoteOutA, req.CmNoteOutB,
-		req.CmQResidualA, req.CmLockedResidualA,
-		req.CmQResidualB, req.CmLockedResidualB)
+		req.CmLockedResidualA, req.CmLockedResidualB)
 }
 
 // settlePair2pPublic mirrors cozk2p's `PairPublic` serde layout
-// (cozk2p/src/relation_pair.rs): the merged 15-signal statement. Field
+// (cozk2p/src/relation_pair.rs): the merged 11-signal statement. Field
 // names and order must stay in lockstep with the Rust struct.
 type settlePair2pPublic struct {
 	Cmp          int    `json:"cmp"`
 	CmNoteOutA   string `json:"cm_note_out_a"`
 	CmNoteOutB   string `json:"cm_note_out_b"`
-	CmQResA      string `json:"cm_q_res_a"`
 	CmLockedResA string `json:"cm_locked_res_a"`
-	CmQResB      string `json:"cm_q_res_b"`
 	CmLockedResB string `json:"cm_locked_res_b"`
-	CmQA         string `json:"cm_q_a"`
-	CmQB         string `json:"cm_q_b"`
 	LockedA      string `json:"locked_a"`
 	LockedB      string `json:"locked_b"`
 	Price        uint64 `json:"price"`
@@ -79,7 +73,7 @@ type settlePair2pPublic struct {
 }
 
 // buildSettlePair2pPublicJSON rebuilds the canonical `PairPublic` JSON:
-// signals 0..6 from the request, 7..14 from on-chain order state. Each
+// signals 0..4 from the request, 5..10 from on-chain order state. Each
 // order's recv asset is the counterparty's lock token.
 func buildSettlePair2pPublicJSON(
 	req *SettlePairCoZk2pRequest, orderA, orderB *Order, price uint64,
@@ -96,12 +90,8 @@ func buildSettlePair2pPublicJSON(
 		Cmp:          req.Cmp,
 		CmNoteOutA:   req.CmNoteOutA,
 		CmNoteOutB:   req.CmNoteOutB,
-		CmQResA:      req.CmQResidualA,
 		CmLockedResA: req.CmLockedResidualA,
-		CmQResB:      req.CmQResidualB,
 		CmLockedResB: req.CmLockedResidualB,
-		CmQA:         string(orderA.Amount),
-		CmQB:         string(orderB.Amount),
 		LockedA:      orderA.LockedCommitment,
 		LockedB:      orderB.LockedCommitment,
 		Price:        price,
@@ -148,9 +138,7 @@ func (ot *OrderBook) executeSettlePairMerged(
 	for what, h := range map[string]string{
 		"cm_note_out_a":        req.CmNoteOutA,
 		"cm_note_out_b":        req.CmNoteOutB,
-		"cm_q_residual_a":      req.CmQResidualA,
 		"cm_locked_residual_a": req.CmLockedResidualA,
-		"cm_q_residual_b":      req.CmQResidualB,
 		"cm_locked_residual_b": req.CmLockedResidualB,
 	} {
 		if _, err := ParseFrHex(h); err != nil {
@@ -194,9 +182,10 @@ func (ot *OrderBook) applyMergedSettlement(
 
 	// The journal stores each leg by its PAYER: CmNoteA is what A's leg
 	// mints (= B's incoming note, cm_note_out_b) and vice versa — the same
-	// orientation as SettlePair's per-leg requests. Residuals are recorded
-	// only for the larger side; the smaller side's zero-commitments are
-	// verified by the proof but never applied to an order row.
+	// orientation as SettlePair's per-leg requests. The residual COLLATERAL
+	// commitment (the only re-commitment in the locked-only model) is
+	// recorded for the larger side only; the smaller side's zero-commitment
+	// is verified by the proof but never applied to an order row.
 	id := settlementID(orderA.ID, orderB.ID)
 	journal := &SettlementJournalScheme{
 		SettlementID: id,
@@ -210,11 +199,9 @@ func (ot *OrderBook) applyMergedSettlement(
 		Height:       height,
 	}
 	if aIsLarge {
-		journal.CmQResidualA = req.CmQResidualA
 		journal.CmLockedResidA = req.CmLockedResidualA
 	}
 	if bIsLarge {
-		journal.CmQResidualB = req.CmQResidualB
 		journal.CmLockedResidB = req.CmLockedResidualB
 	}
 	if err := ot.UpsertSettlementJournal(journal); err != nil {

@@ -153,18 +153,14 @@ pub fn sample_pair_trade() -> (PairSidePrivate, PairSidePrivate, PairStatementIn
     use crate::poseidon::asset_fr;
     let a = PairSidePrivate {
         order_amount: 80,
-        r_order: [0xA1; 32],
         r_locked: [0xA2; 32],
-        r_q_res: [0xA3; 32],
         r_locked_res: [0xA4; 32],
         recv_npk: ark_bn254::Fr::from(0xA5u64),
         r_note: [0xA6; 32],
     };
     let b = PairSidePrivate {
         order_amount: 60,
-        r_order: [0xB1; 32],
         r_locked: [0xB2; 32],
-        r_q_res: [0xB3; 32],
         r_locked_res: [0xB4; 32],
         recv_npk: ark_bn254::Fr::from(0xB5u64),
         r_note: [0xB6; 32],
@@ -181,7 +177,10 @@ pub fn sample_pair_trade() -> (PairSidePrivate, PairSidePrivate, PairStatementIn
 /// Bump when the merged relation changes without moving the gate count.
 /// v1: initial merged statement (15 publics: cmp + payout notes +
 /// residual pairs + order/collateral opens + trade parameters).
-const PAIR_RELATION_VERSION: u32 = 1;
+/// v2: locked-only model — the quantity and residual-quantity commitments
+/// are gone, so the statement is the 11 publics of `relation_pair`, and the
+/// public price/side flag are no longer re-checked in-circuit.
+const PAIR_RELATION_VERSION: u32 = 2;
 
 /// Generate (or load from `cache_dir`) the proving/verifying keys of the
 /// MERGED relation. Same dev-SRS caveats as [`dev_keys`]; the two relations
@@ -190,7 +189,7 @@ const PAIR_RELATION_VERSION: u32 = 1;
 pub fn dev_keys_pair(cache_dir: &Path) -> Result<(ProvingKey<Bn254>, VerifyingKey<Bn254>)> {
     warn_dev_srs_once();
     let (a, b, inputs) = sample_pair_trade();
-    let public = compute_pair_public(&a, &b, &inputs);
+    let public = compute_pair_public(&a, &b, &inputs)?;
     let circuit = build_pair_single_prover_circuit(&a, &b, &public)?;
     let tag = format!(
         "settlepair2p-{}x{}-{:x}-v{}",
@@ -250,7 +249,7 @@ pub fn dev_keys_pair(cache_dir: &Path) -> Result<(ProvingKey<Bn254>, VerifyingKe
 /// Number of constraints in the merged settlement circuit (for reporting).
 pub fn pair_circuit_size() -> Result<usize> {
     let (a, b, inputs) = sample_pair_trade();
-    let public = compute_pair_public(&a, &b, &inputs);
+    let public = compute_pair_public(&a, &b, &inputs)?;
     let circuit = build_pair_single_prover_circuit(&a, &b, &public)?;
     Ok(circuit.num_gates())
 }

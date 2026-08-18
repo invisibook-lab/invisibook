@@ -263,21 +263,20 @@ mod inner {
 
     /// The merged statement as the subprocess emits it (mirrors cozk2p's
     /// `PairPublic` serde). `asset_recv_*` are omitted: the chain rebuilds
-    /// them itself and the app has no use for them.
+    /// them itself and the app has no use for them. Locked-only model: the
+    /// two collateral commitments are the only on-chain opens, and each
+    /// side carries ONE residual commitment (its collateral).
     #[derive(Clone, Deserialize)]
     struct PairPublicWire {
         cmp: i8,
         cm_note_out_a: String,
         cm_note_out_b: String,
-        cm_q_res_a: String,
         cm_locked_res_a: String,
-        cm_q_res_b: String,
         cm_locked_res_b: String,
-        cm_q_a: String,
-        cm_q_b: String,
         locked_a: String,
         locked_b: String,
         price: u64,
+        a_is_seller: bool,
     }
 
     /// The merged session's `need_sig` payload: cmp plus the full public
@@ -531,10 +530,9 @@ mod inner {
         let price = mp;
         let a_is_seller = maker.trade_type == TradeType::Sell;
 
-        let order_a = maker.amount.clone();
-        let order_b = taker.amount.clone();
-        let locked_a = locked_slots(maker)?;
-        let locked_b = locked_slots(taker)?;
+        // Chain-sourced public inputs (all already on the order rows).
+        let locked_a = locked_hex(maker)?;
+        let locked_b = locked_hex(taker)?;
 
         let my_lock_token = lock_token(my_order);
         let my_recv_token = recv_token(my_order);
@@ -550,15 +548,11 @@ mod inner {
             my_recv_token: my_recv_token.clone(),
             price,
             a_is_seller,
-            order_a: order_a.clone(),
-            order_b: order_b.clone(),
-            locked_a,
-            locked_b,
+            locked_a: locked_a.clone(),
+            locked_b: locked_b.clone(),
             my_recv_npk,
             my: MyPrivateWire {
                 order_amount: opening.q,
-                r_order: opening.r_q.clone(),
-                locked_amount: opening.locked_amount,
                 r_locked: opening.r_locked.clone(),
             },
         };
@@ -592,9 +586,10 @@ mod inner {
             taker_id: &taker.id,
             maker_pubkey: &maker.pubkey,
             taker_pubkey: &taker.pubkey,
-            expected_order_a: &order_a,
-            expected_order_b: &order_b,
+            expected_locked_a: &locked_a,
+            expected_locked_b: &locked_b,
             price,
+            a_is_seller,
             my_lock_token: &my_lock_token,
             opening,
             session_dir: &session_dir,
@@ -623,26 +618,13 @@ mod inner {
     /// a stale or divergent chain read must abort before anything is
     /// signed or submitted.
     fn check_merged_public(ctx: &SessionCtx<'_>, p: &PairPublicWire) -> Result<(), SettleError> {
-        // locked_a belongs to the MAKER side; pick expecteds by role.
-        let (locked_a_expected, locked_b_expected) = if ctx.maker_id == ctx.my_order.id {
-            (
-                &ctx.my_order.locked_commitment,
-                &ctx.counter_order.locked_commitment,
-            )
-        } else {
-            (
-                &ctx.counter_order.locked_commitment,
-                &ctx.my_order.locked_commitment,
-            )
-        };
-        if p.cm_q_a != ctx.expected_order_a
-            || p.cm_q_b != ctx.expected_order_b
-            || &p.locked_a != locked_a_expected
-            || &p.locked_b != locked_b_expected
+        if p.locked_a != ctx.expected_locked_a
+            || p.locked_b != ctx.expected_locked_b
             || p.price != ctx.price
+            || p.a_is_seller != ctx.a_is_seller
         {
             return Err(SettleError::Transient(
-                "prover statement does not match on-chain order state".into(),
+                "prover statement does not match the on-chain order rows".into(),
             ));
         }
         Ok(())
@@ -663,9 +645,7 @@ mod inner {
             cmp: p.cmp,
             cm_note_out_a: p.cm_note_out_a.clone(),
             cm_note_out_b: p.cm_note_out_b.clone(),
-            cm_q_residual_a: p.cm_q_res_a.clone(),
             cm_locked_residual_a: p.cm_locked_res_a.clone(),
-            cm_q_residual_b: p.cm_q_res_b.clone(),
             cm_locked_residual_b: p.cm_locked_res_b.clone(),
             sig_a,
             sig_b,
@@ -710,15 +690,16 @@ mod inner {
         }
 
         progress("Confirming settlement on chain...");
-        // My expected relist commitment: the statement's residual for MY
-        // side when I am the larger one, otherwise my order simply closes.
+        // My expected relist commitment: the statement's residual
+        // COLLATERAL for MY side when I am the larger one (the relisted row
+        // carries it — locked-only model), otherwise my order simply closes.
         let i_am_a = ctx.maker_id == ctx.my_order.id;
         let i_am_larger = (ready.cmp == 1) == i_am_a && ready.cmp != 0;
         let expected_residual = if i_am_larger {
             if i_am_a {
-                ready.public.cm_q_res_a.clone()
+                ready.public.cm_locked_res_a.clone()
             } else {
-                ready.public.cm_q_res_b.clone()
+                ready.public.cm_locked_res_b.clone()
             }
         } else {
             String::new()

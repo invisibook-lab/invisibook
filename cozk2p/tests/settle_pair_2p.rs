@@ -20,7 +20,7 @@ fn keys_dir() -> std::path::PathBuf {
 #[test]
 fn pair_single_prover_roundtrip_and_tamper() {
     let (a, b, inputs) = sample_pair_trade();
-    let public = compute_pair_public(&a, &b, &inputs);
+    let public = compute_pair_public(&a, &b, &inputs).unwrap();
 
     let circuit = build_pair_single_prover_circuit(&a, &b, &public).unwrap();
     circuit
@@ -33,7 +33,8 @@ fn pair_single_prover_roundtrip_and_tamper() {
     verify_settle_pair(&vk, &public, &proof).expect("valid proof must verify");
 
     // Tamper with one signal of each class: the claim, a payout note, a
-    // residual, an on-chain open, and a trade parameter.
+    // residual collateral commitment, an on-chain open, a trade parameter,
+    // and a payout asset.
     let mut bad = public.clone();
     bad.cmp = -bad.cmp;
     assert!(verify_settle_pair(&vk, &bad, &proof).is_err(), "cmp");
@@ -43,12 +44,18 @@ fn pair_single_prover_roundtrip_and_tamper() {
     assert!(verify_settle_pair(&vk, &bad, &proof).is_err(), "note A");
 
     let mut bad = public.clone();
-    bad.cm_q_res_a = bad.cm_q_res_b;
-    assert!(verify_settle_pair(&vk, &bad, &proof).is_err(), "residual");
+    bad.cm_locked_res_a = bad.cm_locked_res_b;
+    assert!(
+        verify_settle_pair(&vk, &bad, &proof).is_err(),
+        "residual collateral"
+    );
 
     let mut bad = public.clone();
-    bad.cm_q_a = bad.cm_q_b;
-    assert!(verify_settle_pair(&vk, &bad, &proof).is_err(), "order open");
+    bad.locked_a = bad.locked_b;
+    assert!(
+        verify_settle_pair(&vk, &bad, &proof).is_err(),
+        "collateral open"
+    );
 
     let mut bad = public.clone();
     bad.price += 1;
@@ -57,6 +64,10 @@ fn pair_single_prover_roundtrip_and_tamper() {
     let mut bad = public.clone();
     bad.a_is_seller = !bad.a_is_seller;
     assert!(verify_settle_pair(&vk, &bad, &proof).is_err(), "side flag");
+
+    let mut bad = public.clone();
+    bad.asset_recv_a = bad.asset_recv_b;
+    assert!(verify_settle_pair(&vk, &bad, &proof).is_err(), "recv asset");
 }
 
 /// All three comparison branches (and both side orientations) are
@@ -68,16 +79,16 @@ fn pair_relation_branches() {
     // a < b → cmp = -1, A fully filled, B keeps a residual.
     a.order_amount = 50;
     b.order_amount = 60;
-    let public = compute_pair_public(&a, &b, &inputs);
+    let public = compute_pair_public(&a, &b, &inputs).unwrap();
     assert_eq!(public.cmp, -1);
     build_pair_single_prover_circuit(&a, &b, &public)
         .unwrap()
         .check_circuit_satisfiability(&public.to_vec())
         .unwrap();
 
-    // a == b → cmp = 0, both residuals commit zero.
+    // a == b → cmp = 0, both residual collaterals commit zero.
     a.order_amount = 60;
-    let public = compute_pair_public(&a, &b, &inputs);
+    let public = compute_pair_public(&a, &b, &inputs).unwrap();
     assert_eq!(public.cmp, 0);
     build_pair_single_prover_circuit(&a, &b, &public)
         .unwrap()
@@ -88,7 +99,7 @@ fn pair_relation_branches() {
     inputs.a_is_seller = false;
     a.order_amount = 80;
     b.order_amount = 60;
-    let public = compute_pair_public(&a, &b, &inputs);
+    let public = compute_pair_public(&a, &b, &inputs).unwrap();
     assert_eq!(public.cmp, 1);
     build_pair_single_prover_circuit(&a, &b, &public)
         .unwrap()
@@ -101,7 +112,7 @@ fn pair_relation_branches() {
 #[test]
 fn pair_relation_rejects_wrong_opening() {
     let (a, mut b, inputs) = sample_pair_trade();
-    let public = compute_pair_public(&a, &b, &inputs);
+    let public = compute_pair_public(&a, &b, &inputs).unwrap();
     b.order_amount += 1;
     let circuit = build_pair_single_prover_circuit(&a, &b, &public).unwrap();
     assert!(
@@ -118,7 +129,7 @@ fn pair_relation_rejects_wrong_opening() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pair_collaborative_prove_and_verify() {
     let (a, b, inputs) = sample_pair_trade();
-    let public = compute_pair_public(&a, &b, &inputs);
+    let public = compute_pair_public(&a, &b, &inputs).unwrap();
     let (pk, vk) = dev_keys_pair(&keys_dir()).unwrap();
 
     let (proof0, proof1) = execute_mock_mpc(|fabric| {
@@ -149,7 +160,7 @@ async fn pair_collaborative_prove_and_verify() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pair_validity_gate_aborts_on_invalid_witness() {
     let (a, b, inputs) = sample_pair_trade();
-    let public = compute_pair_public(&a, &b, &inputs);
+    let public = compute_pair_public(&a, &b, &inputs).unwrap();
     let (pk, _vk) = dev_keys_pair(&keys_dir()).unwrap();
 
     let mut b_bad = b.clone();

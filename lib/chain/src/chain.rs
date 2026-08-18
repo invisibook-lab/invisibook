@@ -295,9 +295,10 @@ pub struct SettlePairParams {
 
 /// Mirror of chain Go `SettlePairCoZk2pRequest` — the MERGED settlement:
 /// one collaborative PLONK proof covers the comparison and both settle
-/// legs, so a Matched pair settles in a single writing. All four residual
-/// commitments are always present (the fully filled side's commit to
-/// zero); `zk_proof` is hex of the ark-compressed PLONK proof.
+/// legs, so a Matched pair settles in a single writing. Locked-only model:
+/// each side carries ONE residual commitment (its collateral), and both are
+/// always present — the fully filled side's commits to zero. `zk_proof` is
+/// hex of the ark-compressed PLONK proof.
 #[derive(Debug, Clone, Serialize)]
 pub struct SettlePairCoZk2pParams {
     pub order_a_id: OrderID,
@@ -305,9 +306,7 @@ pub struct SettlePairCoZk2pParams {
     pub cmp: i8,
     pub cm_note_out_a: String,
     pub cm_note_out_b: String,
-    pub cm_q_residual_a: String,
     pub cm_locked_residual_a: String,
-    pub cm_q_residual_b: String,
     pub cm_locked_residual_b: String,
     pub sig_a: String,
     pub sig_b: String,
@@ -328,9 +327,7 @@ pub fn settle_pair_cozk2p_message(params: &SettlePairCoZk2pParams) -> Vec<u8> {
             &cmp,
             &params.cm_note_out_a,
             &params.cm_note_out_b,
-            &params.cm_q_residual_a,
             &params.cm_locked_residual_a,
-            &params.cm_q_residual_b,
             &params.cm_locked_residual_b,
         ],
     )
@@ -1164,9 +1161,7 @@ mod tests {
             cmp: -1,
             cm_note_out_a: "11".repeat(32),
             cm_note_out_b: "22".repeat(32),
-            cm_q_residual_a: "33".repeat(32),
             cm_locked_residual_a: "44".repeat(32),
-            cm_q_residual_b: "55".repeat(32),
             cm_locked_residual_b: "66".repeat(32),
             sig_a: String::new(),
             sig_b: String::new(),
@@ -1181,9 +1176,7 @@ mod tests {
             "-1",
             &"11".repeat(32),
             &"22".repeat(32),
-            &"33".repeat(32),
             &"44".repeat(32),
-            &"55".repeat(32),
             &"66".repeat(32),
         ] {
             expected.extend_from_slice(&(f.len() as u32).to_be_bytes());

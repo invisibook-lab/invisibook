@@ -18,24 +18,20 @@ import (
 // output: a merged-statement proof generated collaboratively by two
 // in-process SPDZ parties.
 type settlePair2pFixture struct {
-	Cmp                 int             `json:"cmp"`
-	OrderACommitmentHex string          `json:"order_a_commitment_hex"`
-	OrderBCommitmentHex string          `json:"order_b_commitment_hex"`
-	LockedAHex          string          `json:"locked_a_hex"`
-	LockedBHex          string          `json:"locked_b_hex"`
-	CmNoteOutAHex       string          `json:"cm_note_out_a_hex"`
-	CmNoteOutBHex       string          `json:"cm_note_out_b_hex"`
-	CmQResAHex          string          `json:"cm_q_res_a_hex"`
-	CmLockedResAHex     string          `json:"cm_locked_res_a_hex"`
-	CmQResBHex          string          `json:"cm_q_res_b_hex"`
-	CmLockedResBHex     string          `json:"cm_locked_res_b_hex"`
-	Price               uint64          `json:"price"`
-	AIsSeller           bool            `json:"a_is_seller"`
-	TokenRecvA          string          `json:"token_recv_a"`
-	TokenRecvB          string          `json:"token_recv_b"`
-	ProofHex            string          `json:"proof_hex"`
-	Public              json.RawMessage `json:"public"`
-	VKPath              string          `json:"vk_path"`
+	Cmp             int             `json:"cmp"`
+	LockedAHex      string          `json:"locked_a_hex"`
+	LockedBHex      string          `json:"locked_b_hex"`
+	CmNoteOutAHex   string          `json:"cm_note_out_a_hex"`
+	CmNoteOutBHex   string          `json:"cm_note_out_b_hex"`
+	CmLockedResAHex string          `json:"cm_locked_res_a_hex"`
+	CmLockedResBHex string          `json:"cm_locked_res_b_hex"`
+	Price           uint64          `json:"price"`
+	AIsSeller       bool            `json:"a_is_seller"`
+	TokenRecvA      string          `json:"token_recv_a"`
+	TokenRecvB      string          `json:"token_recv_b"`
+	ProofHex        string          `json:"proof_hex"`
+	Public          json.RawMessage `json:"public"`
+	VKPath          string          `json:"vk_path"`
 }
 
 func loadSettlePair2pFixture(t *testing.T) settlePair2pFixture {
@@ -68,12 +64,8 @@ func rebuiltPair2pPublic(t *testing.T, fx settlePair2pFixture) settlePair2pPubli
 		Cmp:          fx.Cmp,
 		CmNoteOutA:   fx.CmNoteOutAHex,
 		CmNoteOutB:   fx.CmNoteOutBHex,
-		CmQResA:      fx.CmQResAHex,
 		CmLockedResA: fx.CmLockedResAHex,
-		CmQResB:      fx.CmQResBHex,
 		CmLockedResB: fx.CmLockedResBHex,
-		CmQA:         fx.OrderACommitmentHex,
-		CmQB:         fx.OrderBCommitmentHex,
 		LockedA:      fx.LockedAHex,
 		LockedB:      fx.LockedBHex,
 		Price:        fx.Price,
@@ -110,15 +102,14 @@ func TestSettlePair2pMessageDomainSeparation(t *testing.T) {
 	merged := SettlePairCoZk2pMessage(&SettlePairCoZk2pRequest{
 		OrderAID: "order-a", OrderBID: "order-b", Cmp: 1,
 		CmNoteOutA: "00", CmNoteOutB: "00",
-		CmQResidualA: "00", CmLockedResidualA: "00",
-		CmQResidualB: "00", CmLockedResidualB: "00",
+		CmLockedResidualA: "00", CmLockedResidualB: "00",
 	})
 	compare := CoZk2pCompareMessage(&CompareRequest{
 		OrderAID: "order-a", OrderBID: "order-b", Cmp: 1,
 	})
 	large := SettleLargeSigMessage(&SettleLargeRequest{
 		OrderID: "order-a", MatchOrderID: "order-b",
-		CmQResidual: "00", CmLockedResidual: "00", CmNoteOut: "00",
+		CmLockedResidual: "00", CmNoteOut: "00",
 	})
 	if bytes.Equal(merged, compare) || bytes.Equal(merged, large) {
 		t.Fatal("the merged settle message must be domain-separated")
@@ -171,7 +162,6 @@ func newMergedFixture(t *testing.T) *mergedFixture {
 			Type:             typ,
 			Subject:          pair,
 			Price:            price,
-			Amount:           CipherText(canonicalTestHex(byte(id[7]))),
 			Pubkey:           hex.EncodeToString(pub),
 			LockedCommitment: canonicalTestHex(byte(id[7]) + 1),
 			BlockHeight:      height,
@@ -190,9 +180,7 @@ func newMergedFixture(t *testing.T) *mergedFixture {
 		OrderAID: orderA, OrderBID: orderB, Cmp: 1,
 		CmNoteOutA:        canonicalTestHex(0x21),
 		CmNoteOutB:        canonicalTestHex(0x22),
-		CmQResidualA:      canonicalTestHex(0x23),
 		CmLockedResidualA: canonicalTestHex(0x24),
-		CmQResidualB:      canonicalTestHex(0x25),
 		CmLockedResidualB: canonicalTestHex(0x26),
 		ZkProof:           "00", // skipped: no VK loaded
 	}
@@ -228,7 +216,8 @@ func TestSettlePair2pPipeline(t *testing.T) {
 		}
 	}
 
-	// B (smaller) closed; A (larger) relisted in place with residuals.
+	// B (smaller) closed; A (larger) relisted in place with its residual
+	// collateral commitment.
 	b, err := fx.ot.GetOrder(fx.orderB)
 	if err != nil || b.Status != Done {
 		t.Fatalf("order B: status %v err %v, want Done", b.Status, err)
@@ -240,8 +229,8 @@ func TestSettlePair2pPipeline(t *testing.T) {
 	if a.Status != Pending || a.MatchOrder != "" {
 		t.Fatalf("order A not relisted: status %v match %q", a.Status, a.MatchOrder)
 	}
-	if string(a.Amount) != fx.req.CmQResidualA || a.LockedCommitment != fx.req.CmLockedResidualA {
-		t.Fatalf("order A residuals not applied: amount %s locked %s", a.Amount, a.LockedCommitment)
+	if a.LockedCommitment != fx.req.CmLockedResidualA {
+		t.Fatalf("order A residual collateral not applied: locked %s", a.LockedCommitment)
 	}
 
 	// Replay: the pair is no longer Matched.
@@ -282,7 +271,7 @@ func TestSettlePair2pCrashRetry(t *testing.T) {
 		t.Fatalf("retry double-minted: pool %d, want %d", got, before+2)
 	}
 	a, _ = fx.ot.GetOrder(fx.orderA)
-	if a.Status != Pending || string(a.Amount) != fx.req.CmQResidualA {
-		t.Fatalf("retry did not complete the relist: status %v amount %s", a.Status, a.Amount)
+	if a.Status != Pending || a.LockedCommitment != fx.req.CmLockedResidualA {
+		t.Fatalf("retry did not complete the relist: status %v locked %s", a.Status, a.LockedCommitment)
 	}
 }

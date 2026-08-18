@@ -73,56 +73,61 @@ census(
     "settle_cozk",
     HDR_CMP,
     """    signal input cmp;
-    signal input order_a_commitment;
-    signal input order_b_commitment;
-    signal input a;
+    signal input locked_a;
+    signal input locked_b;
+    signal input price;
+    signal input a_is_seller;
+
+    signal input q_a;
     signal input r_a;
-    signal input b;
+    signal input q_b;
     signal input r_b;
 """,
     [
-        ("1 [RANGE(a)] + [RANGE(b)] (Num2Bits(64) x2)", """
+        ("1 [RANGE(q_a)] + [RANGE(q_b)] (Num2Bits(64) x2)", """
     component a_range = Num2Bits(64);
-    a_range.in <== a;
+    a_range.in <== q_a;
     component b_range = Num2Bits(64);
-    b_range.in <== b;
+    b_range.in <== q_b;
 """),
-        ("2 [OPEN(order_a_commitment; a, r_a)]", """
-    signal ha <== Poseidon(2)([a, r_a]);
-    ha === order_a_commitment;
+        ("2 needed_a equation + [OPEN(locked_a; needed_a, r_a)]", """
+    signal qa_price <== q_a * price;
+    signal needed_a <== qa_price + a_is_seller * (q_a - qa_price);
+    signal ha <== Poseidon(2)([needed_a, r_a]);
+    ha === locked_a;
 """),
-        ("3 [OPEN(order_b_commitment; b, r_b)]", """
-    signal hb <== Poseidon(2)([b, r_b]);
-    hb === order_b_commitment;
+        ("3 needed_b equation (opposite side) + [OPEN(locked_b; ...)]", """
+    signal b_is_seller <== 1 - a_is_seller;
+    signal qb_price <== q_b * price;
+    signal needed_b <== qb_price + b_is_seller * (q_b - qb_price);
+    signal hb <== Poseidon(2)([needed_b, r_b]);
+    hb === locked_b;
 """),
-        ("4 cmp = (b<a) - (a<b) via LessThan(64) x2", """
+        ("4 cmp = (q_b<q_a) - (q_a<q_b) via LessThan(64) x2", """
     component lt = LessThan(64);
-    lt.in[0] <== a;
-    lt.in[1] <== b;
+    lt.in[0] <== q_a;
+    lt.in[1] <== q_b;
     component gt = LessThan(64);
-    gt.in[0] <== b;
-    gt.in[1] <== a;
+    gt.in[0] <== q_b;
+    gt.in[1] <== q_a;
     cmp === gt.out - lt.out;
 """),
     ],
-    "component main {public [cmp, order_a_commitment, order_b_commitment]} = T();",
+    "component main {public [cmp, locked_a, locked_b, price, a_is_seller]} = T();",
 )
 
 census(
     "settle_small",
     HDR_NOTE,
-    """    signal input cm_q;
-    signal input locked_0;
-    signal input locked_1;
+    """    signal input locked;
     signal input price;
     signal input side;
     signal input pay_asset;
     signal input cm_note_out;
     signal input bind;
+
     signal input q;
-    signal input r_q;
-    signal input locked_v[2];
-    signal input locked_r[2];
+    signal input r_locked;
     signal input npk_ctr;
     signal input r_note;
 """,
@@ -130,68 +135,50 @@ census(
         ("1 side boolean", """
     side * (1 - side) === 0;
 """),
-        ("2 [RANGE(q)] + [OPEN(cm_q; q, r_q)]", """
+        ("2 [RANGE(q)] + [RANGE(price)] (Num2Bits(64) x2)", """
     component q_range = Num2Bits(64);
     q_range.in <== q;
-    signal cm_q_check <== Poseidon(2)([q, r_q]);
-    cm_q_check === cm_q;
-"""),
-        ("3 collateral slots: [RANGE] x2 + [OPEN] x2", """
-    component v_range[2];
-    signal locked_check[2];
-    for (var i = 0; i < 2; i++) {
-        v_range[i] = Num2Bits(64);
-        v_range[i].in <== locked_v[i];
-    }
-    locked_check[0] <== Poseidon(2)([locked_v[0], locked_r[0]]);
-    locked_check[0] === locked_0;
-    locked_check[1] <== Poseidon(2)([locked_v[1], locked_r[1]]);
-    locked_check[1] === locked_1;
-    signal locked_sum <== locked_v[0] + locked_v[1];
-"""),
-        ("4 [RANGE(price)] + collateral equation", """
     component price_range = Num2Bits(64);
     price_range.in <== price;
-    signal q_price <== q * price;
-    locked_sum === q_price + side * (q - q_price);
 """),
-        ("5 payout NoteCommit === cm_note_out", """
+        ("3 needed equation + [OPEN(locked; needed, r_locked)]", """
+    signal q_price <== q * price;
+    signal needed <== q_price + side * (q - q_price);
+    signal locked_check <== Poseidon(2)([needed, r_locked]);
+    locked_check === locked;
+"""),
+        ("4 payout NoteCommit(needed) === cm_note_out", """
     component note = NoteCommit();
     note.npk <== npk_ctr;
     note.asset <== pay_asset;
-    note.v <== locked_sum;
+    note.v <== needed;
     note.r <== r_note;
     note.cm === cm_note_out;
 """),
-        ("6 [BIND] keep-alive", """
+        ("5 [BIND] keep-alive", """
     signal bind_sq <== bind * bind;
 """),
     ],
-    "component main {public [cm_q, locked_0, locked_1, price, side, pay_asset, cm_note_out, bind]} = T();",
+    "component main {public [locked, price, side, pay_asset, cm_note_out, bind]} = T();",
 )
 
 census(
     "settle_large",
     HDR_NOTE,
-    """    signal input cm_q;
-    signal input cm_q_ctr;
-    signal input locked_0;
-    signal input locked_1;
+    """    signal input locked;
+    signal input locked_ctr;
     signal input price;
     signal input side;
-    signal input cm_q_residual;
     signal input cm_locked_residual;
     signal input pay_asset;
     signal input cm_note_out;
     signal input bind;
+
     signal input q;
-    signal input r_q;
+    signal input r_locked;
     signal input q_ctr;
-    signal input r_q_ctr;
-    signal input locked_v[2];
-    signal input locked_r[2];
-    signal input r_q_residual;
-    signal input r_locked_residual;
+    signal input r_locked_ctr;
+    signal input r_locked_res;
     signal input npk_ctr;
     signal input r_note;
 """,
@@ -199,52 +186,40 @@ census(
         ("1 side boolean", """
     side * (1 - side) === 0;
 """),
-        ("2 [RANGE(q)] + [RANGE(q_ctr)]", """
+        ("2 [RANGE(q)] + [RANGE(q_ctr)] + [RANGE(price)]", """
     component q_range = Num2Bits(64);
     q_range.in <== q;
     component q_ctr_range = Num2Bits(64);
     q_ctr_range.in <== q_ctr;
+    component price_range = Num2Bits(64);
+    price_range.in <== price;
 """),
-        ("3 [OPEN(cm_q)] + [OPEN(cm_q_ctr)]", """
-    signal cm_q_check <== Poseidon(2)([q, r_q]);
-    cm_q_check === cm_q;
-    signal cm_ctr_check <== Poseidon(2)([q_ctr, r_q_ctr]);
-    cm_ctr_check === cm_q_ctr;
+        ("3 needed(q, side) + [OPEN(locked; needed, r_locked)]", """
+    signal q_price <== q * price;
+    signal needed <== q_price + side * (q - q_price);
+    signal locked_check <== Poseidon(2)([needed, r_locked]);
+    locked_check === locked;
 """),
-        ("4 q_res = q - q_ctr + [RANGE(q_res)] + [OPEN(cm_q_residual)]", """
+        ("4 needed(q_ctr, 1-side) + [OPEN(locked_ctr; ...)]", """
+    signal ctr_side <== 1 - side;
+    signal q_ctr_price <== q_ctr * price;
+    signal needed_ctr <== q_ctr_price + ctr_side * (q_ctr - q_ctr_price);
+    signal ctr_check <== Poseidon(2)([needed_ctr, r_locked_ctr]);
+    ctr_check === locked_ctr;
+"""),
+        ("5 q_res = q - q_ctr + [RANGE(q_res)]", """
     signal q_res <== q - q_ctr;
     component res_range = Num2Bits(64);
     res_range.in <== q_res;
-    signal cm_res_check <== Poseidon(2)([q_res, r_q_residual]);
-    cm_res_check === cm_q_residual;
 """),
-        ("5 collateral slots: [RANGE] x2 + [OPEN] x2", """
-    component v_range[2];
-    signal locked_check[2];
-    for (var i = 0; i < 2; i++) {
-        v_range[i] = Num2Bits(64);
-        v_range[i].in <== locked_v[i];
-    }
-    locked_check[0] <== Poseidon(2)([locked_v[0], locked_r[0]]);
-    locked_check[0] === locked_0;
-    locked_check[1] <== Poseidon(2)([locked_v[1], locked_r[1]]);
-    locked_check[1] === locked_1;
-    signal locked_sum <== locked_v[0] + locked_v[1];
-"""),
-        ("6 [RANGE(price)] + collateral equation", """
-    component price_range = Num2Bits(64);
-    price_range.in <== price;
-    signal q_price <== q * price;
-    locked_sum === q_price + side * (q - q_price);
-"""),
-        ("7 residual collateral + [OPEN(cm_locked_residual)]", """
+        ("6 residual collateral + [OPEN(cm_locked_residual; ...)]", """
     signal res_price <== q_res * price;
     signal locked_res <== res_price + side * (q_res - res_price);
-    signal cm_locked_res_check <== Poseidon(2)([locked_res, r_locked_residual]);
-    cm_locked_res_check === cm_locked_residual;
+    signal res_check <== Poseidon(2)([locked_res, r_locked_res]);
+    res_check === cm_locked_residual;
 """),
-        ("8 fill + payout NoteCommit === cm_note_out", """
-    signal fill <== locked_sum - locked_res;
+        ("7 fill = needed - locked_res + payout NoteCommit", """
+    signal fill <== needed - locked_res;
     component note = NoteCommit();
     note.npk <== npk_ctr;
     note.asset <== pay_asset;
@@ -252,9 +227,9 @@ census(
     note.r <== r_note;
     note.cm === cm_note_out;
 """),
-        ("9 [BIND] keep-alive", """
+        ("8 [BIND] keep-alive", """
     signal bind_sq <== bind * bind;
 """),
     ],
-    "component main {public [cm_q, cm_q_ctr, locked_0, locked_1, price, side, cm_q_residual, cm_locked_residual, pay_asset, cm_note_out, bind]} = T();",
+    "component main {public [locked, locked_ctr, price, side, cm_locked_residual, pay_asset, cm_note_out, bind]} = T();",
 )
