@@ -177,19 +177,27 @@ pub fn note_deposit_bind(
     ])
 }
 
-/// Bind for a SendOrder v2 request (Go: `core.sendOrderBind`). The order
+/// Bind for a SendOrder v4 request (Go: `core.sendOrderBind`). The order
 /// id, nullifiers, and the two output commitments weld the proof to the
 /// exact signed request (locked-only model: no quantity commitment).
 #[allow(clippy::too_many_arguments)]
 pub fn send_order_bind(
     chain_id: u64,
     order_id: &str,
+    kind: u8,
+    trade_type: u8,
+    token1: &str,
+    token2: &str,
+    collateral_price: u64,
     lock_token: &str,
-    nf0_hex: &str,
-    nf1_hex: &str,
+    coll_nf0_hex: &str,
+    coll_nf1_hex: &str,
+    fee_nf0_hex: &str,
+    fee_nf1_hex: &str,
     locked_commitment_hex: &str,
     fee: u64,
-    cm_change_hex: &str,
+    cm_coll_change_hex: &str,
+    cm_fee_change_hex: &str,
 ) -> Fr {
     bind_hash(&[
         BIND_DOMAIN.as_bytes(),
@@ -197,12 +205,20 @@ pub fn send_order_bind(
         b"send_order",
         &BIND_VERSION.to_be_bytes(),
         order_id.as_bytes(),
+        &[kind],
+        &[trade_type],
+        token1.as_bytes(),
+        token2.as_bytes(),
+        &collateral_price.to_be_bytes(),
         lock_token.as_bytes(),
-        nf0_hex.as_bytes(),
-        nf1_hex.as_bytes(),
+        coll_nf0_hex.as_bytes(),
+        coll_nf1_hex.as_bytes(),
+        fee_nf0_hex.as_bytes(),
+        fee_nf1_hex.as_bytes(),
         locked_commitment_hex.as_bytes(),
         &fee.to_be_bytes(),
-        cm_change_hex.as_bytes(),
+        cm_coll_change_hex.as_bytes(),
+        cm_fee_change_hex.as_bytes(),
     ])
 }
 
@@ -235,6 +251,7 @@ pub fn settle_small_bind(
     order_id: &str,
     match_order_id: &str,
     cm_note_out_hex: &str,
+    cm_refund_out_hex: &str,
 ) -> Fr {
     bind_hash(&[
         BIND_DOMAIN.as_bytes(),
@@ -244,6 +261,7 @@ pub fn settle_small_bind(
         order_id.as_bytes(),
         match_order_id.as_bytes(),
         cm_note_out_hex.as_bytes(),
+        cm_refund_out_hex.as_bytes(),
     ])
 }
 
@@ -255,6 +273,7 @@ pub fn settle_large_bind(
     match_order_id: &str,
     cm_locked_residual_hex: &str,
     cm_note_out_hex: &str,
+    cm_refund_out_hex: &str,
 ) -> Fr {
     bind_hash(&[
         BIND_DOMAIN.as_bytes(),
@@ -265,6 +284,7 @@ pub fn settle_large_bind(
         match_order_id.as_bytes(),
         cm_locked_residual_hex.as_bytes(),
         cm_note_out_hex.as_bytes(),
+        cm_refund_out_hex.as_bytes(),
     ])
 }
 

@@ -22,6 +22,7 @@ use std::{
     process::{Child, Command, Stdio},
     time::Instant,
 };
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 use anyhow::{Context, Result, ensure};
 use ark_mpc::{PARTY0, test_helpers::execute_mock_mpc};
@@ -83,17 +84,19 @@ fn commit_hex(amount: u64, random: &[u8; 32]) -> String {
 fn build_session_inputs(
     a: &SidePrivate,
     b: &SidePrivate,
-    price: u64,
+    price_a: u64,
+    price_b: u64,
+    execution_price: u64,
     a_is_seller: bool,
 ) -> (SessionInput, SessionInput) {
     // Locked-only model: each order's single on-chain commitment is
     // P2(needed(q, side), r_locked) — the same equation the relation and
     // the session use.
-    let collateral = |amt: u64, is_seller: bool| {
+    let collateral = |amt: u64, price: u64, is_seller: bool| {
         needed_collateral(amt, price, is_seller).expect("sample collateral fits u64")
     };
-    let locked_amt_a = collateral(a.order_amount, a_is_seller);
-    let locked_amt_b = collateral(b.order_amount, !a_is_seller);
+    let locked_amt_a = collateral(a.order_amount, price_a, a_is_seller);
+    let locked_amt_b = collateral(b.order_amount, price_b, !a_is_seller);
     let locked_a = commit_hex(locked_amt_a, &a.r_locked);
     let locked_b = commit_hex(locked_amt_b, &b.r_locked);
     let my_priv = |s: &SidePrivate| MyPrivate {
@@ -102,6 +105,10 @@ fn build_session_inputs(
     };
     // Fresh npk per side: any in-range field element works for the bench.
     let npk_hex = |seed: u8| fr_to_hex(&commit(seed as u64, &[seed; 32]));
+    let secret_a = StaticSecret::from([0x31u8; 32]);
+    let secret_b = StaticSecret::from([0x32u8; 32]);
+    let public_a = X25519PublicKey::from(&secret_a);
+    let public_b = X25519PublicKey::from(&secret_b);
     // Seller locks/receives token1/token2; the buyer is the opposite leg.
     let (a_lock, a_recv) = if a_is_seller {
         ("ETH", "USDT")
@@ -116,11 +123,24 @@ fn build_session_inputs(
             my_order_id: my_id.into(),
             my_lock_token: lock.into(),
             my_recv_token: recv.into(),
-            price,
+            price_a,
+            price_b,
+            execution_price,
             a_is_seller,
             locked_a: locked_a.clone(),
             locked_b: locked_b.clone(),
             my_recv_npk: npk,
+            my_refund_npk: npk_hex(if role == "trader-a" { 0x61 } else { 0x62 }),
+            transport_secret: hex::encode(if role == "trader-a" {
+                secret_a.to_bytes()
+            } else {
+                secret_b.to_bytes()
+            }),
+            peer_transport_pubkey: hex::encode(if role == "trader-a" {
+                public_b.as_bytes()
+            } else {
+                public_a.as_bytes()
+            }),
             my,
         }
     };
@@ -194,8 +214,8 @@ fn mean(xs: &[f64]) -> f64 {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let (a, b, price, a_is_seller) = sample_trade();
-    let public = compute_public(&a, &b, price, a_is_seller)?;
+    let (a, b, price_a, price_b, a_is_seller) = sample_trade();
+    let public = compute_public(&a, &b, price_a, price_b, a_is_seller)?;
 
     println!("=== setup (cached after first run) ===");
     let t = Instant::now();
@@ -249,7 +269,9 @@ async fn main() -> Result<()> {
     // collaborative prove. `total` therefore includes the compare/reveal
     // overhead the pure-prove numbers omitted.
     println!("=== co-zk 2-party FULL session, in-process (mock network) ===");
-    let (input_a, input_b) = build_session_inputs(&a, &b, price, a_is_seller);
+    let execution_price = if a_is_seller { price_a } else { price_b };
+    let (input_a, input_b) =
+        build_session_inputs(&a, &b, price_a, price_b, execution_price, a_is_seller);
     let session_tmp = std::env::temp_dir().join(format!("bench_settle2p_{}", std::process::id()));
     fs::create_dir_all(&session_tmp)?;
     let mut mock_runs = Vec::new();
@@ -295,6 +317,7 @@ async fn main() -> Result<()> {
                 let leg = SettleLeg {
                     is_a: i_am_a,
                     cm_note_out: result.my.recv_commitment.clone(),
+                    cm_refund_out: result.my.refund_commitment.clone(),
                     signature: DUMMY_SIG.to_string(),
                     zk_proof: "x".repeat(800),
                     cm_locked_residual: result.my.new_locked_commitment.clone(),
@@ -418,6 +441,7 @@ async fn main() -> Result<()> {
                 let leg = json!({"settle_leg": {
                     "is_a": role == "trader-a",
                     "cm_note_out": "11".repeat(32),
+                    "cm_refund_out": "12".repeat(32),
                     "signature": DUMMY_SIG,
                     "zk_proof": "x".repeat(800),
                     "cm_locked_residual": "",
@@ -458,7 +482,7 @@ async fn main() -> Result<()> {
 
     let report = json!({
         "circuit_gates": gates,
-        "public_signals": 5,
+        "public_signals": public.to_vec().len(),
         "proof_size_bytes": {
             "compressed": proof_compressed,
             "uncompressed": proof_uncompressed,

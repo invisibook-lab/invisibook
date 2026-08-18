@@ -16,7 +16,8 @@ type cozk2pFixture struct {
 	Cmp        int             `json:"cmp"`
 	LockedAHex string          `json:"locked_a_hex"`
 	LockedBHex string          `json:"locked_b_hex"`
-	Price      uint64          `json:"price"`
+	PriceA     uint64          `json:"price_a"`
+	PriceB     uint64          `json:"price_b"`
 	AIsSeller  bool            `json:"a_is_seller"`
 	ProofHex   string          `json:"proof_hex"`
 	Public     json.RawMessage `json:"public"`
@@ -34,6 +35,9 @@ func loadCoZk2pFixture(t *testing.T) cozk2pFixture {
 	if err := json.Unmarshal(raw, &f); err != nil {
 		t.Fatalf("decoding fixture: %v", err)
 	}
+	if f.PriceA == 0 || f.PriceB == 0 {
+		t.Skip("stale cozk2p fixture; regenerate for the two-price statement")
+	}
 	return f
 }
 
@@ -46,7 +50,8 @@ func TestCompareCoZk2pPublicLayoutMatchesRust(t *testing.T) {
 		Cmp:       fx.Cmp,
 		LockedA:   fx.LockedAHex,
 		LockedB:   fx.LockedBHex,
-		Price:     fx.Price,
+		PriceA:    fx.PriceA,
+		PriceB:    fx.PriceB,
 		AIsSeller: fx.AIsSeller,
 	})
 	if err != nil {

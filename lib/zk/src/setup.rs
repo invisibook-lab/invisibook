@@ -6,7 +6,7 @@
 //! ceremony coordination.
 
 use std::{
-    fs::create_dir_all,
+    fs::{create_dir_all, remove_file, rename},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -64,7 +64,7 @@ pub fn dev_setup_snarkjs(circuit_name: &str) -> Result<DevSetup> {
         });
     }
 
-    let ptau = ensure_dev_ptau(&circuit_dir)?;
+    let ptau = ensure_dev_ptau(&circuit_dir, DEV_PTAU_POWER)?;
 
     // groth16 setup: r1cs + ptau → zkey
     snarkjs(&[
@@ -95,57 +95,66 @@ pub fn dev_setup_snarkjs(circuit_name: &str) -> Result<DevSetup> {
     })
 }
 
-/// log2 of the dev Powers-of-Tau constraint capacity. 2^15 = 32768 covers
-/// the depth-20 spend circuits (~14k constraints); bump when a circuit
-/// outgrows it. Regenerate by deleting `lib/target/circuit-build/_ptau/`.
+/// The largest current O2 circuit is dual-asset send_order at 31,799
+/// constraints, just under the 2^15 ceremony capacity.
 const DEV_PTAU_POWER: &str = "15";
 
-/// Generate a Powers of Tau file with 2^DEV_PTAU_POWER constraint capacity
-/// and cache it under `lib/target/circuit-build/_ptau/`. Reused across all
-/// dev setups.
-fn ensure_dev_ptau(circuit_dir: &Path) -> Result<PathBuf> {
+/// Generate a Powers of Tau file with `2^power` constraint capacity and
+/// cache it under `lib/target/circuit-build/_ptau/`.
+fn ensure_dev_ptau(circuit_dir: &Path, power: &str) -> Result<PathBuf> {
     let ptau_dir = circuit_dir
         .parent()
         .context("circuit dir has no parent")?
         .join("_ptau");
     create_dir_all(&ptau_dir)?;
-    let final_ptau = ptau_dir.join(format!("pot{DEV_PTAU_POWER}_final.ptau"));
+    let final_ptau = ptau_dir.join(format!("pot{power}_final.ptau"));
     if final_ptau.exists() {
         return Ok(final_ptau);
     }
 
     // 1) new — empty ceremony at curve bn128
-    let p0 = ptau_dir.join(format!("pot{DEV_PTAU_POWER}_0000.ptau"));
-    snarkjs(&[
-        "powersoftau",
-        "new",
-        "bn128",
-        DEV_PTAU_POWER,
-        p0.to_str().unwrap(),
-        "-v",
-    ])?;
+    let p0 = ptau_dir.join(format!("pot{power}_0000.ptau"));
+    if !p0.exists() {
+        snarkjs(&[
+            "powersoftau",
+            "new",
+            "bn128",
+            power,
+            p0.to_str().unwrap(),
+            "-v",
+        ])?;
+    }
 
     // 2) contribute — single (insecure) entropy injection
-    let p1 = ptau_dir.join(format!("pot{DEV_PTAU_POWER}_0001.ptau"));
-    snarkjs(&[
-        "powersoftau",
-        "contribute",
-        p0.to_str().unwrap(),
-        p1.to_str().unwrap(),
-        "--name=dev",
-        "-v",
-        "-e=invisibook-dev-only",
-    ])?;
+    let p1 = ptau_dir.join(format!("pot{power}_0001.ptau"));
+    if !p1.exists() {
+        snarkjs(&[
+            "powersoftau",
+            "contribute",
+            p0.to_str().unwrap(),
+            p1.to_str().unwrap(),
+            "--name=dev",
+            "-v",
+            "-e=invisibook-dev-only",
+        ])?;
+    }
 
-    // 3) prepare phase 2 — must run before any circuit-specific groth16 setup
+    // 3) prepare phase 2 — write to a temporary path and rename only after
+    // snarkjs exits successfully. An interrupted test must never leave a
+    // truncated file that a later run mistakes for a valid cache hit.
+    let temporary = ptau_dir.join(format!("pot{power}_final.ptau.tmp"));
+    if temporary.exists() {
+        remove_file(&temporary)?;
+    }
     snarkjs(&[
         "powersoftau",
         "prepare",
         "phase2",
         p1.to_str().unwrap(),
-        final_ptau.to_str().unwrap(),
+        temporary.to_str().unwrap(),
         "-v",
     ])?;
+    rename(&temporary, &final_ptau)?;
 
     Ok(final_ptau)
 }

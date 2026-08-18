@@ -36,11 +36,11 @@ fn alloc(cs: &mut PlonkCircuit<ark_bn254::Fr>, vals: Vec<ark_bn254::Fr>) -> Vec<
         .collect()
 }
 
-/// π_cmp: the compare-only relation (5 publics, locked-only model).
+/// π_cmp: the compare-only relation (6 publics, locked-only model).
 #[test]
 fn census_compare_relation() {
-    let (a, b, price, a_is_seller) = sample_trade();
-    let public = compute_public(&a, &b, price, a_is_seller).unwrap();
+    let (a, b, price_a, price_b, a_is_seller) = sample_trade();
+    let public = compute_public(&a, &b, price_a, price_b, a_is_seller).unwrap();
 
     let mut cs = PlonkCircuit::<ark_bn254::Fr>::new_turbo_plonk();
     let pub_vars: Vec<Variable> = public
@@ -52,8 +52,9 @@ fn census_compare_relation() {
         cmp: pub_vars[0],
         locked_a: pub_vars[1],
         locked_b: pub_vars[2],
-        price: pub_vars[3],
-        a_is_seller: pub_vars[4],
+        price_a: pub_vars[3],
+        price_b: pub_vars[4],
+        a_is_seller: pub_vars[5],
     };
     let a_vars = alloc(&mut cs, side_private_values(&a));
     let b_vars = alloc(&mut cs, side_private_values(&b));

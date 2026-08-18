@@ -84,13 +84,17 @@ def rq1(args):
     mock = raw.get("cozk2p_mock_inprocess", [])
     mock_phase = lambda key: stats([r.get(key, 0.0) for r in mock])
 
-    quic = raw.get("cozk2p_quic_2process", [])
-    # One record per party per run: both traders run the same protocol.
-    parties = [p for run in quic for p in run.get("per_party", [])]
-    quic_phase = lambda key: stats([p.get(key, 0.0) for p in parties])
+    quic = [run for run in raw.get("cozk2p_quic_2process", []) if run.get("per_party")]
+    parties = [p for run in quic for p in run["per_party"]]
 
-    # The cryptographic total of one session: build + prove + open + verify.
-    def crypto_total(rec):
+    # Keep the session, rather than each of its two correlated traders, as the
+    # unit of analysis. A phase completes when the slower trader completes it.
+    quic_phase = lambda key: stats(
+        [max(p.get(key, 0.0) for p in run["per_party"]) for run in quic]
+    )
+
+    # The proof core excludes the surrounding MPC comparison/session steps.
+    def proof_core(rec):
         return (
             rec.get("build_ms", 0.0)
             + rec.get("prove_ms", 0.0)
@@ -98,8 +102,12 @@ def rq1(args):
             + rec.get("verify_ms", 0.0)
         )
 
-    mock_total = stats([crypto_total(r) for r in mock])
-    quic_total = stats([crypto_total(p) for p in parties])
+    mock_proof_core = stats([proof_core(r) for r in mock])
+    mock_total = stats([r.get("total_ms", 0.0) for r in mock])
+    quic_proof_core = stats(
+        [max(proof_core(p) for p in run["per_party"]) for run in quic]
+    )
+    quic_total = stats([run.get("total_ms", 0.0) for run in quic])
     single_total = stats(
         [p + v for p, v in zip(single_prove, single_verify)]
     )
@@ -126,6 +134,7 @@ def rq1(args):
             "open_ms": mock_phase("open_ms"),
             "verify_ms": mock_phase("verify_ms"),
             "session_overhead_ms": mock_phase("session_overhead_ms"),
+            "proof_core_ms": mock_proof_core,
             "total_ms": mock_total,
         },
         "two_party_quic": {
@@ -133,8 +142,8 @@ def rq1(args):
             "prove_ms": quic_phase("prove_ms"),
             "open_ms": quic_phase("open_ms"),
             "verify_ms": quic_phase("verify_ms"),
+            "proof_core_ms": quic_proof_core,
             "total_ms": quic_total,
-            "session_wall_clock_ms": stats([p.get("total_ms", 0.0) for p in parties]),
             "peak_rss_bytes": stats([p.get("peak_rss_bytes", 0) for p in parties]),
         },
         "traffic_per_trader": {
@@ -152,25 +161,34 @@ def rq1(args):
 
     Path(args.json_out).write_text(json.dumps(summary, indent=2))
 
-    # Stacked-bar input: one row per configuration, one column per phase.
+    # Stacked-bar input plus the two totals used by the paper table.
     rows = [
         ("single prover", 0.0, summary["single_prover"]["prove_ms"]["median"], 0.0,
-         summary["single_prover"]["verify_ms"]["median"]),
+         summary["single_prover"]["verify_ms"]["median"],
+         summary["single_prover"]["total_ms"]["median"],
+         summary["single_prover"]["total_ms"]["median"]),
         ("in-process two-party",
          summary["two_party_in_process"]["build_ms"]["median"],
          summary["two_party_in_process"]["prove_ms"]["median"],
          summary["two_party_in_process"]["open_ms"]["median"],
-         summary["two_party_in_process"]["verify_ms"]["median"]),
+         summary["two_party_in_process"]["verify_ms"]["median"],
+         summary["two_party_in_process"]["proof_core_ms"]["median"],
+         summary["two_party_in_process"]["total_ms"]["median"]),
         ("two-process QUIC",
          summary["two_party_quic"]["build_ms"]["median"],
          summary["two_party_quic"]["prove_ms"]["median"],
          summary["two_party_quic"]["open_ms"]["median"],
-         summary["two_party_quic"]["verify_ms"]["median"]),
+         summary["two_party_quic"]["verify_ms"]["median"],
+         summary["two_party_quic"]["proof_core_ms"]["median"],
+         summary["two_party_quic"]["total_ms"]["median"]),
     ]
     with open(args.csv_out, "w") as f:
-        f.write("configuration,build_ms,prove_ms,open_ms,verify_ms\n")
-        for name, b, p, o, v in rows:
-            f.write(f"{name},{b:.1f},{p:.1f},{o:.1f},{v:.1f}\n")
+        f.write(
+            "configuration,build_ms,prove_ms,open_ms,verify_ms,"
+            "proof_core_ms,session_total_ms\n"
+        )
+        for name, b, p, o, v, core, total in rows:
+            f.write(f"{name},{b:.1f},{p:.1f},{o:.1f},{v:.1f},{core:.1f},{total:.1f}\n")
 
     q = summary["two_party_quic"]
     m = summary["two_party_in_process"]
@@ -178,24 +196,28 @@ def rq1(args):
     lines = [
         "# RQ1 — the cost of the cryptography",
         "",
-        f"Runs: {q['total_ms']['n'] // 2 if q['total_ms']['n'] else 0} sessions over QUIC "
+        f"Runs: {q['total_ms']['n']} sessions over QUIC "
         f"(two traders each), {m['total_ms']['n']} in-process sessions, "
         f"{s['prove_ms']['n']} single-prover runs.",
+        "One observation is recorded per session; two-process phase values use the slower trader.",
         "",
-        "## Latency per phase (ms)",
+        "## Latency per phase and session (ms)",
         "",
-        "| configuration | build | prove | open | verify | total | p95 total |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| configuration | build | prove | open | verify | proof core | session total | p95 session |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
         f"| single prover | — | {ms(s['prove_ms']['median'])} | — | "
         f"{s['verify_ms']['median']:.1f} | {ms(s['total_ms']['median'])} | "
+        f"{ms(s['total_ms']['median'])} | "
         f"{ms(s['total_ms']['p95'])} |",
         f"| two parties, one process | {ms(m['build_ms']['median'])} | "
         f"{ms(m['prove_ms']['median'])} | {ms(m['open_ms']['median'])} | "
-        f"{m['verify_ms']['median']:.1f} | {ms(m['total_ms']['median'])} | "
+        f"{m['verify_ms']['median']:.1f} | {ms(m['proof_core_ms']['median'])} | "
+        f"{ms(m['total_ms']['median'])} | "
         f"{ms(m['total_ms']['p95'])} |",
         f"| two processes, QUIC | {ms(q['build_ms']['median'])} | "
         f"{ms(q['prove_ms']['median'])} | {ms(q['open_ms']['median'])} | "
-        f"{q['verify_ms']['median']:.1f} | {ms(q['total_ms']['median'])} | "
+        f"{q['verify_ms']['median']:.1f} | {ms(q['proof_core_ms']['median'])} | "
+        f"{ms(q['total_ms']['median'])} | "
         f"{ms(q['total_ms']['p95'])} |",
         "",
     ]
@@ -247,35 +269,47 @@ def rq2(args):
     for point in index.get("points", []):
         bench = read_json(here / point["bench"]) or {}
         traffic = read_json(here / point["traffic"]) or {}
-        parties = [
-            p for run in bench.get("cozk2p_quic_2process", []) for p in run.get("per_party", [])
+        runs = [
+            run
+            for run in bench.get("cozk2p_quic_2process", [])
+            if run.get("per_party")
         ]
-        phase = lambda key: stats([p.get(key, 0.0) for p in parties])
-        total = stats(
+        phase = lambda key: stats(
             [
-                p.get("build_ms", 0.0)
-                + p.get("prove_ms", 0.0)
-                + p.get("open_ms", 0.0)
-                + p.get("verify_ms", 0.0)
-                for p in parties
+                max(p.get(key, 0.0) for p in run["per_party"])
+                for run in runs
             ]
         )
+        proof_core = stats(
+            [
+                max(
+                    p.get("build_ms", 0.0)
+                    + p.get("prove_ms", 0.0)
+                    + p.get("open_ms", 0.0)
+                    + p.get("verify_ms", 0.0)
+                    for p in run["per_party"]
+                )
+                for run in runs
+            ]
+        )
+        total = stats([run.get("total_ms", 0.0) for run in runs])
         points.append(
             {
                 "rtt_ms": point["rtt_ms"],
                 "one_way_delay_ms": point["one_way_delay_ms"],
                 "status": point["status"],
-                "sessions": len(parties) // 2,
+                "sessions": len(runs),
                 "build_ms": phase("build_ms"),
                 "prove_ms": phase("prove_ms"),
                 "open_ms": phase("open_ms"),
                 "verify_ms": phase("verify_ms"),
+                "proof_core_ms": proof_core,
                 "total_ms": total,
                 # The relay counts the whole point; report one session.
                 "traffic_bytes_per_session": (
                     traffic.get("a_to_b_bytes", 0) + traffic.get("b_to_a_bytes", 0)
                 )
-                / max(len(parties) // 2, 1),
+                / max(len(runs), 1),
             }
         )
 
@@ -292,12 +326,16 @@ def rq2(args):
     Path(args.json_out).write_text(json.dumps(summary, indent=2))
 
     with open(args.csv_out, "w") as f:
-        f.write("rtt_ms,build_ms,prove_ms,open_ms,verify_ms,total_ms,p95_total_ms\n")
+        f.write(
+            "rtt_ms,build_ms,prove_ms,open_ms,verify_ms,proof_core_ms,"
+            "session_total_ms,p95_session_total_ms\n"
+        )
         for p in points:
             f.write(
                 f"{p['rtt_ms']},{p['build_ms']['median']:.1f},"
                 f"{p['prove_ms']['median']:.1f},{p['open_ms']['median']:.1f},"
-                f"{p['verify_ms']['median']:.1f},{p['total_ms']['median']:.1f},"
+                f"{p['verify_ms']['median']:.1f},{p['proof_core_ms']['median']:.1f},"
+                f"{p['total_ms']['median']:.1f},"
                 f"{p['total_ms']['p95']:.1f}\n"
             )
 
@@ -305,19 +343,20 @@ def rq2(args):
         "# RQ2 — the effect of the round-trip time",
         "",
         f"Rate cap {summary['rate_mbit']} Mbit/s, {summary['runs_per_point']} sessions "
-        "per point, medians of both traders.",
+        "per point. One observation is recorded per session; phase values use the slower trader.",
         "",
-        "| RTT (ms) | build | prove | open | verify | total | p95 total |",
-        "|---:|---:|---:|---:|---:|---:|---:|",
+        "| RTT (ms) | build | prove | open | verify | proof core | session total | p95 session |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for p in points:
         if p["status"] != "ok" or p["total_ms"]["n"] == 0:
-            lines.append(f"| {p['rtt_ms']} | did not finish | | | | | |")
+            lines.append(f"| {p['rtt_ms']} | did not finish | | | | | | |")
             continue
         lines.append(
             f"| {p['rtt_ms']} | {ms(p['build_ms']['median'])} | "
             f"{ms(p['prove_ms']['median'])} | {ms(p['open_ms']['median'])} | "
-            f"{p['verify_ms']['median']:.1f} | {ms(p['total_ms']['median'])} | "
+            f"{p['verify_ms']['median']:.1f} | {ms(p['proof_core_ms']['median'])} | "
+            f"{ms(p['total_ms']['median'])} | "
             f"{ms(p['total_ms']['p95'])} |"
         )
     ok = [p for p in points if p["status"] == "ok" and p["total_ms"]["n"]]

@@ -19,12 +19,13 @@ import (
 // cozk2pE2eFixture is the subset of `dump_settle2p_fixture` output this test
 // needs (the full schema is documented in core/cozk2p_layout_test.go).
 // Locked-only model: the proved statement covers the two locked collateral
-// commitments plus the public price and A's side.
+// commitments plus both public collateral prices and A's side.
 type cozk2pE2eFixture struct {
 	Cmp        int    `json:"cmp"`
 	LockedAHex string `json:"locked_a_hex"`
 	LockedBHex string `json:"locked_b_hex"`
-	Price      uint64 `json:"price"`
+	PriceA     uint64 `json:"price_a"`
+	PriceB     uint64 `json:"price_b"`
 	AIsSeller  bool   `json:"a_is_seller"`
 	ProofHex   string `json:"proof_hex"`
 	VKPath     string `json:"vk_path"`
@@ -59,8 +60,8 @@ func TestCoZk2pSettleRealProofOnChain(t *testing.T) {
 	if !fx.AIsSeller {
 		t.Fatalf("this test assumes the sample trade's A side sells")
 	}
-	if fx.Price == 0 {
-		t.Fatal("fixture has no price — regenerate it for the locked-only model")
+	if fx.PriceA == 0 || fx.PriceB == 0 {
+		t.Fatal("fixture has no collateral prices — regenerate it for the crossing-price model")
 	}
 
 	alicePriv, alicePubkey := deriveKeypair(t, aliceDerivedSeedHex)
@@ -106,7 +107,7 @@ require_proofs = false
 	// --- Send both orders carrying the fixture's locked commitments; alice
 	// first so her sell is the maker (order A / circuit a-side) ---
 	sellReq := signedSendOrder(alicePriv, core.Sell, "ETH", "USDT",
-		fx.Price, fx.LockedAHex, alicePubkey, []string{"alice-eth-note"})
+		fx.PriceA, fx.LockedAHex, alicePubkey, []string{"alice-eth-note"})
 	sellOrderID := sellReq.ID
 	if err := wrCall("orderbook", "SendOrder", sellReq); err != nil {
 		t.Fatalf("SendOrder (sell) failed: %v", err)
@@ -114,7 +115,7 @@ require_proofs = false
 	waitBlock()
 
 	buyReq := signedSendOrder(bobPriv, core.Buy, "ETH", "USDT",
-		fx.Price, fx.LockedBHex, bobPubkey, []string{"bob-usdt-note"})
+		fx.PriceB, fx.LockedBHex, bobPubkey, []string{"bob-usdt-note"})
 	buyOrderID := buyReq.ID
 	if err := wrCall("orderbook", "SendOrder", buyReq); err != nil {
 		t.Fatalf("SendOrder (buy) failed: %v", err)
@@ -166,10 +167,12 @@ require_proofs = false
 		OrderID:      buyOrderID,
 		MatchOrderID: sellOrderID,
 		CmNoteOut:    hexCommit(0xC1),
+		CmRefundOut:  hexCommit(0xD1),
 	}
 	bLeg := core.SettlePairLeg{
-		CmNoteOut: smallSig.CmNoteOut,
-		ZkProof:   "test-proof-skip",
+		CmNoteOut:   smallSig.CmNoteOut,
+		CmRefundOut: smallSig.CmRefundOut,
+		ZkProof:     "test-proof-skip",
 		Signature: hex.EncodeToString(
 			ed25519.Sign(bobPriv, core.SettleSmallSigMessage(smallSig))),
 	}
@@ -178,9 +181,11 @@ require_proofs = false
 		MatchOrderID:     buyOrderID,
 		CmLockedResidual: hexCommit(0xA2),
 		CmNoteOut:        hexCommit(0xC2),
+		CmRefundOut:      hexCommit(0xD2),
 	}
 	aLeg := core.SettlePairLeg{
 		CmNoteOut:        largeSig.CmNoteOut,
+		CmRefundOut:      largeSig.CmRefundOut,
 		CmLockedResidual: largeSig.CmLockedResidual,
 		ZkProof:          "test-proof-skip",
 		Signature: hex.EncodeToString(

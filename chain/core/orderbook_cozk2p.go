@@ -17,25 +17,27 @@ import (
 
 // settle2pPublic mirrors cozk2p's `SettlePublic` serde layout
 // (cozk2p/src/relation.rs): the locked-only comparison statement
-// [cmp, locked_a, locked_b, price, a_is_seller]. Field names and order
+// [cmp, locked_a, locked_b, price_a, price_b, a_is_seller]. Field names and order
 // must stay in lockstep with the Rust struct.
 type settle2pPublic struct {
 	Cmp       int    `json:"cmp"`
 	LockedA   string `json:"locked_a"`
 	LockedB   string `json:"locked_b"`
-	Price     uint64 `json:"price"`
+	PriceA    uint64 `json:"price_a"`
+	PriceB    uint64 `json:"price_b"`
 	AIsSeller bool   `json:"a_is_seller"`
 }
 
 // buildCompare2pPublicJSON rebuilds the canonical `SettlePublic` JSON from
 // the request plus on-chain order state: the two locked collateral
-// commitments, the pair's execution price, and order A's side.
+// commitments, both orders' collateral prices, and order A's side.
 func buildCompare2pPublicJSON(req *CompareRequest, orderA, orderB *Order) ([]byte, error) {
 	public := settle2pPublic{
 		Cmp:       req.Cmp,
 		LockedA:   orderA.LockedCommitment,
 		LockedB:   orderB.LockedCommitment,
-		Price:     executionPrice(orderA, orderB),
+		PriceA:    collateralPrice(orderA).Uint64(),
+		PriceB:    collateralPrice(orderB).Uint64(),
 		AIsSeller: orderA.Type == Sell,
 	}
 	return json.Marshal(&public)

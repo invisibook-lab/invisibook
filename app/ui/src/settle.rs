@@ -83,6 +83,7 @@ mod inner {
     pub struct SettleOutcome {
         pub cmp: i8,
         pub recv: NewNote,
+        pub refund: Option<NewNote>,
         /// Present only when this side survived on the book (had a
         /// remainder); the chain relisted the order in place.
         pub remainder: Option<Remainder>,
@@ -108,7 +109,7 @@ mod inner {
     impl fmt::Display for SettleError {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
-                SettleError::CrossPrice(m) => write!(f, "cross-price match unsupported: {m}"),
+                SettleError::CrossPrice(m) => write!(f, "invalid matched prices: {m}"),
                 SettleError::SelfMatch => write!(f, "self-matched pair cannot settle"),
                 SettleError::Unrecoverable(m) => write!(f, "unrecoverable local state: {m}"),
                 SettleError::Transient(m) => write!(f, "{m}"),
@@ -141,6 +142,10 @@ mod inner {
         h.finalize().into()
     }
 
+    fn refund_note_sk_bytes(seed: &[u8; 32], order_id: &str) -> [u8; 32] {
+        note_sk_bytes(seed, &format!("{order_id}:refund"))
+    }
+
     // ── Subprocess wire structs (mirror cozk2p's session serde exactly) ──
 
     #[derive(Serialize)]
@@ -157,11 +162,16 @@ mod inner {
         my_order_id: String,
         my_lock_token: String,
         my_recv_token: String,
-        price: u64,
+        price_a: u64,
+        price_b: u64,
+        execution_price: u64,
         a_is_seller: bool,
         locked_a: String,
         locked_b: String,
         my_recv_npk: String,
+        my_refund_npk: String,
+        transport_secret: String,
+        peer_transport_pubkey: String,
         my: MyPrivateWire,
     }
 
@@ -172,13 +182,14 @@ mod inner {
 
     /// Subset of the subprocess `SettlePublic` the app cross-checks; serde
     /// ignores the fields not named here. Locked-only model: the statement
-    /// carries the two collateral commitments, the execution price, and the
-    /// maker's side — all 5 signals except the proven `cmp` itself.
+    /// carries both collateral commitments, both public collateral prices,
+    /// and the maker's side.
     #[derive(Deserialize)]
     struct PublicWire {
         locked_a: String,
         locked_b: String,
-        price: u64,
+        price_a: u64,
+        price_b: u64,
         a_is_seller: bool,
     }
 
@@ -203,6 +214,11 @@ mod inner {
         recv_token: String,
         r_recv: String,
         recv_commitment: String,
+        refund_amount: u64,
+        refund_token: String,
+        refund_npk: String,
+        r_refund: String,
+        refund_commitment: String,
         ctr_recv_npk: String,
         ctr_r_recv: String,
         ctr_order_amount: u64,
@@ -241,6 +257,7 @@ mod inner {
     struct SettleLegWire {
         is_a: bool,
         cm_note_out: String,
+        cm_refund_out: String,
         signature: String,
         zk_proof: String,
         #[serde(default)]
@@ -287,6 +304,20 @@ mod inner {
         Ok(order.locked_commitment.clone())
     }
 
+    fn collateral_price(order: &Order) -> Result<u64, SettleError> {
+        match order.kind {
+            OrderKind::Limit => order.price,
+            OrderKind::Market => order.protection_price,
+        }
+        .filter(|price| *price > 0)
+        .ok_or_else(|| {
+            SettleError::CrossPrice(format!(
+                "order {} is missing its public collateral price",
+                orderbook::short_id(&order.id)
+            ))
+        })
+    }
+
     /// Run the full settlement for a matched pair: compare session, on-chain
     /// compare confirmation, this side's settle proof, leg exchange, and the
     /// atomic SettlePair submission. `opening` is this order's locally
@@ -312,17 +343,14 @@ mod inner {
         let i_am_maker = maker.id == my_order.id;
         let role = if i_am_maker { "trader-a" } else { "trader-b" };
 
-        // Equal-price requirement of the settle circuits.
-        let (mp, tp) = match (maker.price, taker.price) {
-            (Some(mp), Some(tp)) => (mp, tp),
-            _ => return Err(SettleError::CrossPrice("orders missing price".into())),
-        };
-        if mp != tp {
-            return Err(SettleError::CrossPrice(
-                "co-zk settlement requires equal order prices".into(),
-            ));
-        }
-        let price = mp;
+        let price_a = collateral_price(maker)?;
+        let price_b = collateral_price(taker)?;
+        let execution_price = maker
+            .execution_price
+            .filter(|price| *price > 0 && Some(*price) == taker.execution_price)
+            .ok_or_else(|| {
+                SettleError::CrossPrice("orders disagree on the execution price".into())
+            })?;
         let a_is_seller = maker.trade_type == TradeType::Sell;
 
         // Chain-sourced public inputs (all already on the order rows).
@@ -335,6 +363,42 @@ mod inner {
         // Fresh per-trade note key: the payout note this wallet receives.
         let my_note_sk = note_sk_bytes(&deps.note_seed, &my_order.id);
         let my_recv_npk = note_fr_to_hex(&npk_from_sk(fr_from_be_bytes(&my_note_sk)));
+        let my_refund_sk = refund_note_sk_bytes(&deps.note_seed, &my_order.id);
+        let my_refund_npk = note_fr_to_hex(&npk_from_sk(fr_from_be_bytes(&my_refund_sk)));
+
+        use x25519_dalek::{PublicKey, StaticSecret};
+        let mut transport_kdf = Sha256::new();
+        transport_kdf.update(b"invisibook-settle-transport-v1");
+        transport_kdf.update(deps.note_seed);
+        transport_kdf.update(my_order.id.as_bytes());
+        transport_kdf.update(my_order.match_round.to_be_bytes());
+        let transport_secret_bytes: [u8; 32] = transport_kdf.finalize().into();
+        let transport_secret = StaticSecret::from(transport_secret_bytes);
+        let transport_pubkey = PublicKey::from(&transport_secret);
+
+        // ── Rendezvous: exchange QUIC addresses on chain ──
+        progress("Registering settlement address...");
+        let base = bind_ephemeral_port().await?;
+        let local_addr = format!("127.0.0.1:{base}");
+        client
+            .register_settle_addr(
+                my_order.id.clone(),
+                counter_order.id.clone(),
+                my_order.match_round,
+                &local_addr,
+                &hex::encode(transport_pubkey.as_bytes()),
+            )
+            .await
+            .map_err(|e| SettleError::Transient(format!("register_settle_addr: {e}")))?;
+
+        progress("Waiting for counterparty...");
+        let peer = poll_peer_addr(
+            client,
+            &my_order.id,
+            &counter_order.id,
+            my_order.match_round,
+        )
+        .await?;
 
         let input = SessionInputWire {
             role: role.to_string(),
@@ -343,17 +407,21 @@ mod inner {
             my_order_id: my_order.id.clone(),
             my_lock_token: my_lock_token.clone(),
             my_recv_token: my_recv_token.clone(),
-            price,
+            price_a,
+            price_b,
+            execution_price,
             a_is_seller,
             locked_a: locked_a.clone(),
             locked_b: locked_b.clone(),
             my_recv_npk,
+            my_refund_npk,
+            transport_secret: hex::encode(transport_secret.to_bytes()),
+            peer_transport_pubkey: peer.encryption_pubkey.clone(),
             my: MyPrivateWire {
                 order_amount: opening.q,
                 r_locked: opening.r_locked.clone(),
             },
         };
-
         let session_dir = deps.sessions_dir.join(&my_order.id);
         fs::create_dir_all(&session_dir)
             .map_err(|e| SettleError::Transient(format!("creating session dir: {e}")))?;
@@ -363,18 +431,6 @@ mod inner {
             serde_json::to_vec(&input).expect("SessionInput serializes"),
         )
         .map_err(|e| SettleError::Transient(format!("writing session input: {e}")))?;
-
-        // ── Rendezvous: exchange QUIC addresses on chain ──
-        progress("Registering settlement address...");
-        let base = bind_ephemeral_port().await?;
-        let local_addr = format!("127.0.0.1:{base}");
-        client
-            .register_settle_addr(my_order.id.clone(), counter_order.id.clone(), &local_addr)
-            .await
-            .map_err(|e| SettleError::Transient(format!("register_settle_addr: {e}")))?;
-
-        progress("Waiting for counterparty...");
-        let peer_addr = poll_peer_addr(client, &my_order.id, &counter_order.id).await?;
 
         // ── Full two-phase session (subprocess) ──
         let session = SessionCtx {
@@ -387,7 +443,9 @@ mod inner {
             taker_pubkey: &taker.pubkey,
             expected_locked_a: &locked_a,
             expected_locked_b: &locked_b,
-            price,
+            price_a,
+            price_b,
+            execution_price,
             a_is_seller,
             my_lock_token: &my_lock_token,
             opening,
@@ -397,7 +455,7 @@ mod inner {
             deps,
             role,
             &local_addr,
-            &peer_addr,
+            &peer.addr,
             &input_path,
             &session,
             &mut progress,
@@ -448,7 +506,9 @@ mod inner {
         taker_pubkey: &'a str,
         expected_locked_a: &'a str,
         expected_locked_b: &'a str,
-        price: u64,
+        price_a: u64,
+        price_b: u64,
+        execution_price: u64,
         /// Maker side read off the chain rows: order A (the maker) sells.
         a_is_seller: bool,
         my_lock_token: &'a str,
@@ -476,11 +536,12 @@ mod inner {
         client: &ChainClient,
         my_order_id: &str,
         counter_id: &str,
-    ) -> Result<String, SettleError> {
+        match_round: u64,
+    ) -> Result<invisibook_lib::chain::SettlePeer, SettleError> {
         for _ in 0..45 {
             tokio::time::sleep(Duration::from_secs(2)).await;
             match client
-                .query_settle_addr(my_order_id.to_string(), counter_id.to_string())
+                .query_settle_addr(my_order_id.to_string(), counter_id.to_string(), match_round)
                 .await
             {
                 Ok(Some(addr)) => return Ok(addr),
@@ -526,8 +587,8 @@ mod inner {
     }
 
     /// Cross-check a proven statement against the rows read from the chain:
-    /// every non-`cmp` signal of the 5-signal statement (both collateral
-    /// commitments, the execution price, the maker's side) must match, or
+    /// every non-`cmp` signal (both collateral commitments and prices plus
+    /// the maker's side) must match, or
     /// the subprocess proved something other than THIS pair (a stale chain
     /// read, most likely). Cheap local guard — the chain re-verifies.
     fn check_public_statement(
@@ -536,7 +597,8 @@ mod inner {
     ) -> Result<(), SettleError> {
         if public.locked_a != ctx.expected_locked_a
             || public.locked_b != ctx.expected_locked_b
-            || public.price != ctx.price
+            || public.price_a != ctx.price_a
+            || public.price_b != ctx.price_b
             || public.a_is_seller != ctx.a_is_seller
         {
             return Err(SettleError::Transient(
@@ -584,7 +646,53 @@ mod inner {
         progress("Waiting for the comparison to land on chain...");
         wait_for_settling(ctx.client, &ctx.my_order.id).await?;
         wait_for_settling(ctx.client, &ctx.counter_order.id).await?;
-        Ok(())
+
+        // Durable pre-open barrier: both parties put the chain-derived
+        // state for this exact match round on chain before the subprocess
+        // is allowed to reveal the smaller quantity. A missing uploader is
+        // attributable after the deadline and can be frozen by the peer.
+        progress("Publishing pre-open checkpoint...");
+        ctx.client
+            .submit_settle_checkpoint(
+                ctx.my_order.id.clone(),
+                ctx.counter_order.id.clone(),
+                ctx.my_order.match_round,
+            )
+            .await
+            .map_err(|e| SettleError::Transient(format!("submit checkpoint: {e}")))?;
+        for _ in 0..45 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            match ctx
+                .client
+                .query_settle_checkpoint(
+                    ctx.my_order.id.clone(),
+                    ctx.counter_order.id.clone(),
+                    ctx.my_order.match_round,
+                )
+                .await
+            {
+                Ok(status) if status.ready && status.state_commitment.len() == 64 => return Ok(()),
+                Ok(_) => {}
+                Err(e) => eprintln!("[settle] query checkpoint: {e}"),
+            }
+        }
+        match ctx
+            .client
+            .abort_settle_round(
+                ctx.my_order.id.clone(),
+                ctx.counter_order.id.clone(),
+                ctx.my_order.match_round,
+            )
+            .await
+        {
+            Ok(()) => Err(SettleError::OnChainRejected(
+                "peer missed the pre-open checkpoint deadline; its order was frozen and this order was requeued"
+                    .into(),
+            )),
+            Err(e) => Err(SettleError::Transient(format!(
+                "pre-open checkpoint timed out; abort attempt: {e}"
+            ))),
+        }
     }
 
     /// Prove THIS side's settle circuit from the session outcome and wrap
@@ -601,8 +709,20 @@ mod inner {
             .map_err(|e| SettleError::Unrecoverable(format!("pay asset: {e}")))?;
         let npk_ctr = hex_fr(&outcome.ctr_recv_npk, "ctr_recv_npk")?;
         let r_note = hex_fr(&outcome.ctr_r_recv, "ctr_r_recv")?;
+        let npk_refund = hex_fr(&outcome.refund_npk, "refund_npk")?;
+        let r_refund = hex_fr(&outcome.r_refund, "r_refund")?;
         let q = ctx.opening.q;
         let r_locked = hex_fr(&ctx.opening.r_locked, "r_locked")?;
+        let my_collateral_price = if outcome.is_a {
+            ctx.price_a
+        } else {
+            ctx.price_b
+        };
+        let ctr_collateral_price = if outcome.is_a {
+            ctx.price_b
+        } else {
+            ctx.price_a
+        };
 
         if outcome.i_am_smaller {
             let setup =
@@ -613,19 +733,25 @@ mod inner {
             let mut w = SettleSmallWitness {
                 q,
                 r_locked,
-                price: ctx.price,
+                collateral_price: my_collateral_price,
+                execution_price: ctx.execution_price,
                 side_sell: my_side_sell,
                 pay_asset,
                 npk_ctr,
                 r_note,
+                npk_refund,
+                r_refund,
                 bind: fr_from_be_bytes(&[0u8; 32]),
             };
-            let cm_note_out = note_fr_to_hex(&w.cm_note_out());
+            let (cm_note_out, cm_refund_out) = w.output_cms();
+            let cm_note_out = note_fr_to_hex(&cm_note_out);
+            let cm_refund_out = note_fr_to_hex(&cm_refund_out);
             w.bind = settle_small_bind(
                 ctx.client.chain_id(),
                 &ctx.my_order.id,
                 &ctx.counter_order.id,
                 &cm_note_out,
+                &cm_refund_out,
             );
             let proof = tokio::task::block_in_place(|| prove_settle_small(w, &handle, &setup.zkey))
                 .map_err(|e| SettleError::Transient(format!("prove settle_small: {e}")))?;
@@ -634,6 +760,7 @@ mod inner {
                 order_id: ctx.my_order.id.clone(),
                 match_order_id: ctx.counter_order.id.clone(),
                 cm_note_out: proof.cm_note_out_hex.clone(),
+                cm_refund_out: proof.cm_refund_out_hex.clone(),
                 signature: String::new(),
                 zk_proof: serde_json::to_string(&proof.proof_json)
                     .map_err(|e| SettleError::Transient(format!("proof json: {e}")))?,
@@ -642,6 +769,7 @@ mod inner {
             Ok(SettleLegWire {
                 is_a: outcome.is_a,
                 cm_note_out: params.cm_note_out,
+                cm_refund_out: params.cm_refund_out,
                 signature: params.signature,
                 zk_proof: params.zk_proof,
                 cm_locked_residual: String::new(),
@@ -657,21 +785,26 @@ mod inner {
                 r_locked,
                 q_ctr: outcome.ctr_order_amount,
                 r_locked_ctr: hex_fr(&outcome.ctr_r_locked, "ctr_r_locked")?,
-                price: ctx.price,
+                collateral_price: my_collateral_price,
+                ctr_collateral_price,
+                execution_price: ctx.execution_price,
                 side_sell: my_side_sell,
                 r_locked_residual: hex_fr(&outcome.r_locked_new, "r_locked_new")?,
                 pay_asset,
                 npk_ctr,
                 r_note,
+                npk_refund,
+                r_refund,
                 bind: fr_from_be_bytes(&[0u8; 32]),
             };
-            let (cm_locked_res, cm_note) = w.output_cms();
+            let (cm_locked_res, cm_note, cm_refund) = w.output_cms();
             w.bind = settle_large_bind(
                 ctx.client.chain_id(),
                 &ctx.my_order.id,
                 &ctx.counter_order.id,
                 &note_fr_to_hex(&cm_locked_res),
                 &note_fr_to_hex(&cm_note),
+                &note_fr_to_hex(&cm_refund),
             );
             let proof = tokio::task::block_in_place(|| prove_settle_large(w, &handle, &setup.zkey))
                 .map_err(|e| SettleError::Transient(format!("prove settle_large: {e}")))?;
@@ -681,6 +814,7 @@ mod inner {
                 match_order_id: ctx.counter_order.id.clone(),
                 cm_locked_residual: proof.cm_locked_residual_hex.clone(),
                 cm_note_out: proof.cm_note_out_hex.clone(),
+                cm_refund_out: proof.cm_refund_out_hex.clone(),
                 signature: String::new(),
                 zk_proof: serde_json::to_string(&proof.proof_json)
                     .map_err(|e| SettleError::Transient(format!("proof json: {e}")))?,
@@ -689,6 +823,7 @@ mod inner {
             Ok(SettleLegWire {
                 is_a: outcome.is_a,
                 cm_note_out: params.cm_note_out,
+                cm_refund_out: params.cm_refund_out,
                 signature: params.signature,
                 zk_proof: params.zk_proof,
                 cm_locked_residual: params.cm_locked_residual,
@@ -706,12 +841,14 @@ mod inner {
             if leg.cm_locked_residual.is_empty() {
                 SettlePairLegParams::small(
                     leg.cm_note_out.clone(),
+                    leg.cm_refund_out.clone(),
                     leg.signature.clone(),
                     leg.zk_proof.clone(),
                 )
             } else {
                 SettlePairLegParams::large(
                     leg.cm_note_out.clone(),
+                    leg.cm_refund_out.clone(),
                     leg.cm_locked_residual.clone(),
                     leg.signature.clone(),
                     leg.zk_proof.clone(),
@@ -971,6 +1108,13 @@ mod inner {
             r_hex: my.r_recv.clone(),
             sk_hex: hex::encode(note_sk_bytes(note_seed, my_order_id)),
         };
+        let refund = (my.refund_amount > 0).then(|| NewNote {
+            cm: my.refund_commitment.clone(),
+            token: my.refund_token.clone(),
+            amount: my.refund_amount,
+            r_hex: my.r_refund.clone(),
+            sk_hex: hex::encode(refund_note_sk_bytes(note_seed, my_order_id)),
+        });
         let remainder = if my.is_relisted() {
             Some(Remainder {
                 order_amount: my.new_order_amount,
@@ -984,6 +1128,7 @@ mod inner {
         SettleOutcome {
             cmp,
             recv,
+            refund,
             remainder,
             session_dir,
         }
@@ -998,6 +1143,7 @@ mod inner {
         pub order_id: String,
         /// The incoming payout note to materialize (with leaf index).
         pub note: NoteRecord,
+        pub refund_note: Option<NoteRecord>,
         /// The residual order opening, when this side survived on the book;
         /// `None` means the order fully filled (drop its opening).
         pub remainder: Option<OrderOpening>,
@@ -1139,6 +1285,26 @@ mod inner {
             nf: String::new(),
             pending_order: String::new(),
         };
+        let refund_note = if witness.my.refund_amount > 0 {
+            let refund_leaf = match client.get_note_by_cm(&witness.my.refund_commitment).await {
+                Ok(index) if index >= 0 => index as u64,
+                _ => return Recovery::InProgress,
+            };
+            Some(NoteRecord {
+                cm: witness.my.refund_commitment.clone(),
+                token: witness.my.refund_token.clone(),
+                amount: witness.my.refund_amount,
+                r: witness.my.r_refund.clone(),
+                key_index: 0,
+                sk: hex::encode(refund_note_sk_bytes(note_seed, &witness.my_order_id)),
+                leaf_index: refund_leaf,
+                status: 0,
+                nf: String::new(),
+                pending_order: String::new(),
+            })
+        } else {
+            None
+        };
         // Rebuild the residual order opening from the witness, using the
         // same relist predicate the live path uses.
         let remainder = if witness.my.is_relisted() {
@@ -1156,6 +1322,7 @@ mod inner {
         Recovery::Landed(Recovered {
             order_id: witness.my_order_id.clone(),
             note,
+            refund_note,
             remainder,
             dir: dir.to_path_buf(),
         })

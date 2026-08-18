@@ -120,8 +120,8 @@ mod tests {
     /// bytes in, JSON statement in, return code out.
     #[test]
     fn ffi_roundtrip_accepts_and_rejects() {
-        let (a, b, price, a_is_seller) = sample_trade();
-        let public = compute_public(&a, &b, price, a_is_seller).unwrap();
+        let (a, b, price_a, price_b, a_is_seller) = sample_trade();
+        let public = compute_public(&a, &b, price_a, price_b, a_is_seller).unwrap();
         let (pk, vk) = dev_keys(&default_cache_dir()).unwrap();
         let proof = prove_single(&a, &b, &public, &pk).unwrap();
 

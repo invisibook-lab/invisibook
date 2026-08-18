@@ -1,5 +1,5 @@
-//! Dump shielded-pool fixtures for the Go chain tests, and copy the two
-//! circuits' verification keys into `chain/vk/`.
+//! Dump shielded-pool and settlement fixtures for the Go chain tests, and
+//! copy their circuits' verification keys into `chain/vk/`.
 //!
 //! Usage: cargo run -p invisibook-lib --example dump_pool_fixture -- \
 //!            /tmp/pool_fixture.json [--copy-vk]
@@ -8,7 +8,7 @@
 //! spend_withdraw proof over the golden 3-leaf tree (spec/golden.json), so
 //! the Go side can verify real proofs and pin the public-input layouts and
 //! the bind transcript lockstep. `--copy-vk` additionally refreshes
-//! `chain/vk/note_deposit_vk.json` and `chain/vk/spend_withdraw_vk.json`.
+//! the pool and settlement verification keys under `chain/vk/`.
 
 use std::{env, fs, path::PathBuf};
 
@@ -171,7 +171,7 @@ fn main() {
     let settle_out = out_path.replace(".json", "_settle.json");
     let (r_la_bytes, r_lb_bytes) = (rep(0x83), rep(0x84));
     let (r_la, r_lb) = (fr_from_be_bytes(&r_la_bytes), fr_from_be_bytes(&r_lb_bytes));
-    let price = 3u64;
+    let (price_a, price_b, execution_price) = (3u64, 4u64, 3u64);
 
     let cmp_setup = dev_setup_snarkjs("settle_cozk").expect("setup settle_cozk");
     let cmp_handle = TestCircuitHandle::from_compiled(&cmp_setup.circuit_dir).expect("handle");
@@ -181,7 +181,8 @@ fn main() {
             r_a: r_la_bytes,
             b: 60,
             r_b: r_lb_bytes,
-            price,
+            price_a,
+            price_b,
             a_is_seller: true,
         },
         &cmp_handle,
@@ -198,18 +199,23 @@ fn main() {
     let small_w = SettleSmallWitness {
         q: 60,
         r_locked: r_lb,
-        price,
+        collateral_price: price_b,
+        execution_price,
         side_sell: false,
         pay_asset: asset_id("USDT").unwrap(),
         npk_ctr: npk_a_fresh,
         r_note: fr_from_be_bytes(&rep(0x93)),
+        npk_refund: npk_b_fresh,
+        r_refund: fr_from_be_bytes(&rep(0x94)),
         bind: fr_from_be_bytes(&[0u8; 32]), // patched below
     };
+    let (small_note, small_refund) = small_w.output_cms();
     let small_bind = settle_small_bind(
         CHAIN_ID,
         "order-b",
         "order-a",
-        &note_fr_to_hex(&small_w.cm_note_out()),
+        &note_fr_to_hex(&small_note),
+        &note_fr_to_hex(&small_refund),
     );
     let small_w = SettleSmallWitness {
         bind: small_bind,
@@ -227,21 +233,26 @@ fn main() {
         r_locked: r_la,
         q_ctr: 60,
         r_locked_ctr: r_lb,
-        price,
+        collateral_price: price_a,
+        ctr_collateral_price: price_b,
+        execution_price,
         side_sell: true,
         r_locked_residual: fr_from_be_bytes(&rep(0x95)),
         pay_asset: asset_id("ETH").unwrap(),
         npk_ctr: npk_b_fresh,
         r_note: fr_from_be_bytes(&rep(0x96)),
+        npk_refund: npk_a_fresh,
+        r_refund: fr_from_be_bytes(&rep(0x97)),
         bind: fr_from_be_bytes(&[0u8; 32]), // patched below
     };
-    let (cm_locked_res, cm_note) = large_w.output_cms();
+    let (cm_locked_res, cm_note, cm_refund) = large_w.output_cms();
     let large_bind = settle_large_bind(
         CHAIN_ID,
         "order-a",
         "order-b",
         &note_fr_to_hex(&cm_locked_res),
         &note_fr_to_hex(&cm_note),
+        &note_fr_to_hex(&cm_refund),
     );
     let large_w = SettleLargeWitness {
         bind: large_bind,
@@ -251,8 +262,11 @@ fn main() {
         prove_settle_large(large_w, &large_handle, &large_setup.zkey).expect("prove settle_large");
 
     let settle_fixture = json!({
+        "version": 2,
         "chain_id": CHAIN_ID,
-        "price": price,
+        "price_a": price_a,
+        "price_b": price_b,
+        "execution_price": execution_price,
         "a_is_seller": true,
         "locked_a": cmp_proof.locked_a_hex,
         "locked_b": cmp_proof.locked_b_hex,
@@ -266,6 +280,7 @@ fn main() {
             "order_id": "order-b",
             "match_order_id": "order-a",
             "cm_note_out": small_proof.cm_note_out_hex,
+            "cm_refund_out": small_proof.cm_refund_out_hex,
             "proof_json": small_proof.proof_json,
             "public_json": small_proof.public_json,
             "vk_path": small_setup.vk_json.to_string_lossy(),
@@ -275,6 +290,7 @@ fn main() {
             "match_order_id": "order-b",
             "cm_locked_residual": large_proof.cm_locked_residual_hex,
             "cm_note_out": large_proof.cm_note_out_hex,
+            "cm_refund_out": large_proof.cm_refund_out_hex,
             "proof_json": large_proof.proof_json,
             "public_json": large_proof.public_json,
             "vk_path": large_setup.vk_json.to_string_lossy(),

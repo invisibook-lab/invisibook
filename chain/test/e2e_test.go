@@ -57,7 +57,7 @@ func canonicalHex(seed string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// signedSendOrder builds a v2 SendOrder request for test mode (proof
+// signedSendOrder builds a v4 SendOrder request for test mode (proof
 // verification skipped). `seed` distinguishes the two nullifiers and the
 // anchor is the always-valid empty-tree root. Locked-only model: the order
 // carries ONE commitment. When `locked` is already a 64-char hex it becomes
@@ -70,23 +70,28 @@ func signedSendOrder(priv ed25519.PrivateKey, tradeType core.TradeType, token1, 
 	if len(seed) > 0 {
 		tag = seed[0]
 	}
-	nfs := []string{canonicalHex("nf0:" + tag), canonicalHex("nf1:" + tag)}
+	collNfs := []string{canonicalHex("coll-nf0:" + tag), canonicalHex("coll-nf1:" + tag)}
+	feeNfs := []string{canonicalHex("fee-nf0:" + tag), canonicalHex("fee-nf1:" + tag)}
+	nfs := append(append([]string{}, collNfs...), feeNfs...)
 	lockedCommitment := locked
 	if len(lockedCommitment) != 64 {
 		lockedCommitment = canonicalHex("locked:" + tag + ":" + locked)
 	}
 	req := &core.SendOrderRequest{
-		ID:               core.ComputeOrderID(nfs),
-		Type:             tradeType,
-		Subject:          core.TradePair{Token1: core.TokenID(token1), Token2: core.TokenID(token2)},
-		Price:            new(big.Int).SetUint64(price),
-		Pubkey:           pubkey,
-		Anchor:           core.FrToHex(core.EmptyRoot(core.TreeDepth)),
-		InputNullifiers:  nfs,
-		LockedCommitment: lockedCommitment,
-		Fee:              0,
-		ChangeCommitment: canonicalHex("change:" + tag),
-		ZkProof:          "test-proof-skip",
+		ID:                         core.ComputeOrderID(nfs),
+		Kind:                       core.Limit,
+		Type:                       tradeType,
+		Subject:                    core.TradePair{Token1: core.TokenID(token1), Token2: core.TokenID(token2)},
+		Price:                      new(big.Int).SetUint64(price),
+		Pubkey:                     pubkey,
+		Anchor:                     core.FrToHex(core.EmptyRoot(core.TreeDepth)),
+		CollateralNullifiers:       collNfs,
+		FeeNullifiers:              feeNfs,
+		LockedCommitment:           lockedCommitment,
+		Fee:                        0,
+		CollateralChangeCommitment: canonicalHex("coll-change:" + tag),
+		FeeChangeCommitment:        canonicalHex("fee-change:" + tag),
+		ZkProof:                    "test-proof-skip",
 	}
 	req.Signature = hex.EncodeToString(ed25519.Sign(priv, core.SendOrderSigningMessage(req)))
 	return req
@@ -310,11 +315,12 @@ func TestFullOrderLifecycle(t *testing.T) {
 
 	// ═══════════════════ Step 3.5: Settle address exchange ═══════════════════
 	t.Log("=== Step 3.5a: Alice registers settle addr ===")
-	err = wrCall("orderbook", "RegisterSettleAddr", map[string]any{
-		"order_id":       string(sellOrderID),
-		"match_order_id": string(buyOrderID),
-		"addr":           "127.0.0.1:9001",
-	})
+	aliceAddrReq := &core.RegisterSettleAddrRequest{
+		OrderID: sellOrderID, MatchOrderID: buyOrderID, MatchRound: sellOrders[0].MatchRound,
+		Addr: "127.0.0.1:9001", EncryptionPubkey: canonicalHex("alice-x25519"),
+	}
+	aliceAddrReq.Signature = hex.EncodeToString(ed25519.Sign(alicePriv, core.SettleAddrSigningMessage(aliceAddrReq)))
+	err = wrCall("orderbook", "RegisterSettleAddr", aliceAddrReq)
 	if err != nil {
 		t.Fatalf("RegisterSettleAddr (alice) failed: %v", err)
 	}
@@ -335,11 +341,12 @@ func TestFullOrderLifecycle(t *testing.T) {
 	}
 
 	t.Log("=== Step 3.5b: Bob registers settle addr ===")
-	err = wrCall("orderbook", "RegisterSettleAddr", map[string]any{
-		"order_id":       string(buyOrderID),
-		"match_order_id": string(sellOrderID),
-		"addr":           "127.0.0.1:9002",
-	})
+	bobAddrReq := &core.RegisterSettleAddrRequest{
+		OrderID: buyOrderID, MatchOrderID: sellOrderID, MatchRound: buyOrders[0].MatchRound,
+		Addr: "127.0.0.1:9002", EncryptionPubkey: canonicalHex("bob-x25519"),
+	}
+	bobAddrReq.Signature = hex.EncodeToString(ed25519.Sign(bobPriv, core.SettleAddrSigningMessage(bobAddrReq)))
+	err = wrCall("orderbook", "RegisterSettleAddr", bobAddrReq)
 	if err != nil {
 		t.Fatalf("RegisterSettleAddr (bob) failed: %v", err)
 	}
@@ -364,6 +371,7 @@ type OrderItem struct {
 	MatchOrder       string `json:"match_order"`
 	Pubkey           string `json:"pubkey"`
 	LockedCommitment string `json:"locked_commitment"`
+	MatchRound       uint64 `json:"match_round"`
 }
 
 type QueryOrdersResp struct {

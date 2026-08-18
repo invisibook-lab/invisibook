@@ -1,6 +1,6 @@
 # Implementation vs. the Paper
 
-> **Status:** Current (2026-08-17). Compares the code on this branch with
+> **Status:** Current (2026-08-18). Compares the code on this branch with
 > [papers/invisibook.pdf](../papers/invisibook.pdf) ("A Privacy-Preserving,
 > Censorship-Resistant, Decentralized Order Book", NDSS 2026 submission).
 > Update this file when either side changes.
@@ -26,20 +26,20 @@ Legend for the **Effect** column:
 | D1 | Compare submission | Two-step on-chain share assembly of π_cmp and `b` (§VI-B) | One `SubmitCompareCoZk2p` writing: the MPC opens the full π_cmp (MAC-checked), both traders sign `(order_a, order_b, cmp)`, either submits | Equal for integrity; **Weaker** for the `cmp` trit timing (see D1) |
 | D2 | Reveal ordering | Reveal after the chain publishes `b` (§VI-C) | Reveal only after `SubmitCompareCoZk2p` is confirmed and both orders are `Settling` (F1 gate) | Equal |
 | D3 | Settlement updates | Two independent per-side updates (§V-C, §VI-C) | One atomic `SettlePair` writing verifies both legs and mints both payout notes together (F2). The unilateral `SettleSmall`/`SettleLarge` writings are NOT registered — a party holding only the counterparty's signed leg cannot collect alone | **Stronger** (fair exchange) |
-| D4 | Liveness / challenge | Deadlines, freeze penalty, encrypted on-chain reveal challenge, adjudication (§VI-D) | Not implemented. Design only (hardening plan Phase C). `Frozen`/`Cancelled` states exist but are not wired | **Missing** |
-| D5 | Collateral shape | Order spends notes worth `p·q + f`; collateral stays in the shielded layer (§V-B) | Side-dependent collateral (`q` of token1 for a sell, `q·p` of token2 for a buy) carried as a `LockedCommitment` on the order row; fee paid from the same notes | Equal (concretization) |
-| D6 | Execution price | Crossing prices match; the executed price is not pinned (§V-C) | The MATCHER only pairs equal-price orders (crossing-but-unequal orders stay Pending), because the settle circuits require the execution price to equal the collateral price and a Matched pair has no cancel path | **Weaker** (scope restriction; load-bearing for soundness since D17) |
+| D4 | Liveness / challenge | Per-submission deadlines and encrypted on-chain reveal challenge with temporary freeze (§VI-D) | A durable pre-open checkpoint is required from both traders after compare confirmation and before reveal. After 10 blocks, a sole uploader can requeue itself and freeze the non-uploader. The paper's later encrypted on-chain reveal/adjudication and timed unfreeze are not implemented | Partial: same pre-open attribution goal; paper challenge still missing |
+| D5 | Collateral shape | Order spends shielded value `p·q + f`; `f` is the native-token miner fee (§V-B) | Side-dependent collateral (`q` token1 for a sell, `q·p` token2 for a buy) is `LockedCommitment`; separate note banks conserve the collateral asset and native `invis` fee independently (or one combined bank when collateral is `invis`) | Equal (concretization) |
+| D6 | Execution price | Crossing prices match; the executed price is not pinned (§V-C) | Crossing orders match. The maker's limit price is persisted as a common execution price; if the maker is market, the taker's limit is used. Settle proofs pay at execution price and return buy-side price improvement as a shielded refund note | Stronger/different (deterministic execution price) |
 | D7 | Partial-fill relist | The residual becomes a **new** order `o'_B` (§V-C) | The chain relists the **same** order id in place with the residual collateral commitment; block height (time priority) is retained | **Stronger** (keeps priority; same privacy: fresh blinding) |
-| D8 | Matching rule | Price → block height → fee → intra-block index; pairwise (§V-C) | Same priority chain, but the price dimension is an EQUALITY filter (D6): only equal-price candidates compete on height → fee → index | Equal (within D6's scope) |
-| D9 | P2P transport | Anonymous network (Tor) required (§III-A) | Direct QUIC; peer addresses exchanged in plaintext on chain (`RegisterSettleAddr`) | **Dev-only** |
+| D8 | Matching rule | Price → block height → fee → intra-block index; pairwise (§V-C); order price may be a market flag (§V-B) | Pairwise crossing; market candidates first, then best price → block height → fee → intra-block index → order id. Market/market cannot establish an execution price. A market order carries a public protection price for locked-only collateral and slippage bounds | Equal for limit priority; protection price is an implementation addition |
+| D9 | P2P transport | Anonymous network (Tor) required (§III-A) | Direct QUIC; signed X25519 keys and peer addresses are exchanged on chain. The smaller opening is additionally X25519/ChaCha20-Poly1305 encrypted end-to-end, but network metadata remains public | **Dev-only** for anonymity; encrypted reveal implemented |
 | D10 | MPC offline phase | SPDZ with a real preprocessing phase (§VI-A) | `PartyIDBeaverSource` mock triples: predictable masks, **no input privacy, no proof zero-knowledge** | **Dev-only** |
 | D11 | SNARK setup | Black-box collaborative zk-SNARK (§IV-B) | mpc-jellyfish TurboPlonk over a **fixed-seed dev SRS**: anyone can forge proofs | **Dev-only** |
 | D12 | Shielded layer | Assumed from the chain (assumption (iv), §III-A) | Built in-repo: Poseidon note pool, depth-20 tree, nullifiers, 2-slot spends, Orchard-style dummies | Equal (self-hosted) |
 | D13 | Bridge proofs | Out of scope | `NoteDeposit` trusts an operator signature (or nothing, in dev); no inclusion/release proofs | **Dev-only** |
 | D14 | Fee payout | Fee paid to the miner like a Zcash fee (§V-B) | Plaintext fee accrues per block producer; `ClaimFees` mints it as a pool note | Equal |
 | D15 | Settle proof strength | π_B opens the counterparty commitment and proves the residual (§VI-C) | `settle_large` also range-proves `q ≥ q_ctr` (64-bit) and re-commits collateral; `settle_small` does **not** self-prove "I am smaller" (chain `cmp` gate decides) | Mixed: π_B **Stronger**, π_A **Weaker** (F3, open) |
-| D16 | Order identity | `oid` is an opaque unique id | `order_id = SHA-256(nf_0 ‖ nf_1)` over the spent input nullifiers | Equal (concretization) |
-| D17 | Order commitments | The order commits its quantity; settlement opens `cm(q)` (§V-B, §VI) | The order commits ONLY its collateral: `LockedCommitment = P2(needed, r_locked)` with `needed = q·price + side·(q − q·price)`; the hidden `q` is a pure witness pinned by this equation | Equal **within D6's scope**; the equal-price rule becomes load-bearing (see D17) |
+| D16 | Order identity | `oid` is an opaque unique id | `order_id = SHA-256(coll_nf_0 ‖ coll_nf_1 ‖ fee_nf_0 ‖ fee_nf_1)` | Equal (concretization) |
+| D17 | Order commitments | The order commits its quantity; settlement opens `cm(q)` (§V-B, §VI) | The order commits ONLY its collateral: `LockedCommitment = P2(needed(q, own_public_price, side), r_locked)`; compare/settle statements carry each order's own limit/protection price, so unequal public prices do not require a quantity commitment | Equal for priced orders; market protection price is required |
 
 ## 2. Details
 
@@ -55,8 +55,8 @@ while reconstructing the true result locally.
 The implementation collapses this into one writing. Inside the MPC the
 proof is opened with a SPDZ MAC check (`open_authenticated`), so both
 parties hold the **same, verified** π_cmp or the protocol aborts. `cmp`
-is a public input of the proof (5 public signals: `cmp`, the two
-collateral commitments, `price`, `a_is_seller` — D17), both traders
+is a public input of the proof (6 public signals: `cmp`, the two
+collateral commitments, both own prices, `a_is_seller` — D17), both traders
 ed25519-sign the canonical message
 `(order_a, order_b, cmp)`, and either party submits
 `SubmitCompareCoZk2p`. The chain verifies both signatures and the proof.
@@ -79,9 +79,10 @@ The paper orders settlement as: verify π_cmp on chain → publish `b` →
 smaller party reveals `(q, r)` to the larger party. The first
 implementation revealed **before** the compare landed on chain; a
 malicious larger party could learn the smaller quantity and abort with
-no trace. The rev.4 hardening (F1) restored the paper's ordering: the
-session blocks in `confirm_compare_onchain` until both orders are
-`Settling` on chain, and only then reveals. Session-level test:
+no trace. The rev.4 hardening (F1) restored the paper's ordering and the
+current pre-open barrier strengthens it: the session blocks until both
+orders are `Settling` and both signed round checkpoints are on chain, and
+only then releases an authenticated-encrypted reveal. Session-level test:
 `compare_abort_precedes_any_reveal` (cozk2p).
 
 ### D3 — Atomic SettlePair (F2)
@@ -104,39 +105,43 @@ leaves between the two independent updates; a party that withholds its
 leg only griefs symmetrically (both orders stay `Settling`), which is
 exactly the case D4's freeze mechanism is designed to price.
 
-### D4 — Liveness and the challenge mechanism (not implemented)
+### D4 — Pre-open checkpoint liveness
 
-The paper's §VI-D specifies: per-step submission deadlines (Δ_sub = 10
-blocks), a 72-hour freeze of the staller with release of the compliant
-party, an encrypted on-chain reveal challenge
-(`Enc_pkB(q_A, r_A)` + re-encryption adjudication), and no slashing.
-None of this exists on chain yet. What exists is attributability: after
-F1/F2, a stalled settlement leaves the pair visibly `Settling` on chain,
-which is the anchor the freeze mechanism needs. The design is tracked as
-Phase C in
-[settlement_hardening_plan_zh.md](settlement_hardening_plan_zh.md).
+After compare confirmation, the chain derives a commitment to the exact
+pre-open state: canonical pair ids, match round, both locked commitments,
+order kinds and own public prices, common execution price, side, `cmp`, and
+both signed transport keys. Each owner uploads a signed checkpoint for that
+round. The host does not release `(q, r_locked)` until both uploads exist.
+If exactly one upload exists after 10 blocks, its owner can call
+`AbortSettleRound`: the compliant order returns to `Pending` and may rematch;
+the silent order becomes `Frozen`. This makes failure at the reveal boundary
+publicly attributable without publishing the opening.
 
-### D5/D6 — Collateral and the equal-price restriction
+This does not yet implement the paper's later encrypted on-chain reveal
+challenge/re-encryption adjudication, nor its 72-hour automatic unfreeze.
 
-The paper collateralizes every order with `p·q + f` from shielded funds
-and keeps the collateral in the shielded layer. The implementation makes
+### D5/D6 — Native fees and crossing-price settlement
+
+The paper collateralizes every order with `p·q + f` from shielded funds,
+with `f` denominated in the chain's native token. The implementation makes
 collateral side-dependent — a sell locks `q` token1, a buy locks `q·p`
 token2 — and materializes it as a Poseidon commitment
 (`Order.LockedCommitment`) on the order row. The `send_order` circuit
-proves conservation (`inputs = collateral + fee + change`) at admission,
-so the book never holds an uncollateralized order (same §V-B invariant).
+uses separate collateral and native-`invis` input banks and proves each
+asset's conservation at admission. When collateral is itself `invis`, one
+combined equation conserves lock, fee, and both change outputs. Thus the
+book never holds an uncollateralized order and the chain's native fee accrual
+matches the value actually destroyed by the proof.
 The settle circuits open this single commitment directly (D17; the old
 2-slot pad `[LockedCommitment, Poseidon(0,0)]` is gone).
 
-Because collateral is locked at the order's own price and the settle
-circuits equate that price with the execution price, only equal-price
-pairs can settle today — so the MATCHER itself only pairs orders with
-exactly equal prices. Crossing but unequal orders stay Pending (a
-Matched pair has no cancel path; matching it would lock both sides
-forever). The paper's model (any crossing pair matches) needs a
-price-improvement change output in the settle circuits first — and,
-under the locked-only model, a quantity commitment again or a
-redesigned statement (D17).
+Crossing orders now settle at one immutable price selected by the matcher.
+Each locked commitment is opened with its order's own public limit or
+protection price, while transfer notes use the execution price. Excess
+buy-side collateral becomes a separate shielded refund note; residual
+collateral stays priced at that order's own public price. Unequal prices
+therefore no longer weaken the locked-only binding and do not require a
+second quantity commitment.
 
 ### D7 — In-place relist
 
@@ -195,26 +200,26 @@ commitment of its own. It is a pure witness: for `price > 0` the
 collateral equation is injective in `q`, so opening `LockedCommitment`
 against the in-circuit `needed` also fixes `q`. Every statement that
 used to open `cm(q)` now opens the collateral through this equation,
-which is why `price` and the side flag are public inputs of the
-compare statement (`[cmp, locked_a, locked_b, price, a_is_seller]`)
+which is why both own prices and the side flag are public inputs of the
+compare statement (`[cmp, locked_a, locked_b, price_a, price_b, a_is_seller]`)
 and of both settle circuits.
 
-**Consequence — the equal-price rule is load-bearing.** The equation
-pins `q` only when the price in the statement equals the price the
-collateral was locked at, which the matcher's equal-price rule (D6)
-guarantees. D6 was a scope restriction; D17 turns it into a soundness
-precondition. Price improvement or cross-price settlement would need
-the quantity commitment back, or a redesigned statement.
+**Consequence — each order's own public price is load-bearing.** The
+equation pins `q` when the price in its opening statement equals the price
+used at admission. The two prices need not equal one another. Execution
+price is used only for transfer/refund arithmetic. Because a price-free
+market buy cannot pin quantity from quote-asset collateral in this model,
+the implementation requires a public protection price for every market
+order; it is a collateral/slippage bound, not a limit-book price.
 
-**What it buys:** one commitment per order instead of two; smaller
-statements (compare 5 publics instead of a commitment pair per order;
-`settle_small` 6, `settle_large` 8); a relist rewrites only the
+**What it buys:** one commitment per order instead of two; compare has 6
+publics, `settle_small` 8, and `settle_large` 11; a relist rewrites only the
 collateral commitment — no quantity residual exists.
 
 - §VI-B share commitments `cm_b_A`, `cm_b_B` and binding proofs π_bind
   (subsumed by D1's dual-signature design).
-- §VI-D enforcement requests, encrypted reveal, re-encryption
-  adjudication, freeze timers (D4).
+- §VI-D encrypted on-chain reveal/re-encryption adjudication and automatic
+  freeze expiry (D4); the pre-open checkpoint freeze is implemented.
 - §III-A anonymous communication network (D9).
 
 ## 4. Code mechanisms with no paper counterpart

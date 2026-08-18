@@ -162,7 +162,9 @@ impl NoteStore {
         if let Some(single) = unspent.iter().rev().find(|r| r.amount >= need) {
             return Some(vec![(*single).clone()]);
         }
-        if unspent.len() >= 2 && unspent[0].amount + unspent[1].amount >= need {
+        if unspent.len() >= 2
+            && u128::from(unspent[0].amount) + u128::from(unspent[1].amount) >= u128::from(need)
+        {
             return Some(vec![unspent[0].clone(), unspent[1].clone()]);
         }
         None

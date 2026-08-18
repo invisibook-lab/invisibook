@@ -22,6 +22,7 @@ use cozk2p::{
     verify_settle,
 };
 use mpc_plonk::proof_system::structs::Proof;
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 /// Fixed dummy signatures: content is opaque to the session (the app layer
 /// verifies real ed25519 signatures); the session only ferries them.
@@ -50,16 +51,20 @@ impl SigIo for TestSigIo {
 }
 
 /// The sample trade: A (maker) SELLS 80 token1 at price 3 and locks 80;
-/// B BUYS 60 and locks 180. cmp = 1, fill = 60; A keeps 20 on the book and
-/// receives 180 token2.
+/// B BUYS 60 with protection price 4 and locks 240. The maker price 3 is
+/// the execution price. cmp = 1, fill = 60; A keeps 20 on the book and
+/// receives 180 token2, while B receives a 60-token price-improvement refund.
 fn inputs() -> (SessionInput, SessionInput) {
-    let price = 3u64;
     // Locked-only model: the collateral commitment is the order's ONLY
     // on-chain commitment.
     let locked_a = fr_to_hex(&commit(80, &[0xA3; 32]));
-    let locked_b = fr_to_hex(&commit(180, &[0xB3; 32]));
+    let locked_b = fr_to_hex(&commit(240, &[0xB3; 32]));
 
     let npk_hex = |seed: u8| fr_to_hex(&commit(seed as u64, &[seed; 32]));
+    let secret_a = StaticSecret::from([0x31u8; 32]);
+    let secret_b = StaticSecret::from([0x32u8; 32]);
+    let public_a = X25519PublicKey::from(&secret_a);
+    let public_b = X25519PublicKey::from(&secret_b);
     let base = |role: &str, my: MyPrivate| SessionInput {
         role: role.to_string(),
         order_a_id: "order-a".into(),
@@ -71,11 +76,24 @@ fn inputs() -> (SessionInput, SessionInput) {
         },
         my_lock_token: if role == "trader-a" { "ETH" } else { "USDT" }.into(),
         my_recv_token: if role == "trader-a" { "USDT" } else { "ETH" }.into(),
-        price,
+        price_a: 3,
+        price_b: 4,
+        execution_price: 3,
         a_is_seller: true,
         locked_a: locked_a.clone(),
         locked_b: locked_b.clone(),
         my_recv_npk: npk_hex(if role == "trader-a" { 0x51 } else { 0x52 }),
+        my_refund_npk: npk_hex(if role == "trader-a" { 0x61 } else { 0x62 }),
+        transport_secret: hex::encode(if role == "trader-a" {
+            secret_a.to_bytes()
+        } else {
+            secret_b.to_bytes()
+        }),
+        peer_transport_pubkey: hex::encode(if role == "trader-a" {
+            public_b.as_bytes()
+        } else {
+            public_a.as_bytes()
+        }),
         my,
     };
     let a = base(
@@ -144,6 +162,7 @@ async fn session_happy_path() {
             let my_leg = SettleLeg {
                 is_a: i_am_a,
                 cm_note_out: result.my.recv_commitment.clone(),
+                cm_refund_out: result.my.refund_commitment.clone(),
                 signature: sig.to_string(),
                 zk_proof: format!("proof-of-{}", input.role),
                 cm_locked_residual: result.my.new_locked_commitment.clone(),
@@ -161,7 +180,8 @@ async fn session_happy_path() {
     // Identical public statement, proof, and signatures on both sides.
     assert_eq!(result_a.cmp, 1);
     assert_eq!(result_b.cmp, 1);
-    assert_eq!(result_a.public.price, 3);
+    assert_eq!(result_a.public.price_a, 3);
+    assert_eq!(result_a.public.price_b, 4);
     assert!(result_a.public.a_is_seller);
     assert_eq!(
         serde_json::to_string(&result_a.public).unwrap(),
@@ -210,13 +230,13 @@ async fn session_happy_path() {
         fr_to_hex(&Fr::from_be_bytes_mod_order(&[0xB3u8; 32]))
     );
     // A can rebuild B's on-chain collateral commitment from the reveal:
-    // B is the buyer, so needed = q_ctr * price.
+    // B is the buyer, so needed = q_ctr * B's protection price.
     {
         let mut r = [0u8; 32];
         r.copy_from_slice(&hex::decode(&result_a.my.ctr_r_locked).unwrap());
         assert_eq!(
-            fr_to_hex(&commit(result_a.my.ctr_order_amount * 3, &r)),
-            fr_to_hex(&commit(180, &[0xB3; 32])),
+            fr_to_hex(&commit(result_a.my.ctr_order_amount * 4, &r)),
+            fr_to_hex(&commit(240, &[0xB3; 32])),
             "the reveal must open B's locked commitment"
         );
     }
@@ -253,6 +273,14 @@ async fn session_happy_path() {
         &result_b.my.r_recv,
         &result_b.my.recv_commitment,
     );
+    assert_eq!(result_b.my.refund_amount, 60);
+    open_note(
+        &result_b.my.refund_npk,
+        "USDT",
+        60,
+        &result_b.my.r_refund,
+        &result_b.my.refund_commitment,
+    );
     // The exchanged payout-note pairs crossed correctly: what A holds as
     // the counterparty pair is B's own (npk, r) and vice versa.
     assert_eq!(result_a.my.ctr_recv_npk, result_b.my.recv_npk);
@@ -268,6 +296,8 @@ async fn session_happy_path() {
         assert_eq!(legs.1.zk_proof, "proof-of-trader-b");
         assert_eq!(legs.0.cm_note_out, result_a.my.recv_commitment);
         assert_eq!(legs.1.cm_note_out, result_b.my.recv_commitment);
+        assert_eq!(legs.0.cm_refund_out, result_a.my.refund_commitment);
+        assert_eq!(legs.1.cm_refund_out, result_b.my.refund_commitment);
         assert_eq!(legs.0.cm_locked_residual, result_a.my.new_locked_commitment);
         assert!(legs.1.cm_locked_residual.is_empty());
     }

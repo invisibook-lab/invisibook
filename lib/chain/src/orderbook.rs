@@ -28,13 +28,19 @@ pub fn compute_order_id(input_nullifiers: &[String]) -> OrderID {
 
 /// Orders a matched pair deterministically, mirroring Go `makerTakerOrder`
 /// (chain/core/orderbook_cozk.go): the maker is the order with the lower
-/// `block_height`; on a tie, the order with the lexicographically smaller
-/// `id`. Returns `(maker, taker)`.
+/// `block_height`; on a tie, the lower intra-block index; then the
+/// lexicographically smaller `id`. Returns `(maker, taker)`.
 pub fn maker_taker<'a>(x: &'a Order, y: &'a Order) -> (&'a Order, &'a Order) {
     if x.block_height < y.block_height {
         return (x, y);
     }
     if y.block_height < x.block_height {
+        return (y, x);
+    }
+    if x.intra_block_index < y.intra_block_index {
+        return (x, y);
+    }
+    if y.intra_block_index < x.intra_block_index {
         return (y, x);
     }
     if x.id <= y.id {
@@ -44,11 +50,15 @@ pub fn maker_taker<'a>(x: &'a Order, y: &'a Order) -> (&'a Order, &'a Order) {
 }
 
 pub fn sort_orders(orders: &mut [Order]) {
-    orders.sort_by(|a, b| match (a.price, b.price) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Greater, // None goes to end
-        (Some(_), None) => Ordering::Less,    // Some comes first
-        (Some(pa), Some(pb)) => pb.cmp(&pa),  // descending by price
+    orders.sort_by(|a, b| match (a.kind, b.kind) {
+        (OrderKind::Market, OrderKind::Limit) => Ordering::Less,
+        (OrderKind::Limit, OrderKind::Market) => Ordering::Greater,
+        _ => match (a.price, b.price) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater, // None goes to end
+            (Some(_), None) => Ordering::Less,    // Some comes first
+            (Some(pa), Some(pb)) => pb.cmp(&pa),  // descending by price
+        },
     });
 }
 
@@ -75,9 +85,13 @@ pub fn sample_orders() -> Vec<Order> {
         let id = compute_order_id(std::slice::from_ref(&fake_nf));
         Order {
             id,
+            kind: OrderKind::Limit,
             trade_type,
             subject,
             price: Some(price),
+            protection_price: None,
+            execution_price: None,
+            match_round: 0,
             pubkey: String::new(),
             locked_commitment: locked,
             fee: 0,
@@ -146,12 +160,16 @@ mod tests {
     fn test_order(id: &str, block_height: u32, tag: &str) -> Order {
         Order {
             id: id.to_string(),
+            kind: OrderKind::Limit,
             trade_type: TradeType::Buy,
             subject: TradePair {
                 token1: "ETH".into(),
                 token2: "USDT".into(),
             },
             price: None,
+            protection_price: None,
+            execution_price: None,
+            match_round: 0,
             pubkey: tag.to_string(),
             locked_commitment: String::new(),
             fee: 0,

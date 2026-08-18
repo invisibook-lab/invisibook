@@ -8,7 +8,8 @@
 //! summary table):
 //!
 //! 1. SendOrder: real send_order Groth16 proofs spending genesis pool
-//!    notes (Alice sells 2 ETH @ 3, Bob buys 1 ETH @ 3), then matching.
+//!    notes (Alice limit-sells 2 ETH @ 3, Bob market-buys 1 ETH with
+//!    protection price 4), then crossing-price matching at maker price 3.
 //! 2. Collaborative compare (subprocess, PLONK verification ON on chain),
 //!    with the F1 two-phase ordering: the app lands SubmitCompareCoZk2p
 //!    and confirms BOTH orders Settling before the subprocess reveals.
@@ -39,7 +40,7 @@ use invisibook_lib::{
     note::{asset_id, fr_from_be_bytes, note_commit, note_fr_to_hex, npk_from_sk},
     note_store::{NOTE_UNSPENT, NoteRecord},
     order_store::OrderOpening,
-    types::{Order, OrderStatus, TradeType},
+    types::{Order, OrderKind, OrderStatus, TradeType},
 };
 use invisibook_ui::{
     components::trade_form::prepare_order,
@@ -59,7 +60,8 @@ const CHAIN_ID: u64 = 1926;
 
 const TOKEN1: &str = "ETH";
 const TOKEN2: &str = "USDT";
-const PRICE: u64 = 3;
+const SELL_PRICE: u64 = 3;
+const BUY_PROTECTION_PRICE: u64 = 4;
 
 // ─────────────────────────────── Helpers ────────────────────────────────
 
@@ -131,7 +133,7 @@ memo = "alice 2 ETH"
 
 [[account.genesis_note]]
 cm   = "{bob_cm}"
-memo = "bob 3 USDT"
+memo = "bob 4 USDT"
 "#
     )
 }
@@ -210,16 +212,23 @@ async fn place_order(
     } else {
         TOKEN2
     };
+    let (kind, collateral_price) = if trade_type == TradeType::Sell {
+        (OrderKind::Limit, SELL_PRICE)
+    } else {
+        (OrderKind::Market, BUY_PROTECTION_PRICE)
+    };
     let tree = client.fetch_note_tree().await.expect("fetch note tree");
     let t = Instant::now();
     let prepared = prepare_order(
         CHAIN_ID,
         &tree,
         std::slice::from_ref(note),
+        &[],
         lock_token,
         (TOKEN1.into(), TOKEN2.into()),
         trade_type,
-        PRICE,
+        kind,
+        collateral_price,
         q,
         0, // fee 0: the genesis notes back the collateral exactly
     )
@@ -297,9 +306,9 @@ async fn settle_e2e_scenario() {
     ));
 
     // ── Genesis pool notes: Alice holds 2 ETH (backs her 2-ETH sell
-    //    exactly), Bob holds 3 USDT (backs his 1-ETH buy at price 3). ──
+    //    exactly), Bob holds 4 USDT (backs his protected market buy). ──
     let alice_note = genesis_note(0x42, 0x33, TOKEN1, 2, 0);
-    let bob_note = genesis_note(0x43, 0x34, TOKEN2, 3, 1);
+    let bob_note = genesis_note(0x43, 0x34, TOKEN2, 4, 1);
 
     // ── Write the generated config and start a fresh chain on it ──
     let config = render_config(&alice_note.cm, &bob_note.cm);
@@ -346,6 +355,11 @@ async fn settle_e2e_scenario() {
         alice_matched.block_height < bob_matched.block_height,
         "sell must be placed in an earlier block than the buy (maker = seller)"
     );
+    assert_eq!(alice_matched.kind, OrderKind::Limit);
+    assert_eq!(bob_matched.kind, OrderKind::Market);
+    assert_eq!(bob_matched.protection_price, Some(BUY_PROTECTION_PRICE));
+    assert_eq!(alice_matched.execution_price, Some(SELL_PRICE));
+    assert_eq!(bob_matched.execution_price, Some(SELL_PRICE));
     let pool_before_settle = leaf_count(&alice).await;
 
     // ── Settle deps: shared prover + keys dir, per-party session dir ──
@@ -423,6 +437,13 @@ async fn settle_e2e_scenario() {
     assert_eq!(bob_outcome.recv.token, TOKEN1);
     assert_eq!(bob_outcome.recv.amount, 1);
     assert!(bob_outcome.remainder.is_none(), "bob fully fills");
+    assert!(alice_outcome.refund.is_none(), "seller has no price refund");
+    let bob_refund = bob_outcome
+        .refund
+        .as_ref()
+        .expect("market buyer receives protection-price improvement");
+    assert_eq!(bob_refund.token, TOKEN2);
+    assert_eq!(bob_refund.amount, 1, "buyer locks 4 and executes at 3");
 
     // ── On-chain end state ──
     // Bob's order is Done.
@@ -445,8 +466,9 @@ async fn settle_e2e_scenario() {
         "collateral commitment must be rewritten to the residual commitment"
     );
 
-    // ── Payout NOTES exist in the pool tree; the atomic SettlePair minted
-    //    exactly the two of them (F2: both or nothing). ──
+    // ── Payout NOTES exist in the pool tree; the atomic SettlePair also
+    //    mints two hiding refund commitments (Alice's is zero; Bob's opens
+    //    to the 1-USDT price improvement). All four land atomically. ──
     assert!(
         bob.get_note_by_cm(&bob_outcome.recv.cm)
             .await
@@ -464,8 +486,8 @@ async fn settle_e2e_scenario() {
     );
     assert_eq!(
         leaf_count(&alice).await,
-        pool_before_settle + 2,
-        "settlement must mint exactly the two payout notes"
+        pool_before_settle + 4,
+        "settlement must mint two payouts and two hiding refund notes"
     );
 
     // ── Per-step timing summary (session-internal phases from the
@@ -557,7 +579,7 @@ async fn settle_e2e_scenario() {
     //    run stays side-effect free. ──
     if let Ok(stats_out) = std::env::var("INVISIBOOK_E2E_STATS") {
         let report = serde_json::json!({
-            "scenario": "one trade: A sells 2 ETH @ 3 (maker), B buys 1 ETH @ 3",
+            "scenario": "one trade: A limit-sells 2 ETH @ 3 (maker), B market-buys 1 ETH with protection 4",
             "order": {
                 "alice": {"prove_ms": alice_prove_ms, "land_ms": alice_land_ms},
                 "bob": {"prove_ms": bob_prove_ms, "land_ms": bob_land_ms},

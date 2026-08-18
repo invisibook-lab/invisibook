@@ -13,7 +13,7 @@ use invisibook_lib::{
 use invisibook_lib::{
     chain::{SendOrderParams, SubmitError, TradePairJson},
     note::{asset_id, fr_from_be_bytes, note_fr_to_hex, npk_from_sk, send_order_bind},
-    note_prover::{SendOrderWitness, SpendSlot, prove_send_order, required_collateral},
+    note_prover::{SendOrderWitness, SpendSlot, checked_required_collateral, prove_send_order},
     note_store::NoteRecord,
     note_tree::NoteTree,
     order_store::OrderOpening,
@@ -31,40 +31,16 @@ pub struct PreparedOrder {
     pub opening: OrderOpening,
     /// (cm, nullifier) per spent input note (marks them pending-spend).
     pub spent: Vec<(String, String)>,
-    /// The change note to track, absent when the inputs were exact.
-    pub change: Option<NoteRecord>,
+    /// Non-zero collateral/native-fee change notes to track.
+    pub changes: Vec<NoteRecord>,
 }
 
-/// Build the complete SendOrder request from selected notes: spend slots
-/// with Merkle paths, fresh (collateral, change) commitments, the bind,
-/// and the rapidsnark proof. Pure CPU — call from a blocking context.
-/// `notes` must be 1..=2 unspent records of `lock_token` whose sum covers
-/// `collateral + fee`.
 #[cfg(not(target_os = "android"))]
-#[allow(clippy::too_many_arguments)]
-pub fn prepare_order(
-    chain_id: u64,
-    tree: &NoteTree,
-    notes: &[NoteRecord],
-    lock_token: &str,
-    subject: (String, String),
-    trade_type: TradeType,
-    price: u64,
-    q: u64,
-    fee: u64,
-) -> Result<PreparedOrder, String> {
-    use rand::RngCore;
-
-    let side_sell = trade_type == TradeType::Sell;
-    let lock_asset = asset_id(lock_token)?;
-    let collateral = required_collateral(q, price, side_sell);
-    let total_in: u64 = notes.iter().map(|r| r.amount).sum();
-    let v_change = total_in
-        .checked_sub(collateral + fee)
-        .ok_or("selected notes do not cover collateral + fee")?;
-
-    // Spend slots with Merkle paths; pad to 2 with a dummy.
-    let mut slots_vec = Vec::new();
+fn spend_slots(tree: &NoteTree, notes: &[NoteRecord]) -> Result<[SpendSlot; 2], String> {
+    if notes.len() > 2 {
+        return Err("send_order supports at most two notes per asset".into());
+    }
+    let mut slots = Vec::new();
     for rec in notes {
         let sk_raw = hex::decode(&rec.sk).map_err(|e| format!("note sk hex: {e}"))?;
         let sk_arr: [u8; 32] = sk_raw
@@ -75,7 +51,7 @@ pub fn prepare_order(
             .try_into()
             .map_err(|_| "note r must be 32 bytes".to_string())?;
         let (path, bits) = tree.path(rec.leaf_index);
-        slots_vec.push(SpendSlot::real(
+        slots.push(SpendSlot::real(
             fr_from_be_bytes(&sk_arr),
             rec.amount,
             fr_from_be_bytes(&r_arr),
@@ -83,17 +59,90 @@ pub fn prepare_order(
             bits,
         ));
     }
-    while slots_vec.len() < 2 {
-        slots_vec.push(SpendSlot::dummy());
+    while slots.len() < 2 {
+        slots.push(SpendSlot::dummy());
     }
-    let slots: [SpendSlot; 2] = slots_vec.try_into().expect("exactly two slots");
+    Ok(slots.try_into().expect("exactly two slots"))
+}
+
+/// Build the complete SendOrder request from selected notes: spend slots
+/// with Merkle paths, fresh (collateral, change) commitments, the bind,
+/// and the rapidsnark proof. Pure CPU — call from a blocking context.
+/// Each note bank contains at most two notes. For non-native collateral the
+/// fee bank must consist of `invis` notes. For native collateral the
+/// collateral bank funds both lock and fee and the fee bank is empty.
+#[cfg(not(target_os = "android"))]
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_order(
+    chain_id: u64,
+    tree: &NoteTree,
+    collateral_notes: &[NoteRecord],
+    fee_notes: &[NoteRecord],
+    lock_token: &str,
+    subject: (String, String),
+    trade_type: TradeType,
+    kind: OrderKind,
+    collateral_price: u64,
+    q: u64,
+    fee: u64,
+) -> Result<PreparedOrder, String> {
+    use rand::RngCore;
+
+    let side_sell = trade_type == TradeType::Sell;
+    let lock_asset = asset_id(lock_token)?;
+    let native_asset = asset_id(NATIVE_TOKEN)?;
+    let collateral = checked_required_collateral(q, collateral_price, side_sell)
+        .ok_or("required collateral exceeds 64 bits")?;
+    let checked_sum = |notes: &[NoteRecord], bank: &str| {
+        notes.iter().try_fold(0u64, |sum, note| {
+            sum.checked_add(note.amount)
+                .ok_or_else(|| format!("{bank} note total exceeds 64 bits"))
+        })
+    };
+    let collateral_in = checked_sum(collateral_notes, "collateral")?;
+    let fee_in = checked_sum(fee_notes, "fee")?;
+    let (v_collateral_change, v_fee_change) = if lock_token == NATIVE_TOKEN {
+        if !fee_notes.is_empty() {
+            return Err("native collateral orders must use one combined note bank".into());
+        }
+        let total_required = collateral
+            .checked_add(fee)
+            .ok_or("collateral plus fee exceeds 64 bits")?;
+        (
+            collateral_in
+                .checked_sub(total_required)
+                .ok_or("selected invis notes do not cover collateral + fee")?,
+            0,
+        )
+    } else {
+        (
+            collateral_in
+                .checked_sub(collateral)
+                .ok_or("selected notes do not cover collateral")?,
+            fee_in
+                .checked_sub(fee)
+                .ok_or("selected invis notes do not cover fee")?,
+        )
+    };
+    let collateral_slots = spend_slots(tree, collateral_notes)?;
+    let fee_slots = spend_slots(tree, fee_notes)?;
 
     // Nullifiers determine the order id (SHA-256 over nf0 || nf1).
-    let nf_hex = [
-        note_fr_to_hex(&slots[0].nullifier(lock_asset)),
-        note_fr_to_hex(&slots[1].nullifier(lock_asset)),
+    let collateral_nf = [
+        note_fr_to_hex(&collateral_slots[0].nullifier(lock_asset)),
+        note_fr_to_hex(&collateral_slots[1].nullifier(lock_asset)),
     ];
-    let order_id = orderbook::compute_order_id(&nf_hex);
+    let fee_nf = [
+        note_fr_to_hex(&fee_slots[0].nullifier(native_asset)),
+        note_fr_to_hex(&fee_slots[1].nullifier(native_asset)),
+    ];
+    let all_nf = [
+        collateral_nf[0].clone(),
+        collateral_nf[1].clone(),
+        fee_nf[0].clone(),
+        fee_nf[1].clone(),
+    ];
+    let order_id = orderbook::compute_order_id(&all_nf);
 
     // Fresh blindings + a fresh change-note spending secret.
     let mut rng = rand::rng();
@@ -102,33 +151,47 @@ pub fn prepare_order(
         rng.fill_bytes(&mut b);
         b
     };
-    let (r_locked, r_change, change_sk) = (draw(), draw(), draw());
+    let (r_locked, r_coll_change, coll_change_sk, r_fee_change, fee_change_sk) =
+        (draw(), draw(), draw(), draw(), draw());
 
     let w = SendOrderWitness {
-        slots,
+        collateral_slots,
+        fee_slots,
         anchor: tree.root(),
         lock_asset,
+        native_asset,
         q,
         r_locked: fr_from_be_bytes(&r_locked),
-        price,
+        price: collateral_price,
         side_sell,
         fee,
-        npk_change: npk_from_sk(fr_from_be_bytes(&change_sk)),
-        v_change,
-        r_change: fr_from_be_bytes(&r_change),
+        npk_collateral_change: npk_from_sk(fr_from_be_bytes(&coll_change_sk)),
+        v_collateral_change,
+        r_collateral_change: fr_from_be_bytes(&r_coll_change),
+        npk_fee_change: npk_from_sk(fr_from_be_bytes(&fee_change_sk)),
+        v_fee_change,
+        r_fee_change: fr_from_be_bytes(&r_fee_change),
         bind: fr_from_be_bytes(&[0u8; 32]),
     };
-    let (locked_cm, cm_change) = w.output_commitments();
+    let (locked_cm, cm_coll_change, cm_fee_change) = w.output_commitments();
     let mut w = w;
     w.bind = send_order_bind(
         chain_id,
         &order_id,
+        if kind == OrderKind::Market { 1 } else { 0 },
+        if side_sell { 1 } else { 0 },
+        &subject.0,
+        &subject.1,
+        collateral_price,
         lock_token,
-        &nf_hex[0],
-        &nf_hex[1],
+        &collateral_nf[0],
+        &collateral_nf[1],
+        &fee_nf[0],
+        &fee_nf[1],
         &note_fr_to_hex(&locked_cm),
         fee,
-        &note_fr_to_hex(&cm_change),
+        &note_fr_to_hex(&cm_coll_change),
+        &note_fr_to_hex(&cm_fee_change),
     );
 
     let setup =
@@ -139,19 +202,23 @@ pub fn prepare_order(
 
     let params = SendOrderParams {
         id: order_id.clone(),
+        kind: if kind == OrderKind::Market { 1 } else { 0 },
         trade_type: if side_sell { 1 } else { 0 },
         subject: TradePairJson {
             token1: subject.0,
             token2: subject.1,
         },
-        price: Some(price),
+        price: (kind == OrderKind::Limit).then_some(collateral_price),
+        protection_price: (kind == OrderKind::Market).then_some(collateral_price),
         pubkey: String::new(),    // filled by ChainClient::send_order
         signature: String::new(), // filled by ChainClient::send_order
         anchor: note_fr_to_hex(&tree.root()),
-        input_nullifiers: proof.nf_hex.to_vec(),
+        collateral_nullifiers: proof.collateral_nf_hex.to_vec(),
+        fee_nullifiers: proof.fee_nf_hex.to_vec(),
         locked_commitment: proof.locked_commitment_hex.clone(),
         fee,
-        change_commitment: proof.cm_change_hex.clone(),
+        collateral_change_commitment: proof.cm_collateral_change_hex.clone(),
+        fee_change_commitment: proof.cm_fee_change_hex.clone(),
         zk_proof: serde_json::to_string(&proof.proof_json).map_err(|e| e.to_string())?,
     };
     let opening = OrderOpening {
@@ -161,30 +228,51 @@ pub fn prepare_order(
         r_locked: hex::encode(r_locked),
         lock_token: lock_token.to_string(),
     };
-    let spent = notes
+    let mut spent: Vec<_> = collateral_notes
         .iter()
-        .zip(proof.nf_hex.iter())
+        .zip(proof.collateral_nf_hex.iter())
         .map(|(rec, nf)| (rec.cm.clone(), nf.clone()))
         .collect();
-    // A zero-value change leaf still lands on chain, but the wallet has no
-    // reason to track dust it can never usefully spend.
-    let change = (v_change > 0).then(|| NoteRecord {
-        cm: proof.cm_change_hex.clone(),
-        token: lock_token.to_string(),
-        amount: v_change,
-        r: hex::encode(r_change),
-        key_index: 0,
-        sk: hex::encode(change_sk),
-        leaf_index: 0,
-        status: NOTE_PENDING_MINT,
-        nf: String::new(),
-        pending_order: opening.order_id.clone(),
-    });
+    spent.extend(
+        fee_notes
+            .iter()
+            .zip(proof.fee_nf_hex.iter())
+            .map(|(rec, nf)| (rec.cm.clone(), nf.clone())),
+    );
+    let mut changes = Vec::new();
+    if v_collateral_change > 0 {
+        changes.push(NoteRecord {
+            cm: proof.cm_collateral_change_hex.clone(),
+            token: lock_token.to_string(),
+            amount: v_collateral_change,
+            r: hex::encode(r_coll_change),
+            key_index: 0,
+            sk: hex::encode(coll_change_sk),
+            leaf_index: 0,
+            status: NOTE_PENDING_MINT,
+            nf: String::new(),
+            pending_order: opening.order_id.clone(),
+        });
+    }
+    if v_fee_change > 0 {
+        changes.push(NoteRecord {
+            cm: proof.cm_fee_change_hex.clone(),
+            token: NATIVE_TOKEN.to_string(),
+            amount: v_fee_change,
+            r: hex::encode(r_fee_change),
+            key_index: 0,
+            sk: hex::encode(fee_change_sk),
+            leaf_index: 0,
+            status: NOTE_PENDING_MINT,
+            nf: String::new(),
+            pending_order: opening.order_id.clone(),
+        });
+    }
     Ok(PreparedOrder {
         params,
         opening,
         spent,
-        change,
+        changes,
     })
 }
 
@@ -206,7 +294,7 @@ pub fn persist_prepared(
             rec.pending_order = prepared.opening.order_id.clone();
         }
     }
-    if let Some(change) = &prepared.change {
+    for change in &prepared.changes {
         notes.upsert(change.clone());
     }
     notes.save().map_err(|e| format!("saving notes: {e}"))?;
@@ -229,7 +317,7 @@ pub fn rollback_prepared(notes: &mut NoteStore, orders: &mut OrderStore, prepare
             rec.pending_order = String::new();
         }
     }
-    if let Some(change) = &prepared.change {
+    for change in &prepared.changes {
         let cm = change.cm.clone();
         notes.retain(|r| r.cm != cm);
     }
@@ -272,6 +360,7 @@ pub fn TradeForm(
 ) -> Element {
     // ── Form state ──
     let mut side = use_signal(|| TradeType::Buy);
+    let mut order_kind = use_signal(|| OrderKind::Limit);
     let mut token1 = use_signal(|| "ETH".to_string());
     let mut token2 = use_signal(|| "USDT".to_string());
     let mut price_input = use_signal(String::new);
@@ -281,6 +370,7 @@ pub fn TradeForm(
 
     // ── Derived ──
     let current_side = *side.read();
+    let current_kind = *order_kind.read();
     let t1_display = token1.read().clone();
     let t2_display = token2.read().clone();
 
@@ -349,12 +439,13 @@ pub fn TradeForm(
         };
 
         let trade_type = *side.read();
+        let kind = *order_kind.read();
         let t1 = token1.read().clone();
         let t2 = token2.read().clone();
 
         #[cfg(target_os = "android")]
         {
-            let _ = (price, q, fee, trade_type, &t1, &t2);
+            let _ = (price, q, fee, trade_type, kind, &t1, &t2);
             message.set(Some((
                 "✗ On-device order proving is not supported on mobile yet".into(),
                 true,
@@ -369,18 +460,47 @@ pub fn TradeForm(
             } else {
                 t1.clone()
             };
-            let collateral = required_collateral(q, price, trade_type == TradeType::Sell);
-            let need = collateral + fee;
+            let Some(collateral) =
+                checked_required_collateral(q, price, trade_type == TradeType::Sell)
+            else {
+                message.set(Some(("✗ Required collateral exceeds 64 bits".into(), true)));
+                return;
+            };
+            let collateral_need = if lock_token == NATIVE_TOKEN {
+                let Some(total) = collateral.checked_add(fee) else {
+                    message.set(Some(("✗ Collateral plus fee exceeds 64 bits".into(), true)));
+                    return;
+                };
+                total
+            } else {
+                collateral
+            };
 
-            // Note selection happens on spendable (leaf-indexed) notes only.
-            let selected = match note_store.read().select_unspent(&lock_token, need) {
+            let collateral_notes = match note_store
+                .read()
+                .select_unspent(&lock_token, collateral_need)
+            {
                 Some(sel) => sel,
                 None => {
                     message.set(Some((
-                        format!("✗ Insufficient {lock_token} balance (need {need})"),
+                        format!("✗ Insufficient {lock_token} balance (need {collateral_need})"),
                         true,
                     )));
                     return;
+                }
+            };
+            let fee_notes = if lock_token == NATIVE_TOKEN || fee == 0 {
+                Vec::new()
+            } else {
+                match note_store.read().select_unspent(NATIVE_TOKEN, fee) {
+                    Some(sel) => sel,
+                    None => {
+                        message.set(Some((
+                            format!("✗ Insufficient {NATIVE_TOKEN} balance for fee (need {fee})"),
+                            true,
+                        )));
+                        return;
+                    }
                 }
             };
 
@@ -399,10 +519,12 @@ pub fn TradeForm(
                     &client,
                     note_store,
                     order_store,
-                    selected,
+                    collateral_notes,
+                    fee_notes,
                     lock_token,
                     (t1.clone(), t2.clone()),
                     trade_type,
+                    kind,
                     price,
                     q,
                     fee,
@@ -462,6 +584,19 @@ pub fn TradeForm(
             // ── Form ──
             div { class: "trade-form",
 
+                div { class: "side-tabs",
+                    div {
+                        class: if current_kind == OrderKind::Limit { "side-tab buy-active" } else { "side-tab" },
+                        onclick: move |_| order_kind.set(OrderKind::Limit),
+                        "Limit"
+                    }
+                    div {
+                        class: if current_kind == OrderKind::Market { "side-tab buy-active" } else { "side-tab" },
+                        onclick: move |_| order_kind.set(OrderKind::Market),
+                        "Market"
+                    }
+                }
+
                 // Pair selector
                 div { class: "pair-row",
                     select {
@@ -485,7 +620,7 @@ pub fn TradeForm(
 
                 // Price
                 div { class: "input-group",
-                    span { class: "input-label", "Price" }
+                    span { class: "input-label", if current_kind == OrderKind::Market { "Protection Price" } else { "Price" } }
                     div { class: "input-wrapper",
                         input {
                             class: "input-field",
@@ -527,6 +662,7 @@ pub fn TradeForm(
                             value: "{fee_input}",
                             oninput: move |evt: Event<FormData>| fee_input.set(evt.value()),
                         }
+                        span { class: "input-suffix", "{NATIVE_TOKEN}" }
                     }
                 }
 
@@ -601,10 +737,12 @@ async fn submit_order(
     client: &Arc<ChainClient>,
     mut note_store: Signal<NoteStore>,
     mut order_store: Signal<OrderStore>,
-    selected: Vec<NoteRecord>,
+    collateral_notes: Vec<NoteRecord>,
+    fee_notes: Vec<NoteRecord>,
     lock_token: String,
     subject: (String, String),
     trade_type: TradeType,
+    kind: OrderKind,
     price: u64,
     q: u64,
     fee: u64,
@@ -620,10 +758,12 @@ async fn submit_order(
         prepare_order(
             chain_id,
             &tree,
-            &selected,
+            &collateral_notes,
+            &fee_notes,
             &lock_token,
             subject,
             trade_type,
+            kind,
             price,
             q,
             fee,
@@ -679,19 +819,23 @@ mod submit_tests {
         PreparedOrder {
             params: SendOrderParams {
                 id: order_id.into(),
+                kind: 0,
                 trade_type: 0,
                 subject: TradePairJson {
                     token1: "ETH".into(),
                     token2: "USDT".into(),
                 },
                 price: Some(3),
+                protection_price: None,
                 pubkey: String::new(),
                 signature: String::new(),
                 anchor: "bb".repeat(32),
-                input_nullifiers: vec!["cc".repeat(32), "dd".repeat(32)],
+                collateral_nullifiers: vec!["cc".repeat(32), "dd".repeat(32)],
+                fee_nullifiers: vec!["11".repeat(32), "22".repeat(32)],
                 locked_commitment: "ee".repeat(32),
                 fee: 0,
-                change_commitment: "ff".repeat(32),
+                collateral_change_commitment: "ff".repeat(32),
+                fee_change_commitment: "aa".repeat(32),
                 zk_proof: "{}".into(),
             },
             opening: OrderOpening {
@@ -702,7 +846,7 @@ mod submit_tests {
                 lock_token: "USDT".into(),
             },
             spent: vec![(input_cm.to_string(), "cc".repeat(32))],
-            change: Some(NoteRecord {
+            changes: vec![NoteRecord {
                 cm: "ff".repeat(32),
                 token: "USDT".into(),
                 amount: 4,
@@ -713,7 +857,7 @@ mod submit_tests {
                 status: NOTE_PENDING_MINT,
                 nf: String::new(),
                 pending_order: order_id.into(),
-            }),
+            }],
         }
     }
 

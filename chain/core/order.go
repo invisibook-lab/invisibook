@@ -20,9 +20,13 @@ var Validator = validator.New()
 // matching tiebreak.
 type Order struct {
 	ID               OrderID   `json:"id"      validate:"required"`
+	Kind             OrderKind `json:"kind"    validate:"oneof=0 1"`
 	Type             TradeType `json:"type"    validate:"oneof=0 1"`
 	Subject          TradePair `json:"subject"`
 	Price            *big.Int  `json:"price,omitempty"`
+	ProtectionPrice  *big.Int  `json:"protection_price,omitempty"`
+	ExecutionPrice   *big.Int  `json:"execution_price,omitempty"`
+	MatchRound       uint64    `json:"match_round"`
 	Pubkey           string    `json:"pubkey"  validate:"required"` // owner's ed25519 pubkey (64-char hex)
 	LockedCommitment string    `json:"locked_commitment"`
 	Fee              uint64    `json:"fee"`
@@ -51,8 +55,14 @@ func ComputeOrderID(inputNullifiers []string) OrderID {
 // Domain identifier and enum types used across the order modules.
 type (
 	OrderID   string // hex-encoded SHA-256 of the order's input nullifiers
+	OrderKind int    // Limit or Market
 	TradeType int    // Buy or Sell
-	OrderStat int    // Pending, Matched, Done, Cancelled, Frozen, Compared
+	OrderStat int    // Pending, Matched, Settling, Done, Cancelled, Frozen
+)
+
+const (
+	Limit OrderKind = iota
+	Market
 )
 
 const (
@@ -88,6 +98,18 @@ func (t TradeType) String() string {
 		return "BUY"
 	case Sell:
 		return "SELL"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// String returns "LIMIT", "MARKET", or "UNKNOWN".
+func (k OrderKind) String() string {
+	switch k {
+	case Limit:
+		return "LIMIT"
+	case Market:
+		return "MARKET"
 	default:
 		return "UNKNOWN"
 	}

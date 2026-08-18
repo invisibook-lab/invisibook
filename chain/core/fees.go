@@ -216,7 +216,7 @@ func (ot *OrderBook) QueryFees(ctx *context.ReadContext) {
 	ctx.JsonOk(map[string]uint64{"amount": amount})
 }
 
-// sendOrderBind computes the bind public input for a SendOrder v2 request
+// sendOrderBind computes the bind public input for a SendOrder v4 request
 // (Rust twin: note::send_order_bind).
 func sendOrderBind(chainID uint64, req *SendOrderRequest) *big.Int {
 	lockToken := req.Subject.Token1
@@ -229,11 +229,19 @@ func sendOrderBind(chainID uint64, req *SendOrderRequest) *big.Int {
 		[]byte("send_order"),
 		u32be(bindVersion),
 		[]byte(req.ID),
+		[]byte{byte(req.Kind)},
+		[]byte{byte(req.Type)},
+		[]byte(req.Subject.Token1),
+		[]byte(req.Subject.Token2),
+		u64be(collateralPrice(&Order{Kind: req.Kind, Price: req.Price, ProtectionPrice: req.ProtectionPrice}).Uint64()),
 		[]byte(lockToken),
-		[]byte(req.InputNullifiers[0]),
-		[]byte(req.InputNullifiers[1]),
+		[]byte(req.CollateralNullifiers[0]),
+		[]byte(req.CollateralNullifiers[1]),
+		[]byte(req.FeeNullifiers[0]),
+		[]byte(req.FeeNullifiers[1]),
 		[]byte(req.LockedCommitment),
 		u64be(req.Fee),
-		[]byte(req.ChangeCommitment),
+		[]byte(req.CollateralChangeCommitment),
+		[]byte(req.FeeChangeCommitment),
 	)
 }

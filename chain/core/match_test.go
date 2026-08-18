@@ -31,10 +31,8 @@ func mkOrder(id string, typ TradeType, price uint64, height uint32) *Order {
 	}
 }
 
-// P1-5 regression: a buy at 5 and a sell at 4 CROSS but are not equal —
-// they must NOT match (a matched unequal pair could never settle and has
-// no cancel path). Both stay Pending.
-func TestMatcherRejectsCrossingUnequalPrices(t *testing.T) {
+// Crossing unequal prices match and persist the resting (maker) price.
+func TestMatcherMatchesCrossingUnequalPrices(t *testing.T) {
 	ot := matchFixture(t)
 	sell := mkOrder("sell-4", Sell, 4, 1)
 	if err := ot.InsertOrder(sell); err != nil {
@@ -49,19 +47,19 @@ func TestMatcherRejectsCrossingUnequalPrices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if matched != nil {
-		t.Fatalf("buy@5 must NOT match sell@4, matched %s", matched.ID)
+	if matched == nil || matched.ID != sell.ID {
+		t.Fatalf("buy@5 must match sell@4, got %v", matched)
 	}
 	for _, id := range []OrderID{"sell-4", "buy-5"} {
 		order, err := ot.GetOrder(id)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if order.Status != Pending {
-			t.Fatalf("order %s must stay Pending, got %s", id, order.Status.String())
+		if order.Status != Matched {
+			t.Fatalf("order %s must be Matched, got %s", id, order.Status.String())
 		}
-		if order.MatchOrder != "" {
-			t.Fatalf("order %s must have no match link, got %s", id, order.MatchOrder)
+		if order.ExecutionPrice == nil || order.ExecutionPrice.Uint64() != 4 {
+			t.Fatalf("order %s execution price must be maker sell price 4", id)
 		}
 	}
 }
@@ -96,12 +94,11 @@ func TestMatcherMatchesEqualPrices(t *testing.T) {
 	}
 }
 
-// Equal-price candidates keep the height → fee → intra-block priority: the
-// earlier block wins even when a better-crossing (unequal) price exists.
-func TestMatcherEqualPricePriorityAndNoCrossPick(t *testing.T) {
+// Price priority precedes height: the better ask wins even when it is newer.
+func TestMatcherPricePrecedesTime(t *testing.T) {
 	ot := matchFixture(t)
-	// A "better" crossing sell at 3 must be ignored entirely.
-	if err := ot.InsertOrder(mkOrder("sell-3", Sell, 3, 1)); err != nil {
+	// The better crossing sell at 3 must win.
+	if err := ot.InsertOrder(mkOrder("sell-3", Sell, 3, 20)); err != nil {
 		t.Fatal(err)
 	}
 	if err := ot.InsertOrder(mkOrder("sell-5-late", Sell, 5, 9)); err != nil {
@@ -119,11 +116,161 @@ func TestMatcherEqualPricePriorityAndNoCrossPick(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if matched == nil || matched.ID != "sell-5-early" {
-		t.Fatalf("must match the EARLIER equal-price sell, got %v", matched)
+	if matched == nil || matched.ID != "sell-3" {
+		t.Fatalf("must match the best-priced sell, got %v", matched)
 	}
-	untouched, _ := ot.GetOrder("sell-3")
+	untouched, _ := ot.GetOrder("sell-5-early")
 	if untouched.Status != Pending {
-		t.Fatal("the crossing unequal-price sell must stay Pending")
+		t.Fatal("the worse-priced sell must stay Pending")
+	}
+}
+
+func TestMatcherTieBreakPriority(t *testing.T) {
+	base := mkOrder("base", Sell, 5, 10)
+	base.Fee = 7
+	base.IntraBlockIndex = 4
+
+	tests := []struct {
+		name string
+		edit func(*Order)
+	}{
+		{"earlier block beats fee", func(o *Order) { o.BlockHeight, o.Fee = 9, 0 }},
+		{"higher fee beats intra-block index", func(o *Order) { o.Fee, o.IntraBlockIndex = 8, 99 }},
+		{"earlier intra-block index wins", func(o *Order) { o.IntraBlockIndex = 3 }},
+		{"order id is deterministic final tie-break", func(o *Order) { o.ID = "aaa" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := mkOrder("candidate", Sell, 5, 10)
+			candidate.Fee = 7
+			candidate.IntraBlockIndex = 4
+			tt.edit(candidate)
+			if !betterCounter(candidate, base) {
+				t.Fatal("candidate must outrank base at the tested tie-break")
+			}
+		})
+	}
+}
+
+func mkMarketOrder(id string, typ TradeType, protection uint64, height uint32) *Order {
+	o := mkOrder(id, typ, protection, height)
+	o.Kind = Market
+	o.Price = nil
+	o.ProtectionPrice = new(big.Int).SetUint64(protection)
+	return o
+}
+
+func TestMatcherMarketFlagPrecedesLimitPrice(t *testing.T) {
+	market := mkMarketOrder("market", Sell, 5, 10)
+	limit := mkOrder("limit", Sell, 1, 1)
+	if !betterCounter(market, limit) {
+		t.Fatal("a crossing market candidate must outrank a limit candidate")
+	}
+}
+
+func TestMatcherMarketLimitAndProtection(t *testing.T) {
+	ot := matchFixture(t)
+	sell := mkOrder("sell-4", Sell, 4, 1)
+	if err := ot.InsertOrder(sell); err != nil {
+		t.Fatal(err)
+	}
+	buy := mkMarketOrder("market-buy", Buy, 5, 2)
+	if err := ot.InsertOrder(buy); err != nil {
+		t.Fatal(err)
+	}
+	matched, err := ot.matchOrder(buy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched == nil || matched.ID != sell.ID {
+		t.Fatalf("protected market buy must match limit sell, got %v", matched)
+	}
+	if buy.ExecutionPrice.Uint64() != 4 {
+		t.Fatalf("market/limit must execute at limit price, got %s", buy.ExecutionPrice)
+	}
+}
+
+func TestMatcherMarketMarketDoesNotMatch(t *testing.T) {
+	ot := matchFixture(t)
+	sell := mkMarketOrder("market-sell", Sell, 4, 1)
+	buy := mkMarketOrder("market-buy", Buy, 5, 2)
+	if err := ot.InsertOrder(sell); err != nil {
+		t.Fatal(err)
+	}
+	if err := ot.InsertOrder(buy); err != nil {
+		t.Fatal(err)
+	}
+	matched, err := ot.matchOrder(buy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched != nil {
+		t.Fatalf("market/market has no execution-price reference, got %v", matched)
+	}
+}
+
+func TestMatcherRejectsNonCrossingLimits(t *testing.T) {
+	ot := matchFixture(t)
+	sell := mkOrder("sell-6", Sell, 6, 1)
+	buy := mkOrder("buy-5", Buy, 5, 2)
+	if err := ot.InsertOrder(sell); err != nil {
+		t.Fatal(err)
+	}
+	if err := ot.InsertOrder(buy); err != nil {
+		t.Fatal(err)
+	}
+	matched, err := ot.matchOrder(buy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched != nil {
+		t.Fatalf("non-crossing limits must remain pending, got %v", matched)
+	}
+}
+
+func TestMatcherAssignsSharedMonotonicRound(t *testing.T) {
+	ot := matchFixture(t)
+	sell := mkOrder("relisted-sell", Sell, 4, 1)
+	sell.MatchRound = 7
+	buy := mkOrder("fresh-buy", Buy, 5, 2)
+	if err := ot.InsertOrder(sell); err != nil {
+		t.Fatal(err)
+	}
+	if err := ot.InsertOrder(buy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ot.matchOrder(buy); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []OrderID{sell.ID, buy.ID} {
+		order, err := ot.GetOrder(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if order.MatchRound != 8 {
+			t.Fatalf("order %s round = %d, want shared round 8", id, order.MatchRound)
+		}
+	}
+}
+
+// A relisted/aborted survivor may be passed to matchOrder even though it is
+// older than every pending candidate. Execution price still belongs to the
+// true maker, not mechanically to the candidate argument.
+func TestMatcherRematchUsesChronologicalMakerPrice(t *testing.T) {
+	ot := matchFixture(t)
+	oldSell := mkOrder("old-sell", Sell, 4, 1)
+	newBuy := mkOrder("new-buy", Buy, 5, 9)
+	if err := ot.InsertOrder(oldSell); err != nil {
+		t.Fatal(err)
+	}
+	if err := ot.InsertOrder(newBuy); err != nil {
+		t.Fatal(err)
+	}
+	matched, err := ot.matchOrder(oldSell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched == nil || oldSell.ExecutionPrice == nil || oldSell.ExecutionPrice.Uint64() != 4 {
+		t.Fatalf("rematch must execute at old maker price 4, got match=%v price=%v", matched, oldSell.ExecutionPrice)
 	}
 }

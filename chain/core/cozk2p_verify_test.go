@@ -33,7 +33,8 @@ func rebuildComparePublic(fx cozk2pFixture) settle2pPublic {
 		Cmp:       fx.Cmp,
 		LockedA:   fx.LockedAHex,
 		LockedB:   fx.LockedBHex,
-		Price:     fx.Price,
+		PriceA:    fx.PriceA,
+		PriceB:    fx.PriceB,
 		AIsSeller: fx.AIsSeller,
 	}
 }

@@ -19,10 +19,14 @@ import (
 // OrderScheme is the flat SQL model for the orders table.
 type OrderScheme struct {
 	ID               string `gorm:"primaryKey;column:id"`
+	Kind             int    `gorm:"column:kind;index:idx_pair_type"`
 	Type             int    `gorm:"column:type;index:idx_pair_type"`
 	Token1           string `gorm:"column:token1;index:idx_pair_type"`
 	Token2           string `gorm:"column:token2;index:idx_pair_type"`
 	Price            string `gorm:"column:price"`
+	ProtectionPrice  string `gorm:"column:protection_price"`
+	ExecutionPrice   string `gorm:"column:execution_price"`
+	MatchRound       uint64 `gorm:"column:match_round"`
 	Pubkey           string `gorm:"column:pubkey;index"`
 	LockedCommitment string `gorm:"column:locked_commitment"`
 	Fee              uint64 `gorm:"column:fee"`
@@ -45,9 +49,11 @@ func (OrderScheme) TableName() string {
 // NOTE: This on-chain address exchange is temporary. In production, peer
 // addresses will be exchanged via Tor or similar anonymous overlay network.
 type SettleAddrScheme struct {
-	OrderID      string `gorm:"primaryKey;column:order_id"`
-	MatchOrderID string `gorm:"column:match_order_id;index"`
-	Addr         string `gorm:"column:addr;not null"`
+	OrderID          string `gorm:"primaryKey;column:order_id"`
+	MatchOrderID     string `gorm:"column:match_order_id;index"`
+	MatchRound       uint64 `gorm:"column:match_round"`
+	Addr             string `gorm:"column:addr;not null"`
+	EncryptionPubkey string `gorm:"column:encryption_pubkey;not null;default:''"`
 }
 
 // TableName returns the SQL table name used by GORM for SettleAddrScheme rows.
@@ -66,6 +72,22 @@ type CompareResultScheme struct {
 	Cmp      int    `gorm:"column:cmp"`
 	Height   uint64 `gorm:"column:height"`
 }
+
+// SettleCheckpointScheme is the durable pre-open barrier for one match
+// round. Each side must upload the same chain-derived state commitment
+// before the smaller quantity opening may be revealed off chain.
+type SettleCheckpointScheme struct {
+	OrderAID         string `gorm:"primaryKey;column:order_a_id"`
+	MatchRound       uint64 `gorm:"primaryKey;column:match_round"`
+	OrderBID         string `gorm:"column:order_b_id;index"`
+	StateCommitment  string `gorm:"column:state_commitment;not null"`
+	ASubmittedHeight uint64 `gorm:"column:a_submitted_height"`
+	BSubmittedHeight uint64 `gorm:"column:b_submitted_height"`
+	AbortedOrderID   string `gorm:"column:aborted_order_id"`
+	AbortedAtHeight  uint64 `gorm:"column:aborted_at_height"`
+}
+
+func (SettleCheckpointScheme) TableName() string { return "settle_checkpoints" }
 
 // TableName returns the SQL table name for CompareResultScheme rows.
 func (CompareResultScheme) TableName() string {
@@ -88,7 +110,7 @@ func InitOrderDB(dsn string, logLevel logger.LogLevel) *gorm.DB {
 	if err != nil {
 		panic(fmt.Sprintf("failed to open orders database: %v", err))
 	}
-	if err := db.AutoMigrate(&OrderScheme{}, &SettleAddrScheme{}, &CompareResultScheme{},
+	if err := db.AutoMigrate(&OrderScheme{}, &SettleAddrScheme{}, &CompareResultScheme{}, &SettleCheckpointScheme{},
 		&FeeCounterScheme{}, &SettlementJournalScheme{}); err != nil {
 		panic(fmt.Sprintf("failed to migrate orders table: %v", err))
 	}
@@ -118,6 +140,8 @@ type SettlementJournalScheme struct {
 	OrderBID       string `gorm:"column:order_b_id;not null"`
 	CmNoteA        string `gorm:"column:cm_note_a;not null"`
 	CmNoteB        string `gorm:"column:cm_note_b;not null"`
+	CmRefundA      string `gorm:"column:cm_refund_a;not null;default:''"`
+	CmRefundB      string `gorm:"column:cm_refund_b;not null;default:''"`
 	ALarge         bool   `gorm:"column:a_large"`
 	BLarge         bool   `gorm:"column:b_large"`
 	CmLockedResidA string `gorm:"column:cm_locked_residual_a"`
@@ -158,12 +182,12 @@ func (ot *OrderBook) UpdateOrderMatchOrder(id OrderID, matchID OrderID) error {
 }
 
 // FindPendingCounterOrders queries pending orders of the given type on the
-// specified pair that have a non-empty price. All parameters are passed via
+// specified pair. All parameters are passed via
 // GORM's parameterized placeholders to prevent SQL injection.
 func (ot *OrderBook) FindPendingCounterOrders(pair TradePair, counterType TradeType) ([]*Order, error) {
 	var rows []OrderScheme
 	err := ot.db.Where(
-		"status = ? AND type = ? AND token1 = ? AND token2 = ? AND price != ''",
+		"status = ? AND type = ? AND token1 = ? AND token2 = ?",
 		int(Pending), int(counterType),
 		string(pair.Token1), string(pair.Token2),
 	).Find(&rows).Error
@@ -239,12 +263,24 @@ func orderToScheme(o *Order) *OrderScheme {
 	if o.Price != nil {
 		priceStr = o.Price.String()
 	}
+	protectionPriceStr := ""
+	if o.ProtectionPrice != nil {
+		protectionPriceStr = o.ProtectionPrice.String()
+	}
+	executionPriceStr := ""
+	if o.ExecutionPrice != nil {
+		executionPriceStr = o.ExecutionPrice.String()
+	}
 	return &OrderScheme{
 		ID:               string(o.ID),
+		Kind:             int(o.Kind),
 		Type:             int(o.Type),
 		Token1:           string(o.Subject.Token1),
 		Token2:           string(o.Subject.Token2),
 		Price:            priceStr,
+		ProtectionPrice:  protectionPriceStr,
+		ExecutionPrice:   executionPriceStr,
+		MatchRound:       o.MatchRound,
 		Pubkey:           o.Pubkey,
 		LockedCommitment: o.LockedCommitment,
 		Fee:              o.Fee,
@@ -265,14 +301,28 @@ func schemeToOrder(s *OrderScheme) *Order {
 		price = new(big.Int)
 		price.SetString(s.Price, 10)
 	}
+	var protectionPrice *big.Int
+	if s.ProtectionPrice != "" {
+		protectionPrice = new(big.Int)
+		protectionPrice.SetString(s.ProtectionPrice, 10)
+	}
+	var executionPrice *big.Int
+	if s.ExecutionPrice != "" {
+		executionPrice = new(big.Int)
+		executionPrice.SetString(s.ExecutionPrice, 10)
+	}
 	return &Order{
 		ID:   OrderID(s.ID),
+		Kind: OrderKind(s.Kind),
 		Type: TradeType(s.Type),
 		Subject: TradePair{
 			Token1: TokenID(s.Token1),
 			Token2: TokenID(s.Token2),
 		},
 		Price:            price,
+		ProtectionPrice:  protectionPrice,
+		ExecutionPrice:   executionPrice,
+		MatchRound:       s.MatchRound,
 		Pubkey:           s.Pubkey,
 		LockedCommitment: s.LockedCommitment,
 		Fee:              s.Fee,

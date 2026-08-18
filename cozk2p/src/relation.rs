@@ -1,19 +1,20 @@
 //! The 2-party comparison relation — the paper's π_cmp (§VI-A), expressed
-//! as a jellyfish PLONK circuit. Same 5-public statement as the
+//! as a jellyfish PLONK circuit. Same 6-public statement as the
 //! single-prover `settle_cozk.circom`:
 //!
 //! ```text
 //!  0 cmp          sign(q_a - q_b) in {-1, 0, 1} (as Fr: p-1, 0, 1)
 //!  1 locked_a     on-chain order A collateral commitment P2(needed_a, r_a)
 //!  2 locked_b     on-chain order B collateral commitment P2(needed_b, r_b)
-//!  3 price        the shared execution price (equal-price matching)
-//!  4 a_is_seller  1 when A sells token1; B is always the opposite side
+//!  3 price_a      A's public collateral price
+//!  4 price_b      B's public collateral price
+//!  5 a_is_seller  1 when A sells token1; B is always the opposite side
 //! ```
 //!
 //! LOCKED-ONLY MODEL: orders commit ONLY their collateral
 //! `locked = P2(needed, r_locked)` with the side-dependent equation
-//! `needed(q, s) = q·price + s·(q − q·price)` (a seller locks q, a buyer
-//! q·price). The equation is injective in q for price > 0, so opening each
+//! `needed(q,p,s) = q·p + s·(q − q·p)` (a seller locks q, a buyer
+//! q·p). The equation is injective in q for p > 0, so opening each
 //! collateral against its in-circuit `needed` pins the compared quantities
 //! (input legitimacy); price and a_is_seller therefore enter the statement.
 //!
@@ -94,12 +95,13 @@ pub struct SettlePublic {
     pub locked_a: Fr,
     #[serde(with = "fr_hex")]
     pub locked_b: Fr,
-    pub price: u64,
+    pub price_a: u64,
+    pub price_b: u64,
     pub a_is_seller: bool,
 }
 
 impl SettlePublic {
-    /// Flatten to the canonical 5-element public-input vector.
+    /// Flatten to the canonical 6-element public-input vector.
     pub fn to_vec(&self) -> Vec<Fr> {
         let cmp_fr = match self.cmp {
             1 => Fr::from(1u64),
@@ -111,7 +113,8 @@ impl SettlePublic {
             cmp_fr,
             self.locked_a,
             self.locked_b,
-            Fr::from(self.price),
+            Fr::from(self.price_a),
+            Fr::from(self.price_b),
             Fr::from(self.a_is_seller as u64),
         ]
     }
@@ -157,7 +160,8 @@ pub fn needed_collateral(q: u64, price: u64, is_seller: bool) -> Result<u64> {
 pub fn compute_public(
     a: &SidePrivate,
     b: &SidePrivate,
-    price: u64,
+    price_a: u64,
+    price_b: u64,
     a_is_seller: bool,
 ) -> Result<SettlePublic> {
     let (av, bv) = (a.order_amount, b.order_amount);
@@ -168,19 +172,21 @@ pub fn compute_public(
     };
     Ok(SettlePublic {
         cmp,
-        locked_a: commit(needed_collateral(av, price, a_is_seller)?, &a.r_locked),
-        locked_b: commit(needed_collateral(bv, price, !a_is_seller)?, &b.r_locked),
-        price,
+        locked_a: commit(needed_collateral(av, price_a, a_is_seller)?, &a.r_locked),
+        locked_b: commit(needed_collateral(bv, price_b, !a_is_seller)?, &b.r_locked),
+        price_a,
+        price_b,
         a_is_seller,
     })
 }
 
-/// Wire indices of the 5 public inputs, in canonical order.
+/// Wire indices of the 6 public inputs, in canonical order.
 pub struct PublicWires {
     pub cmp: Variable,
     pub locked_a: Variable,
     pub locked_b: Variable,
-    pub price: Variable,
+    pub price_a: Variable,
+    pub price_b: Variable,
     pub a_is_seller: Variable,
 }
 
@@ -315,17 +321,18 @@ fn settle_relation_impl<Cs: Circuit<Fr>>(
     let one_var = cs.one();
     let zero = cs.zero();
     let s_b = cs.sub(one_var, s_a)?;
-    let needed = |cs: &mut Cs, q: Variable, s: Variable| -> Result<Variable, CircuitError> {
-        let q_price = cs.mul(q, public.price)?;
-        let diff = cs.sub(q, q_price)?;
-        let term = cs.mul(s, diff)?;
-        cs.add(q_price, term)
-    };
-    let needed_a = needed(cs, q_a, s_a)?;
+    let needed =
+        |cs: &mut Cs, q: Variable, p: Variable, s: Variable| -> Result<Variable, CircuitError> {
+            let q_price = cs.mul(q, p)?;
+            let diff = cs.sub(q, q_price)?;
+            let term = cs.mul(s, diff)?;
+            cs.add(q_price, term)
+        };
+    let needed_a = needed(cs, q_a, public.price_a, s_a)?;
     let locked_a_hash = poseidon_hash2(cs, needed_a, a.r_locked)?;
     eq(cs, locked_a_hash, public.locked_a)?;
     trace("3 needed(q_a) + OPEN locked_a", cs.num_gates());
-    let needed_b = needed(cs, q_b, s_b)?;
+    let needed_b = needed(cs, q_b, public.price_b, s_b)?;
     let locked_b_hash = poseidon_hash2(cs, needed_b, b.r_locked)?;
     eq(cs, locked_b_hash, public.locked_b)?;
     trace("4 needed(q_b) + OPEN locked_b", cs.num_gates());
@@ -366,31 +373,32 @@ mod tests {
 
     #[test]
     fn compute_public_sample() {
-        let (a, b, price, a_is_seller) = sample_trade();
-        let p = compute_public(&a, &b, price, a_is_seller).unwrap();
+        let (a, b, price_a, price_b, a_is_seller) = sample_trade();
+        let p = compute_public(&a, &b, price_a, price_b, a_is_seller).unwrap();
         assert_eq!(p.cmp, 1); // a=80 > b=60
-        assert_eq!(p.to_vec().len(), 5);
+        assert_eq!(p.to_vec().len(), 6);
         // The commitments open with needed(q, side): A sells 80 (locks 80),
-        // B buys 60 at price 3 (locks 180).
+        // B buys 60 at its own public price 4 (locks 240).
         assert_eq!(p.locked_a, commit(80, &a.r_locked));
-        assert_eq!(p.locked_b, commit(180, &b.r_locked));
+        assert_eq!(p.locked_b, commit(240, &b.r_locked));
     }
 
     #[test]
     fn serde_round_trip_and_cmp_bounds() {
-        let (a, b, price, a_is_seller) = sample_trade();
-        let p = compute_public(&a, &b, price, a_is_seller).unwrap();
+        let (a, b, price_a, price_b, a_is_seller) = sample_trade();
+        let p = compute_public(&a, &b, price_a, price_b, a_is_seller).unwrap();
         let json = serde_json::to_string(&p).unwrap();
         let back: SettlePublic = serde_json::from_str(&json).unwrap();
         assert_eq!(back.to_vec(), p.to_vec());
 
         // The serde field ORDER is normative (Go mirrors it): cmp, locked_a,
-        // locked_b, price, a_is_seller.
+        // locked_b, price_a, price_b, a_is_seller.
         let keys = [
             "\"cmp\"",
             "\"locked_a\"",
             "\"locked_b\"",
-            "\"price\"",
+            "\"price_a\"",
+            "\"price_b\"",
             "\"a_is_seller\"",
         ];
         let mut last = 0;

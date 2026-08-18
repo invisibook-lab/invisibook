@@ -74,8 +74,8 @@ async fn main() -> Result<()> {
 
     // Same sample trade as keygen: A (maker) SELLS 80 at price 3, B BUYS
     // 60 → cmp = 1 (locked-only model: A locks 80, B locks 180).
-    let (a, b, price, a_is_seller) = sample_trade();
-    let public = compute_public(&a, &b, price, a_is_seller)?;
+    let (a, b, price_a, price_b, a_is_seller) = sample_trade();
+    let public = compute_public(&a, &b, price_a, price_b, a_is_seller)?;
 
     // Two in-process SPDZ parties, each holding only its own side.
     let (r0, r1) = execute_mock_mpc(|fabric| {
@@ -103,7 +103,8 @@ async fn main() -> Result<()> {
         "cmp": public.cmp,
         "locked_a_hex": fr_to_hex(&public.locked_a),
         "locked_b_hex": fr_to_hex(&public.locked_b),
-        "price": price,
+        "price_a": price_a,
+        "price_b": price_b,
         "a_is_seller": a_is_seller,
         "proof_hex": hex::encode(&p0),
         "public": serde_json::to_value(&public)?,
