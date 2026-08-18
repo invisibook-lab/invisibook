@@ -74,14 +74,17 @@ for RTT in $RTTS; do
     [[ $FIRST -eq 1 ]] || printf ',' >>"$INDEX"
     FIRST=0
     printf '\n  {"rtt_ms": %s, "one_way_delay_ms": %s, "status": "%s", "bench": "%s", "traffic": "%s"}' \
-        "$RTT" "$DELAY" "$STATUS" "$BENCH_OUT" "$TRAFFIC_OUT" >>"$INDEX"
+        "$RTT" "$DELAY" "$STATUS" "$(basename "$BENCH_OUT")" "$(basename "$TRAFFIC_OUT")" >>"$INDEX"
     [[ "$STATUS" == ok ]] || log "the ${RTT} ms point did not finish inside ${RUN_TIMEOUT} s"
 done
 
 printf '\n]}\n' >>"$INDEX"
 
+BASELINE_ARG=()
+[[ -f "$OUT/rq1_summary.json" ]] && BASELINE_ARG=(--baseline "$OUT/rq1_summary.json")
+
 python3 "$REPO/experiments/summarize.py" rq2 \
-    --index "$INDEX" --environment "$OUT/rq2_environment.json" \
+    --index "$INDEX" --environment "$OUT/rq2_environment.json" "${BASELINE_ARG[@]}" \
     --json-out "$OUT/rq2_summary.json" --md-out "$OUT/rq2_summary.md" \
     --csv-out "$OUT/rq2_latency.csv"
 

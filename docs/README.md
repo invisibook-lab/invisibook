@@ -27,7 +27,7 @@
 | [zk_design.md](zk_design.md) | EN | **Current** | Note primitives (golden spec), Groth16 circuit catalog, binds, proving/verifying toolchain |
 | [cozk2p_design.md](cozk2p_design.md) | EN | **Current** | 2-party SPDZ + collaborative PLONK compare session, stdio protocol, trust caveats |
 | [app_design.md](app_design.md) | EN | **Current** | Wallet stores, note-based order placement, two-phase settlement driver, crash recovery |
-| [cozk_experiments.md](cozk_experiments.md) | EN | **Current** (record) | Benchmark record: historical 3-party vs 2-party experiments + the current hardened-flow numbers |
+| [cozk_experiments.md](cozk_experiments.md) | EN | **Current** (record) | Measurements: cost of the cryptography, effect of the round-trip time, one complete trade — each with the command that reproduces it |
 | [settlement_hardening_plan_zh.md](settlement_hardening_plan_zh.md) | ZH | **Current** (plan) | rev.4 hardening plan (F1–F4) with the implementation-status table (§六点五) |
 | [spdz_itmac_theory_zh.md](spdz_itmac_theory_zh.md) | ZH | **Current** (notes) | SPDZ / IT-MAC theory study notes |
 
@@ -61,9 +61,10 @@ document.
    settle proof), *atomic `SettlePair`* (both legs in one writing —
    F2). F1/F2/F3/F4 always refer to the rev.4 findings in
    [settlement_hardening_plan_zh.md](settlement_hardening_plan_zh.md).
-5. **Numbers live in one place.** Benchmark results go into
-   [cozk_experiments.md](cozk_experiments.md) with their setup; other
-   documents cite it instead of embedding numbers.
+5. **Numbers live in one place.** Measurements go into
+   [cozk_experiments.md](cozk_experiments.md) with the command that
+   makes them ([../experiments](../experiments)); other documents cite
+   it instead of embedding numbers.
 6. **Dev caveats are loud.** Anything that voids a security guarantee
    (mock Beaver, dev SRS, plaintext rendezvous, blind bridge) is
    labeled dev-only where it is described, and listed centrally in

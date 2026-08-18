@@ -1,0 +1,106 @@
+{
+  "full_trade_ms": 34552.640443,
+  "order": {
+    "alice": {
+      "land_ms": 4008.087414,
+      "prove_ms": 191.588413
+    },
+    "bob": {
+      "land_ms": 6007.801450999999,
+      "prove_ms": 194.83284600000002
+    },
+    "match_ms": 4006.0780569999997
+  },
+  "scenario": "one trade: A sells 2 ETH @ 3 (maker), B buys 1 ETH @ 3",
+  "session": {
+    "alice": {
+      "build_ms": 52.190579,
+      "compare_onchain_wait_ms": 6009.529321999999,
+      "leg_exchange_ms": 1.1051259999999998,
+      "open_ms": 2588.570079,
+      "peak_rss_bytes": 1684353024,
+      "prove_ms": 998.491439,
+      "steps": [
+        [
+          "1 preamble fingerprint",
+          2.189759
+        ],
+        [
+          "2 share inputs + collateral binding",
+          54.618275
+        ],
+        [
+          "3 three-way compare",
+          19.1411
+        ],
+        [
+          "4 signature ferry + exchange",
+          1.4675129999999998
+        ],
+        [
+          "5 collaborative prove + local verify",
+          3646.12191
+        ],
+        [
+          "6 on-chain compare anchor (host wait)",
+          6009.555515999999
+        ],
+        [
+          "7 smaller-side reveal",
+          1.5192910000000002
+        ],
+        [
+          "8 payout-note keys + WAL",
+          0.980959
+        ]
+      ],
+      "total_ms": 10033.811882,
+      "verify_ms": 6.740352
+    },
+    "bob": {
+      "build_ms": 52.262431,
+      "compare_onchain_wait_ms": 6009.158651,
+      "leg_exchange_ms": 99.629827,
+      "open_ms": 2612.036581,
+      "peak_rss_bytes": 1723133952,
+      "prove_ms": 975.243975,
+      "steps": [
+        [
+          "1 preamble fingerprint",
+          0.161418
+        ],
+        [
+          "2 share inputs + collateral binding",
+          55.271701
+        ],
+        [
+          "3 three-way compare",
+          18.866853
+        ],
+        [
+          "4 signature ferry + exchange",
+          1.419139
+        ],
+        [
+          "5 collaborative prove + local verify",
+          3643.41762
+        ],
+        [
+          "6 on-chain compare anchor (host wait)",
+          6009.187417
+        ],
+        [
+          "7 smaller-side reveal",
+          4.669143
+        ],
+        [
+          "8 payout-note keys + WAL",
+          0.68772
+        ]
+      ],
+      "total_ms": 10033.762094,
+      "verify_ms": 3.652785
+    }
+  },
+  "settle_ms": 20144.252261999998
+}

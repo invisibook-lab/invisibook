@@ -117,11 +117,21 @@ for measurements.
 # unit + satisfiability + 2-party e2e (mock network)
 cd cozk2p && cargo test
 
-# benchmark: single-prover vs full 2-party session
-cargo run --release --bin bench_settle2p -- --runs 5
-
 # real collaborative proof settled on a running chain
 make test-e2e-cozk2p
+```
+
+### Measurements
+
+Each experiment is one script in [experiments/](experiments/), and
+[experiments/README.md](experiments/README.md) states what each one
+measures. The results are in
+[docs/cozk_experiments.md](docs/cozk_experiments.md).
+
+```bash
+./experiments/rq1_crypto_overhead.sh    # what the cryptography costs
+./experiments/rq2_network_latency.sh    # what the round-trip time costs
+./experiments/rq3_end_to_end.sh --runs 5  # one complete trade
 ```
 
 ## Documentation

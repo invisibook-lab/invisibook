@@ -148,31 +148,37 @@ chain id (§4.0).
 
 ### 2.4 Measured latency, step by step
 
-One `settle_e2e_relist` run (24-core box, 3 s blocks, dev SRS + mock
-Beaver triples), trader A's column; B differs only where noted. Rows are
-the steps of §2.2:
+Medians of 5 `settle_e2e_relist` trades (24-core box, 3 s blocks, 2 s
+polling, dev SRS and mock Beaver triples), trader A's column; B differs
+only where noted. Rows are the steps of §2.2. Reproduce with
+`./experiments/rq3_end_to_end.sh --runs 5`; the full record is in
+[cozk_experiments.md](cozk_experiments.md) §RQ3.
 
 | step | ms |
 |---|---|
-| 0 `SendOrder` prove (rapidsnark) | 202 |
-| 0 `SendOrder` submit → `Pending` (block wait) | 4 008 |
-| 0 matching → both `Matched` (block wait) | 4 007 |
+| 0 `SendOrder` prove (rapidsnark) | 192 |
+| 0 `SendOrder` submit → `Pending` (block wait) | 4 007 (A) / 6 010 (B) |
+| 0 matching → both `Matched` (block wait) | 4 006 |
 | 1 preamble fingerprint | 2 |
-| 2 share inputs + collateral binding (2 Poseidon over shares) | 59 |
-| 3 three-way compare | 20 |
+| 2 share inputs + collateral binding (2 Poseidon over shares) | 43 |
+| 3 three-way compare | 14 |
 | 4 signature ferry + exchange | 1 |
-| 5 collaborative prove π_cmp + local verify | 3 716 |
-| 6 on-chain compare anchor (host/chain wait) | 6 011 |
-| 7 smaller-side reveal | 5 |
+| 5 collaborative prove π_cmp + local verify | 3 646 |
+| 6 on-chain compare anchor (host/chain wait) | 6 010 |
+| 7 smaller-side reveal | 2 |
 | 8 payout-note keys + WAL | 1 |
-| **session subprocess total** | **10 206** |
-| 9 own settle leg (rapidsnark) + 9' leg exchange | 1 (A) / 142 (B) |
-| R + 10 rendezvous, `SettlePair` submit, confirm | 12 147 |
-| **`run_settle` total** | **22 353** |
-| **full trade, both orders** | **36 798** |
+| **session subprocess total** | **10 034** |
+| 9 own settle leg (rapidsnark) + 9' leg exchange, R rendezvous, 10 `SettlePair` submit and confirm | 10 110 |
+| **`run_settle` total** | **20 144** (p95 22 094) |
+| **full trade, both orders** | **34 553** (p95 36 507) |
 
-Step 5 is 36 % of the settlement and every other cryptographic step
-together is under 100 ms. Steps 6 and 10 — pure block waits — are 81 %.
+Step 5 is 18 % of the settlement, and every other cryptographic step
+together is under 100 ms. The block waits — steps 6 and 10 and the
+rendezvous — are 80 %.
+
+The chain verifies π_cmp in 12.4 ms and each Groth16 settle leg in
+4.4–4.6 ms. One trade puts 7 264 B on chain: 1 522 B per `SendOrder`,
+1 999 B for the compare writing, and 2 221 B for `SettlePair`.
 
 
 ## 3. MPC sub-protocols and their checks

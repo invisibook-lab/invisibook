@@ -1,0 +1,149 @@
+{
+  "environment": {
+    "cpu": "12th Gen Intel(R) Core(TM) i9-12900HX",
+    "logical_cpus": 24,
+    "memory_gib": 29.4,
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "os": "Ubuntu 22.04.5 LTS",
+    "rustc": "rustc 1.93.0-nightly (d5419f1e9 2025-10-30)",
+    "cargo": "cargo 1.93.0-nightly (6c1b61003 2025-10-28)",
+    "go": "go version go1.26.2 linux/amd64",
+    "git_commit": "7f6599d478898533d8842850a4f6a41c1b95248e",
+    "git_branch": "cozk-split"
+  },
+  "circuit": {
+    "turboplonk_gates": 2048,
+    "public_signals": 5,
+    "proof_bytes_compressed": 769,
+    "proof_bytes_uncompressed": 1185,
+    "verifying_key_bytes_compressed": 938
+  },
+  "single_prover": {
+    "prove_ms": {
+      "median": 524.16642,
+      "p95": 707.8374613,
+      "min": 430.778081,
+      "max": 757.882631,
+      "n": 20
+    },
+    "verify_ms": {
+      "median": 7.350543,
+      "p95": 8.7968396,
+      "min": 6.130272,
+      "max": 8.916152,
+      "n": 20
+    },
+    "total_ms": {
+      "median": 531.3354665,
+      "p95": 715.02787595,
+      "min": 438.421589,
+      "max": 766.24912,
+      "n": 20
+    }
+  },
+  "two_party_in_process": {
+    "build_ms": {
+      "median": 16.455604,
+      "p95": 22.727453450000002,
+      "min": 11.868584,
+      "max": 27.556502000000002,
+      "n": 20
+    },
+    "prove_ms": {
+      "median": 1444.7338925,
+      "p95": 1606.79002185,
+      "min": 1131.23642,
+      "max": 1683.787329,
+      "n": 20
+    },
+    "open_ms": {
+      "median": 2868.5412165,
+      "p95": 3109.64854965,
+      "min": 2424.261584,
+      "max": 3153.521557,
+      "n": 20
+    },
+    "verify_ms": {
+      "median": 8.514767500000001,
+      "p95": 10.130436650000002,
+      "min": 4.730775,
+      "max": 11.15149,
+      "n": 20
+    },
+    "session_overhead_ms": {
+      "median": 25.573623000000076,
+      "p95": 32.634488149999655,
+      "min": 19.168859000000417,
+      "max": 33.42599299999937,
+      "n": 20
+    },
+    "total_ms": {
+      "median": 4282.106336500001,
+      "p95": 4616.6962241500005,
+      "min": 3966.132258,
+      "max": 4686.330448,
+      "n": 20
+    }
+  },
+  "two_party_quic": {
+    "build_ms": {
+      "median": 94.79280750000001,
+      "p95": 125.9272129,
+      "min": 71.948033,
+      "max": 127.769378,
+      "n": 40
+    },
+    "prove_ms": {
+      "median": 1316.5204454999998,
+      "p95": 1392.5934469499998,
+      "min": 1201.613267,
+      "max": 1436.261297,
+      "n": 40
+    },
+    "open_ms": {
+      "median": 3129.272376,
+      "p95": 3246.3870878,
+      "min": 2972.33366,
+      "max": 3288.777444,
+      "n": 40
+    },
+    "verify_ms": {
+      "median": 6.1035965,
+      "p95": 8.761916300000001,
+      "min": 4.402545,
+      "max": 9.295761,
+      "n": 40
+    },
+    "total_ms": {
+      "median": 4537.3393875,
+      "p95": 4680.2339653,
+      "min": 4361.411054,
+      "max": 4706.342171,
+      "n": 40
+    },
+    "session_wall_clock_ms": {
+      "median": 4830.524857,
+      "p95": 4968.0371014,
+      "min": 4648.97858,
+      "max": 4970.320727,
+      "n": 40
+    },
+    "peak_rss_bytes": {
+      "median": 1690324992.0,
+      "p95": 1707689779.2,
+      "min": 1660395520,
+      "max": 1728045056,
+      "n": 40
+    }
+  },
+  "traffic_per_trader": {
+    "a_to_b_bytes": 62963059,
+    "b_to_a_bytes": 60980399,
+    "a_to_b_datagrams": 56622,
+    "b_to_a_datagrams": 52194
+  },
+  "overhead_over_single_prover": {
+    "in_process": 8.059138917842219,
+    "quic": 8.539500322438949
+  }
+}

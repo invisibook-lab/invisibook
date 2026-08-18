@@ -1,0 +1,106 @@
+{
+  "full_trade_ms": 34674.348129,
+  "order": {
+    "alice": {
+      "land_ms": 4008.1930760000005,
+      "prove_ms": 187.071833
+    },
+    "bob": {
+      "land_ms": 6009.708805,
+      "prove_ms": 188.280004
+    },
+    "match_ms": 4004.4960720000004
+  },
+  "scenario": "one trade: A sells 2 ETH @ 3 (maker), B buys 1 ETH @ 3",
+  "session": {
+    "alice": {
+      "build_ms": 47.411614,
+      "compare_onchain_wait_ms": 6009.628652,
+      "leg_exchange_ms": 1.083411,
+      "open_ms": 2744.581999,
+      "peak_rss_bytes": 1678249984,
+      "prove_ms": 982.158053,
+      "steps": [
+        [
+          "1 preamble fingerprint",
+          2.200766
+        ],
+        [
+          "2 share inputs + collateral binding",
+          37.926782
+        ],
+        [
+          "3 three-way compare",
+          12.584913
+        ],
+        [
+          "4 signature ferry + exchange",
+          0.804815
+        ],
+        [
+          "5 collaborative prove + local verify",
+          3778.643814
+        ],
+        [
+          "6 on-chain compare anchor (host wait)",
+          6009.658043
+        ],
+        [
+          "7 smaller-side reveal",
+          1.569414
+        ],
+        [
+          "8 payout-note keys + WAL",
+          1.450711
+        ]
+      ],
+      "total_ms": 10145.505816,
+      "verify_ms": 4.366916
+    },
+    "bob": {
+      "build_ms": 47.701847,
+      "compare_onchain_wait_ms": 6009.756638,
+      "leg_exchange_ms": 103.141912,
+      "open_ms": 2732.855609,
+      "peak_rss_bytes": 1675681792,
+      "prove_ms": 993.875094,
+      "steps": [
+        [
+          "1 preamble fingerprint",
+          0.25713199999999997
+        ],
+        [
+          "2 share inputs + collateral binding",
+          38.40047
+        ],
+        [
+          "3 three-way compare",
+          12.58476
+        ],
+        [
+          "4 signature ferry + exchange",
+          0.567594
+        ],
+        [
+          "5 collaborative prove + local verify",
+          3778.610262
+        ],
+        [
+          "6 on-chain compare anchor (host wait)",
+          6009.788068
+        ],
+        [
+          "7 smaller-side reveal",
+          1.227727
+        ],
+        [
+          "8 payout-note keys + WAL",
+          1.382853
+        ]
+      ],
+      "total_ms": 10145.623304,
+      "verify_ms": 4.053425
+    }
+  },
+  "settle_ms": 20276.598339
+}
