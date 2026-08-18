@@ -29,7 +29,9 @@ sizes: circuit gates, proof, and verifying key.
 ./experiments/rq1_crypto_overhead.sh --runs 5 --warmup 1
 ```
 
-Time: about 10 minutes with the defaults. Memory: about 4 GB.
+Time: about 4 minutes with the defaults, plus the build. Memory: about
+7 GB — the in-process configuration holds both parties, and the two
+trader processes take 1.6 GiB each.
 
 Output:
 
@@ -56,9 +58,9 @@ machine, and the same rate cap.
 ```
 
 Time: it grows with the round-trip time, because the protocol is bound by
-its rounds. Give the default sweep about one hour. A point that does not
-finish inside `--timeout` seconds is marked `did not finish` and the sweep
-continues.
+its rounds. The default sweep took 7 minutes on the reference machine. A
+point that does not finish inside `--timeout` seconds is marked `did not
+finish` and the sweep continues.
 
 Output:
 
@@ -83,8 +85,8 @@ writing's payload size, which the summary collects.
 ./experiments/rq3_end_to_end.sh --runs 3     # three trades, one after the other
 ```
 
-Time: about 10 minutes for the first build, then about one minute per
-trade. Memory: about 15 GB, because two collaborative provers run at the
+Time: about 3 minutes for the first build, then about 50 seconds per
+trade. Memory: about 4 GB, because two collaborative provers run at the
 same time. The script needs Go, and it binds the chain ports 7999 and
 8999.
 
