@@ -348,7 +348,22 @@ pub fn build_pair_relation<Cs: Circuit<Fr>>(
     price_bits: &[Variable],
 ) -> Result<(), CircuitError> {
     let mut sat = SatisfiabilityWitness::default();
-    pair_relation_impl(cs, public, a, b, price_bits, &mut sat)
+    pair_relation_impl(cs, public, a, b, price_bits, &mut sat, &mut |_, _| {})
+}
+
+/// [`build_pair_relation`] with a step tracer: after each constraint
+/// group, `trace` receives (step label, current gate count). For the gate
+/// census (docs) — the counts are MEASURED, never estimated.
+pub fn build_pair_relation_traced<Cs: Circuit<Fr>>(
+    cs: &mut Cs,
+    public: &PairPublicWires,
+    a: &PairSideWires,
+    b: &PairSideWires,
+    price_bits: &[Variable],
+    trace: &mut dyn FnMut(&str, usize),
+) -> Result<(), CircuitError> {
+    let mut sat = SatisfiabilityWitness::default();
+    pair_relation_impl(cs, public, a, b, price_bits, &mut sat, trace)
 }
 
 /// [`build_pair_relation`] that also returns the [`SatisfiabilityWitness`]
@@ -362,7 +377,7 @@ pub fn build_pair_relation_collecting<Cs: Circuit<Fr>>(
     price_bits: &[Variable],
 ) -> Result<SatisfiabilityWitness, CircuitError> {
     let mut sat = SatisfiabilityWitness::default();
-    pair_relation_impl(cs, public, a, b, price_bits, &mut sat)?;
+    pair_relation_impl(cs, public, a, b, price_bits, &mut sat, &mut |_, _| {})?;
     Ok(sat)
 }
 
@@ -376,8 +391,10 @@ fn pair_relation_impl<Cs: Circuit<Fr>>(
     b: &PairSideWires,
     price_bits: &[Variable],
     sat: &mut SatisfiabilityWitness,
+    trace: &mut dyn FnMut(&str, usize),
 ) -> Result<(), CircuitError> {
     assert_eq!(price_bits.len(), PAIR_EXTRA_LEN);
+    trace("start", cs.num_gates());
     let one_var = cs.one();
     let zero = cs.zero();
 
@@ -392,6 +409,10 @@ fn pair_relation_impl<Cs: Circuit<Fr>>(
     sat.bool_vars.extend_from_slice(price_bits);
     cs.enforce_bool(public.a_is_seller)?;
     sat.bool_vars.push(public.a_is_seller);
+    trace(
+        "1 booleanity q_a+q_b+price (192 bits) + side flag",
+        cs.num_gates(),
+    );
 
     let mut eq = |cs: &mut Cs, x: Variable, y: Variable| -> Result<(), CircuitError> {
         cs.enforce_equal(x, y)?;
@@ -405,12 +426,14 @@ fn pair_relation_impl<Cs: Circuit<Fr>>(
     let q_b = le_bits_to_field(cs, &b.amount_bits)?;
     let price_v = le_bits_to_field(cs, price_bits)?;
     eq(cs, price_v, public.price)?;
+    trace("2 recompositions + price equality", cs.num_gates());
 
     // 3. Open both on-chain order quantity commitments.
     let h_qa = poseidon_hash2(cs, q_a, a.r_order)?;
     eq(cs, h_qa, public.cm_q_a)?;
     let h_qb = poseidon_hash2(cs, q_b, b.r_order)?;
     eq(cs, h_qb, public.cm_q_b)?;
+    trace("3 OPEN cm_q_a + cm_q_b", cs.num_gates());
 
     // s_a = a_is_seller, s_b = 1 - s_a.
     let s_a = public.a_is_seller;
@@ -444,6 +467,10 @@ fn pair_relation_impl<Cs: Circuit<Fr>>(
     let needed_b = needed(cs, q_b, s_b)?;
     let h_lb = poseidon_hash2(cs, needed_b, b.r_locked)?;
     eq(cs, h_lb, public.locked_b)?;
+    trace(
+        "4 collateral equations + OPEN locked_a + locked_b",
+        cs.num_gates(),
+    );
 
     // 5. cmp = (q_a > q_b) - (q_a < q_b) must equal the public claim.
     let (lt, eq_flag) = cmp_from_bits(cs, &a.amount_bits, &b.amount_bits)?;
@@ -458,6 +485,7 @@ fn pair_relation_impl<Cs: Circuit<Fr>>(
     )?;
     let cmp_expected = cs.sub(gt, lt)?;
     eq(cs, cmp_expected, public.cmp)?;
+    trace("5 MSB-first compare scan + cmp equality", cs.num_gates());
 
     // 6. Fill and residual quantities: fill = min(q_a, q_b).
     let d_ab = cs.sub(q_a, q_b)?;
@@ -465,10 +493,12 @@ fn pair_relation_impl<Cs: Circuit<Fr>>(
     let fill = cs.add(q_b, m_lt)?;
     let q_res_a = cs.sub(q_a, fill)?;
     let q_res_b = cs.sub(q_b, fill)?;
+    trace("6 fill = min(q_a, q_b)", cs.num_gates());
     let h_qra = poseidon_hash2(cs, q_res_a, a.r_q_res)?;
     eq(cs, h_qra, public.cm_q_res_a)?;
     let h_qrb = poseidon_hash2(cs, q_res_b, b.r_q_res)?;
     eq(cs, h_qrb, public.cm_q_res_b)?;
+    trace("7 OPEN cm_q_res_a + cm_q_res_b", cs.num_gates());
 
     // 7. Residual collateral, re-committed under fresh blindings.
     let locked_res_a = needed(cs, q_res_a, s_a)?;
@@ -477,6 +507,7 @@ fn pair_relation_impl<Cs: Circuit<Fr>>(
     let locked_res_b = needed(cs, q_res_b, s_b)?;
     let h_lrb = poseidon_hash2(cs, locked_res_b, b.r_locked_res)?;
     eq(cs, h_lrb, public.cm_locked_res_b)?;
+    trace("8 residual collateral + OPEN both", cs.num_gates());
 
     // 8. Payout notes: the seller receives the token2 leg (fill*price),
     //    the buyer the token1 leg (fill). recv = fill + s*(fill*price - fill).
@@ -486,6 +517,7 @@ fn pair_relation_impl<Cs: Circuit<Fr>>(
     let recv_a = cs.add(fill, ra)?;
     let rb = cs.mul(s_b, d_fill)?;
     let recv_b = cs.add(fill, rb)?;
+    trace("9 recv values", cs.num_gates());
 
     // NoteCommit chain: P2(P2(P2(P2(TAG_CM=3, npk), asset), v), r).
     let tag_cm = cs.add_constant(zero, &Fr::from(crate::poseidon::TAG_CM))?;
@@ -504,6 +536,7 @@ fn pair_relation_impl<Cs: Circuit<Fr>>(
     eq(cs, note_a, public.cm_note_out_a)?;
     let note_b = note_commit(cs, b.recv_npk, public.asset_recv_b, recv_b, b.r_note)?;
     eq(cs, note_b, public.cm_note_out_b)?;
+    trace("10 NoteCommit chains x2", cs.num_gates());
 
     Ok(())
 }
