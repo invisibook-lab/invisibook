@@ -251,7 +251,6 @@ its own. `LockedCommitment` pins it through the collateral equation
 | orderbook | writing | `SubmitCompareCoZk2p` | record the dual-signed 2-party comparison (PLONK) |
 | orderbook | writing | `SubmitCompareCoZk` | Groth16 variant of the compare gate |
 | orderbook | writing | `SettlePair` | **atomic** two-leg settlement (the ONLY settle writing) |
-| orderbook | writing | `SettlePairCoZk2p` | **atomic** merged settlement: ONE collaborative PLONK proof for compare + both legs (benchmark twin; see [cozk2p_design.md](cozk2p_design.md) §8) |
 | orderbook | writing | `ClaimFees` | producer mints accrued fees as a note |
 | orderbook | writing | `RegisterSettleAddr` | QUIC rendezvous (dev) |
 | orderbook | reading | `QueryOrders`, `QuerySettleAddr`, `QueryFees` | |
@@ -266,7 +265,6 @@ its own. `LockedCommitment` pins it through the collateral equation
 | [chain/core/orderbook.go](../chain/core/orderbook.go) | `SendOrder`, matching, rendezvous, `QueryOrders` |
 | [chain/core/orderbook_cozk.go](../chain/core/orderbook_cozk.go) | compare + settle writings incl. `SettlePair` |
 | [chain/core/orderbook_cozk2p.go](../chain/core/orderbook_cozk2p.go) | PLONK compare gate (`-tags cozk2p`) |
-| [chain/core/orderbook_settlepair2p.go](../chain/core/orderbook_settlepair2p.go) | merged settlement writing (`SettlePairCoZk2p`) |
 | [chain/core/order.go](../chain/core/order.go), [order_scheme.go](../chain/core/order_scheme.go) | order model + GORM CRUD |
 | [chain/core/order_sign.go](../chain/core/order_sign.go) | canonical SendOrder signing message |
 | [chain/core/account.go](../chain/core/account.go) | Account tripod (pool only) |

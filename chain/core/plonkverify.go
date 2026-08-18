@@ -51,12 +51,6 @@ func VerifyPlonkSettle2p(vk *PlonkVK, proofHex string, publicJSON []byte) error 
 	return verifyPlonkWith(vk, proofHex, publicJSON, plonkVerifySettle2p)
 }
 
-// VerifyPlonkSettlePair verifies a MERGED settlement proof (compare + both
-// settle legs in one statement) against the 15-signal `PairPublic` JSON.
-func VerifyPlonkSettlePair(vk *PlonkVK, proofHex string, publicJSON []byte) error {
-	return verifyPlonkWith(vk, proofHex, publicJSON, plonkVerifySettlePair)
-}
-
 // verifyPlonkWith is the shared decode/log/skip shell around one FFI
 // verifier entry. A nil VK (empty path in config) skips verification.
 func verifyPlonkWith(

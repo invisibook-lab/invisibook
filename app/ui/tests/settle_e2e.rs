@@ -43,7 +43,7 @@ use invisibook_lib::{
 };
 use invisibook_ui::{
     components::trade_form::prepare_order,
-    settle::{SettleDeps, SettleMode, SettleOutcome, run_settle},
+    settle::{SettleDeps, SettleOutcome, run_settle},
 };
 
 // ─────────────────────────── Fixed parameters ───────────────────────────
@@ -250,22 +250,12 @@ async fn leaf_count(client: &ChainClient) -> u64 {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the chain + settle2p_session prover and ~15 GB RAM; run with --ignored --test-threads=1"]
 async fn settle_e2e_relist() {
-    settle_e2e_scenario(SettleMode::Split).await;
+    settle_e2e_scenario().await;
 }
 
-/// The SAME scenario over the MERGED path: one collaborative proof covers
-/// compare + both settle legs (`SettlePairCoZk2p`), no reveal before
-/// settlement finality. Identical assertions — the A/B benchmark twin of
-/// `settle_e2e_relist`.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs the chain + settle2p_session prover and ~15 GB RAM; run with --ignored --test-threads=1"]
-async fn settle_e2e_relist_merged() {
-    settle_e2e_scenario(SettleMode::Merged).await;
-}
-
-/// The shared scenario body; both tests bind the fixed chain ports, so run
-/// them one at a time (--test-threads=1).
-async fn settle_e2e_scenario(mode: SettleMode) {
+/// The scenario body. It binds the fixed chain ports, so no second copy
+/// may run at the same time (--test-threads=1).
+async fn settle_e2e_scenario() {
     let root = repo_root();
     let chain_dir = root.join("chain");
     let chain_bin = chain_dir.join("invisibook");
@@ -360,14 +350,12 @@ async fn settle_e2e_scenario(mode: SettleMode) {
         keys_dir: keys_dir.clone(),
         sessions_dir: sessions_root.join("alice"),
         note_seed: seed_from_hex(ALICE_SEED_HEX),
-        mode,
     };
     let bob_deps = SettleDeps {
         bin: prover_bin.clone(),
         keys_dir: keys_dir.clone(),
         sessions_dir: sessions_root.join("bob"),
         note_seed: seed_from_hex(BOB_SEED_HEX),
-        mode,
     };
 
     // Warm the proving-key cache once so the two concurrent provers don't race
@@ -503,7 +491,7 @@ async fn settle_e2e_scenario(mode: SettleMode) {
     let sa = read_stats(&alice_outcome.session_dir);
     let sb = read_stats(&bob_outcome.session_dir);
 
-    eprintln!("\n════════ settle_e2e wall-clock summary (ms) [{mode:?}] ════════");
+    eprintln!("\n════════ settle_e2e wall-clock summary (ms) ════════");
     eprintln!("{:<44} {:>10} {:>10}", "step", "alice", "bob");
     let row = |name: &str, a: f64, b: f64| eprintln!("{name:<44} {a:>10.0} {b:>10.0}");
     row(

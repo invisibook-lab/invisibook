@@ -27,11 +27,6 @@ pub struct ClientConfig {
     /// lookup chain.
     #[serde(default)]
     pub settle2p_bin: Option<PathBuf>,
-    /// Settlement flavor: "split" (default; compare-only MPC + per-side
-    /// Groth16 legs) or "merged" (one collaborative proof for compare +
-    /// both settle legs). Benchmark switch; see `settle2p_mode()`.
-    #[serde(default)]
-    pub settle2p_mode: Option<String>,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -182,18 +177,6 @@ impl ClientConfig {
             }
         }
         None
-    }
-
-    /// Resolves the settlement flavor: the `settle2p_mode` config field,
-    /// then the `INVISIBOOK_SETTLE2P_MODE` env var, defaulting to "split".
-    /// Returns the normalized lowercase mode string.
-    pub fn settle2p_mode(&self) -> String {
-        let raw = self
-            .settle2p_mode
-            .clone()
-            .or_else(|| env::var("INVISIBOOK_SETTLE2P_MODE").ok())
-            .unwrap_or_else(|| "split".to_string());
-        raw.trim().to_lowercase()
     }
 
     /// Directory for 2-party settlement key material inside the data

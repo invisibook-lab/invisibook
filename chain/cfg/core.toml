@@ -15,15 +15,12 @@ require_proofs = true
 # generated collaboratively by both traders (SubmitCompareCoZk writing).
 # settle_cozk2p is the 2-party PLONK variant (SubmitCompareCoZk2p writing);
 # its verification additionally needs a chain built with `-tags cozk2p`.
-# settle_pair_cozk2p is the MERGED statement (SettlePairCoZk2p writing):
-# one collaborative PLONK proof for compare + both settle legs.
 settle_cozk_vk_path        = "vk/settle_cozk_vk.json"
 settle_small_vk_path       = "vk/settle_small_vk.json"
 settle_large_vk_path       = "vk/settle_large_vk.json"
 send_order_vk_path         = "vk/send_order_vk.json"
 claim_fees_vk_path         = "vk/claim_fees_vk.json"
 settle_cozk2p_vk_path      = "vk/settle_cozk2p_vk.bin"
-settle_pair_cozk2p_vk_path = "vk/settle_pair_cozk2p_vk.bin"
 
 [account]
 db_path      = "data/accounts.db"

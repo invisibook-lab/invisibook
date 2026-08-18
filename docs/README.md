@@ -10,9 +10,9 @@
    deviates from the paper**, why, and with what effect. Read this
    before you trust either the paper or a design doc.
 3. [settlement_protocol.md](settlement_protocol.md) — the settlement
-   protocols step by step (split and merged): what trader A and trader
-   B each do and submit, with the full constraint list of every MPC
-   check and ZK relation.
+   protocol step by step: what trader A and trader B each do and
+   submit, with the full constraint list of every MPC check and ZK
+   relation.
 4. The component designs: [chain_design.md](chain_design.md),
    [zk_design.md](zk_design.md), [cozk2p_design.md](cozk2p_design.md),
    [app_design.md](app_design.md).
@@ -22,7 +22,7 @@
 | Document | Language | Status | Content |
 |---|---|---|---|
 | [paper_deviations.md](paper_deviations.md) | EN | **Current** | Implementation vs. the paper, item by item (D1–D17) |
-| [settlement_protocol.md](settlement_protocol.md) | EN | **Current** | Both settlement flavors step by step: A/B walkthroughs, sequence diagrams, exact submissions, every MPC/ZK constraint |
+| [settlement_protocol.md](settlement_protocol.md) | EN | **Current** | The settlement protocol step by step: A/B walkthroughs, sequence diagrams, exact submissions, every MPC/ZK constraint |
 | [chain_design.md](chain_design.md) | EN | **Current** | L2 chain: tripods, note pool, matching, compare gate, atomic `SettlePair` |
 | [zk_design.md](zk_design.md) | EN | **Current** | Note primitives (golden spec), Groth16 circuit catalog, binds, proving/verifying toolchain |
 | [cozk2p_design.md](cozk2p_design.md) | EN | **Current** | 2-party SPDZ + collaborative PLONK compare session, stdio protocol, trust caveats |

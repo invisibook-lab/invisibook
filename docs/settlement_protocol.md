@@ -1,12 +1,11 @@
 # Settlement Protocol Reference
 
 > **Status:** Current (2026-08-18, note model + locked-only orders,
-> branch `cozk-merged-settle`).
-> This document is the step-by-step reference for BOTH settlement
-> flavors: the **split** flow (production default) and the **merged**
-> flow (benchmark twin). It names every step trader A and trader B
-> perform, every payload they submit, and every constraint each MPC
-> sub-protocol and ZK relation enforces. Component overviews:
+> branch `cozk-split`).
+> This document is the step-by-step reference for the settlement
+> protocol. It names every step trader A and trader B perform, every
+> payload they submit, and every constraint each MPC sub-protocol and
+> ZK relation enforces. Component overviews:
 > [cozk2p_design.md](cozk2p_design.md), [zk_design.md](zk_design.md),
 > [chain_design.md](chain_design.md).
 
@@ -46,9 +45,9 @@ no residual-quantity commitment anywhere. Notation: `P2(x, y)` is the
 2-input circom Poseidon over BN254 Fr; `[x]` is an authenticated SPDZ share
 of `x`; `Com(v, r) = P2(v, r)`.
 
-## 2. The SPLIT protocol
+## 2. The protocol
 
-The MPC proves ONLY the comparison (π_cmp). After `cmp` is public and
+The MPC proves the comparison (π_cmp). After `cmp` is public and
 anchored on chain, the smaller side reveals its opening; each side then
 proves its OWN settle circuit alone, and one atomic writing settles
 both legs.
@@ -103,9 +102,9 @@ and proves π_A. When cmp = 0 there is no reveal and BOTH sides prove
 | R | `RegisterSettleAddr`; poll `QuerySettleAddr` | same | chain | peer address found |
 | 1 | broadcast Poseidon fingerprint of the chain-read publics | same | fabric (plaintext) | fingerprints equal — stale chain reads abort here |
 | 2 | input `[q_A], [r_A]` | input `[q_B], [r_B]` | fabric (shares) | `open(P2(needed([q]), [r]) − locked) == 0` for BOTH orders |
-| 3 | run the compare protocol (§4.3) | same | fabric | opened `cmp ∈ {−1,0,1}` |
+| 3 | run the compare protocol (§3.3) | same | fabric | opened `cmp ∈ {−1,0,1}` |
 | 4 | host signs `compare msg(ids, cmp)`; limbs exchanged | same | stdio + fabric | own signature round-trips unchanged |
-| 5 | collaborative prove π_cmp | same | fabric | witness-validity gate (§4.5) passes; local verify of the opened proof |
+| 5 | collaborative prove π_cmp | same | fabric | witness-validity gate (§3.5) passes; local verify of the opened proof |
 | 6 | either host submits `SubmitCompareCoZk2p`; both BLOCK until both orders are `Settling` | same | chain | the F1 anchor: nothing was revealed yet, so aborting here leaks nothing |
 | 7 | (larger) receives the reveal | (smaller) broadcasts `(q, r)` | fabric (plaintext) | `open([q_small] − q) == 0` and same for `r` |
 | 8 | derive own payout-note opening `(npk, r_recv)`; write WAL v1; exchange the pairs; write WAL v2 | same | fabric (plaintext) | own pair round-trips unchanged |
@@ -145,7 +144,7 @@ message: small `["invisibook-settle-small-v1", order_id,
 match_order_id, cm_note_out]`; large `["invisibook-settle-large-v1",
 order_id, match_order_id, cm_locked_residual, cm_note_out]`. Each leg's
 Groth16 proof carries a `bind` public input over the same fields plus the
-chain id (§5.0).
+chain id (§4.0).
 
 ### 2.4 Measured latency, step by step
 
@@ -176,124 +175,7 @@ Step 5 is 36 % of the settlement and every other cryptographic step
 together is under 100 ms. Steps 6 and 10 — pure block waits — are 81 %.
 
 
-## 3. The MERGED protocol
-
-ONE collaborative proof covers the comparison AND both settlement
-legs. There are no solo settle proofs, no leg exchange, and no reveal
-of any quantity before the settlement is FINAL on chain.
-
-### 3.1 Sequence diagram
-
-```
- Trader A (maker, PARTY0)      chain                Trader B (taker, PARTY1)
- ────────────────────────      ─────                ────────────────────────
-     │   (rendezvous + QUIC connect: identical to split)         │
-     │                                                           │
- (1) │ fingerprint(publics) ◀──────plaintext──────▶ fingerprint  │  abort on mismatch
- (2) │ share [q_A],[r_lockedA],[r_lockedResA],[npk_A],[r_noteA]  │
-     │       ─────────shares───────── (B: the same 5 values)     │
-     │ open(P2(needed([q]),[r_locked]) − locked) == 0, both sides│  collateral binding
- (3) │ MPC three-way compare ──────────▶ open cmp ∈ {−1,0,1}     │
- (4) │ compute OVER SHARES: fill = min, residual collaterals,    │
-     │ recv values, 2 residual-locked cms, 2 note chains;        │
-     │ open the 4 output commitments (hiding — reveal nothing)   │
- (5) │ sign(full 11-signal statement) ◀─sig limbs─▶ sign(...)    │
- (6) │ collaborative prove of the MERGED relation;               │
-     │ witness-validity gate; MAC-checked open; local verify     │
-     │ WAL v1 (larger side's amounts still unknown)              │
-     │                             │                             │
- (7) │ SettlePairCoZk2p{ids, cmp, 4 cms, sig_A, sig_B, proof}    │  either party
-     ├────────────────────────────▶│◀────────────(or)────────────┤
-     │   chain: verify 2 sigs + ONE proof → mint BOTH notes,     │
-     │   small side Done, large side relisted — in one pipeline  │
-     │  ...both hosts BLOCK until the settlement is FINAL...     │
-     │                             │                             │
- (8) │◀────────── smaller side reveals the FILL value ──────────▶│
-     │ open([fill] − fill) == 0                                  │  lying reveal aborts
-     │ larger side now knows its payout + residual amounts;      │
-     │ WAL v2; both hosts persist                                │
-```
-
-### 3.2 Steps, actor by actor
-
-| # | Trader A does | Trader B does | Channel | Check that gates progress |
-|---|---|---|---|---|
-| 0/R | identical to split (match + rendezvous) | | chain | |
-| 1 | fingerprint preamble | same | fabric (plaintext) | equal fingerprints |
-| 2 | input 5 shares: `[q_A], [r_lockedA], [r_lockedResA], [npk_A], [r_noteA]` | same 5 for B | fabric (shares) | collateral binding zero-opens for both orders (2 Poseidon over shares) |
-| 3 | compare (§4.3) | same | fabric | `cmp ∈ {−1,0,1}` |
-| 4 | jointly compute the 4 output commitments over shares (10 Poseidon: 2 residual collaterals + 2 four-hash note chains); open them | same | fabric | MAC check on every open |
-| 5 | host signs the FULL statement (ids + cmp + 4 output cms) | same | stdio + fabric | own signature round-trips |
-| 6 | collaborative prove of the merged relation; local verify; WAL v1 | same | fabric | validity gate (§4.5) before any proof element is revealed |
-| 7 | either host submits `SettlePairCoZk2p`; both BLOCK until finality (small side `Done`, large side relisted under the statement's residual collateral cm) | same | chain | the anchor IS the settlement |
-| 8 | (larger) learns the fill | (smaller) broadcasts the fill | fabric (plaintext) | `open([fill] − fill) == 0`; WAL v2 |
-
-Who knows what, and when: `cmp` at step 3; the 4 commitments (hiding)
-at step 4; the fill — the only value ever revealed — at step 8, strictly
-AFTER on-chain finality. The reveal shrinks from split's `(q, r_locked)`
-to one integer, and note secrets `(npk, r_note)` never leave their owner.
-
-Griefing caveat: a counterparty that vanishes between step 7 and step
-8 leaves the larger side with a minted payout note of unknown amount.
-The WAL keeps the session recoverable; the amount can be re-learned
-only from the counterparty.
-
-### 3.3 Exact on-chain submission
-
-**`SettlePairCoZk2p`** (either party):
-
-```json
-{"order_a_id","order_b_id","cmp",
- "cm_note_out_a","cm_note_out_b",
- "cm_locked_residual_a","cm_locked_residual_b",
- "sig_a","sig_b","zk_proof"}
-```
-
-Both residual COLLATERAL commitments are ALWAYS present (the filled
-side's commits to zero); the chain applies only the larger side's. Both
-signatures cover the SAME length-prefixed message
-`["invisibook-settle-pair-cozk2p-v1", order_a_id, order_b_id, cmp,
-cm_note_out_a, cm_note_out_b, cm_locked_residual_a,
-cm_locked_residual_b]`. `zk_proof` is the hex ark-compressed merged
-PLONK proof.
-
-### 3.4 Measured latency, step by step
-
-Same run conditions as §2.4, trader A's column. Rows are the steps of
-§3.2:
-
-| step | ms |
-|---|---|
-| 0 `SendOrder` prove (rapidsnark) | 327 |
-| 0 `SendOrder` submit → `Pending` (block wait) | 4 008 |
-| 0 matching → both `Matched` (block wait) | 4 006 |
-| 1 preamble fingerprint | 2 |
-| 2 share inputs + collateral binding (2 Poseidon over shares) | 66 |
-| 3 three-way compare | 16 |
-| 4 output commitments in MPC + opens (10 Poseidon over shares) | 200 |
-| 5 signature ferry + exchange | 1 |
-| 6 collaborative prove of the merged relation + local verify + WAL v1 | 20 618 |
-| 7 on-chain settlement anchor (host/chain wait) | 6 010 |
-| 8 post-finality fill reveal + WAL v2 | 2 |
-| **session subprocess total** | **27 015** |
-| R rendezvous + final confirm | 6 253 |
-| **`run_settle` total** | **33 268** |
-| **full trade, both orders** | **47 814** |
-
-Step 6 is 62 % of the settlement; the whole rest of the cryptography is
-285 ms.
-
-**Step 4 against step 6 is the sharpest number in this document.** Step
-4 computes 10 Poseidon hashes over SPDZ shares in 200 ms. Step 6 proves
-a relation whose 12 Poseidon gadgets are ~5 650 of its 6 259 gates, and
-costs 20 618 ms. Hashing over shares and *proving* that same hashing
-over shares differ by about two orders of magnitude. That is why the
-split flow keeps every hash either over shares (step 2) or in
-single-prover rapidsnark (step 9, ~90 ms), and sends only a 2 048-gate
-comparison through collaborative proving.
-
-
-## 4. MPC sub-protocols and their checks
+## 3. MPC sub-protocols and their checks
 
 All building blocks run on the SPDZ fabric: every share carries an
 information-theoretic MAC, every `open_authenticated` MAC-checks the
@@ -301,7 +183,7 @@ revealed value, and any deviation aborts the session. Both parties
 enqueue fabric operations in identical canonical order (A's values
 first) so the dataflow op-ids align.
 
-### 4.1 Statement fingerprint (both flavors, twice)
+### 3.1 Statement fingerprint (twice)
 
 Each party folds its chain-read public inputs with Poseidon
 (`h ← P2(h, x_i)`, seeded with the field count) and broadcasts the
@@ -310,10 +192,10 @@ session start and once again inside the prover. Purpose: a stale chain
 read fails with a clear error instead of a MAC failure deep inside
 proving.
 
-### 4.2 Collateral binding (both flavors)
+### 3.2 Collateral binding
 
-Each order's collateral commitment is its ONLY on-chain commitment, so
-both flavors run the SAME two checks. For `locked` with shared opening
+Each order's collateral commitment is its ONLY on-chain commitment. For
+`locked` with shared opening
 `[q], [r_locked]`: scale the quantity share into its collateral
 denomination — `needed([q]) = [q]` (seller) or `[q]·price` (buyer); the
 side flags and price are public, so the scaling is share-local and costs
@@ -324,12 +206,12 @@ witness does not open its ON-CHAIN commitment is caught before any
 expensive phase; because the equation is injective in `q`, this also
 pins the quantity that goes into the comparison.
 
-### 4.3 Three-way comparison (`compare_geq` × 2)
+### 3.3 Three-way comparison (`compare_geq` × 2)
 
 For each direction (`a ≥ b`, then `b ≥ a`):
 
 1. `[d] = [v1] − [v2] + 2^64`. Bit 64 of `d` is 1 iff `v1 ≥ v2`
-   (inputs are < 2^64, guaranteed by §4.2).
+   (inputs are < 2^64, guaranteed by §3.2).
 2. Draw 105 random shared bits (65 comparison bits + 40 statistical
    masking bits) and compose `[m] = Σ m_i 2^i`.
 3. Open `c = d + m` (safe: 40 extra masking bits).
@@ -342,7 +224,7 @@ Open both direction bits. Checks: each opened value must be exactly 0
 or 1, and the pair `(0, 0)` (impossible for honest inputs) aborts.
 Map `(1,1) → 0`, `(1,0) → +1`, `(0,1) → −1`. Leakage: `cmp` only.
 
-### 4.4 Authenticated plaintext exchange (sigs, npk pairs, legs, reveals)
+### 3.4 Authenticated plaintext exchange (sigs, npk pairs, legs, reveals)
 
 One-directional inputs use `share_plaintext(payload, sender)`: the
 sender's value reaches both parties. Two integrity patterns apply:
@@ -355,7 +237,7 @@ sender's value reaches both parties. Two integrity patterns apply:
   `open([x] − x_revealed) == 0`. A lying reveal aborts immediately —
   the revealed value is provably the one the MPC compared and proved.
 
-### 4.5 Witness-validity gate (before ANY proof element is revealed)
+### 3.5 Witness-validity gate (before ANY proof element is revealed)
 
 SPDZ gives correct-or-abort computation on the GIVEN shares; it does
 not stop a party from inputting shares that make the joint witness
@@ -374,7 +256,7 @@ before proving:
    with negligible probability; the mask makes a rejection leak
    nothing beyond "invalid".
 
-### 4.6 Collaborative prove and MAC-checked open
+### 3.6 Collaborative prove and MAC-checked open
 
 `MultiproverPlonkKzgSnark::prove` runs the TurboPlonk rounds with
 every wire an SPDZ share; the result opens to a STANDARD single-prover
@@ -382,9 +264,9 @@ PLONK proof (769 B compressed). The open is `open_authenticated`: every
 revealed proof element is MAC-checked. Each party then verifies the
 opened proof locally before releasing it to its host.
 
-## 5. ZK relations: complete constraint lists
+## 4. ZK relations: complete constraint lists
 
-### 5.0 Shared notation
+### 4.0 Shared notation
 
 - **[RANGE(x)]** — 64-bit range check. In circom: `Num2Bits(64)`. In
   the PLONK relations: the value ENTERS as 64 owner-supplied LE bits;
@@ -419,7 +301,7 @@ Every count below is MEASURED, not estimated:
   cross-checked against compiling the pristine file — the script fails
   on any drift.
 
-### 5.1 π_cmp — the compare relation (collaborative PLONK; Groth16 twin `settle_cozk.circom`)
+### 4.1 π_cmp — the compare relation (collaborative PLONK; Groth16 twin `settle_cozk.circom`)
 
 Publics (5): `[cmp, locked_a, locked_b, price, a_is_seller]`.
 Private (per side, supplied by its owner): `q` as 64 LE bits, `r_locked`.
@@ -441,7 +323,7 @@ proves the identical statement with `LessThan(64)` comparators —
 measured **748 non-linear R1CS constraints** (ranges 128, the two
 collateral opens 245 each, the comparison 130); the chain accepts either.
 
-### 5.2 `settle_small` — π_A, the fully filled side (Groth16)
+### 4.2 `settle_small` — π_A, the fully filled side (Groth16)
 
 Publics (6): `[locked, price, side, pay_asset, cm_note_out, bind]`.
 Private: `q, r_locked, npk_ctr, r_note`.
@@ -462,7 +344,7 @@ Note the deliberate asymmetry: π_A does NOT self-prove `q ≤ q_ctr`.
 The chain's recorded `cmp` decides which circuit each side may use
 (F3; [paper_deviations.md](paper_deviations.md) D15).
 
-### 5.3 `settle_large` — π_B, the surviving side (Groth16)
+### 4.3 `settle_large` — π_B, the surviving side (Groth16)
 
 Publics (8): `[locked, locked_ctr, price, side, cm_locked_residual,
 pay_asset, cm_note_out, bind]`. Private: `q, r_locked, q_ctr,
@@ -481,42 +363,7 @@ r_locked_ctr, r_locked_res, npk_ctr, r_note`.
 
 Measured total: **2 029 non-linear R1CS constraints**.
 
-### 5.4 The merged relation (collaborative PLONK, `relation_pair.rs`)
-
-Publics (11): `[cmp, cm_note_out_a, cm_note_out_b, cm_locked_res_a,
-cm_locked_res_b, locked_a, locked_b, price, a_is_seller, asset_recv_a,
-asset_recv_b]`. Private per side (owner-supplied, 68 wires): `q` as 64
-LE bits, `r_locked`, `r_locked_res`, `npk` (own receiving key),
-`r_note`. There are no price bits: `price` and `a_is_seller` are public
-wires used as they are, the same policy as §5.1.
-
-| # | Constraint | Purpose | gates |
-|---|---|---|---|
-| 1 | booleanity of all 128 amount bits | [RANGE] for both quantities — the only 64-bit anchor the rest inherits | 128 |
-| 2 | `q_a = Σ bits·2^i`, `q_b = Σ bits·2^i` | recomposition | 44 |
-| 3 | `needed_a = q_a·price + s_a·(q_a − q_a·price)` with `s_a = a_is_seller`; [OPEN(locked_a; needed_a, r_locked_a)] | the collateral value is NOT a witness: collision resistance pins it to the amount `send_order` range-checked at admission — which also bounds every derived product below 2^64 | 477 |
-| 4 | same for B with `s_b = 1 − s_a` | B is always the opposite side | 476 |
-| 5 | MSB-first scan on the bit vectors (as §5.1) | strict-less and equal flags | 384 |
-| 6 | `gt = 1 − lt − eq`; `cmp === gt − lt` | public comparison claim | 3 |
-| 7 | `fill = q_b + lt·(q_a − q_b)`; `q_res_x = q_x − fill` | `fill = min(q_a, q_b)`; residual quantities stay pure witnesses | 5 |
-| 8 | `locked_res_x = needed(q_res_x, s_x)`; [OPEN(cm_locked_res_x; locked_res_x, r_locked_res_x)] for both sides | residual COLLATERAL — the only re-commitment (the filled side commits 0) | 952 |
-| 9 | `fill_t2 = fill·price`; `recv_a = fill + s_a·(fill_t2 − fill)`; `recv_b = fill + s_b·(fill_t2 − fill)` | the seller receives the token2 leg, the buyer the token1 leg | 6 |
-| 10 | `NoteCommit(npk_a, asset_recv_a, recv_a, r_note_a) === cm_note_out_a`; same for B | both payout notes, minted from the joint statement | 3 771 |
-
-Measured total: 13 (allocation) + 6 246 = **6 259 gates**, padded to
-**8 192** by finalization (12 Poseidon gadgets at 471/472 gates each
-dominate). No [BIND]: the dual signatures over the full statement
-(§3.3) are the anti-replay weld. Range safety of the derived values
-(`fill_t2`, `locked_res`) follows from constraints 3–4 — they are all
-bounded by the opened admission-time collateral.
-
-Dropping the four quantity commitments of the pre-locked-only statement
-removed 4 Poseidon gadgets (−1 888 gates) and the 64 price bits with
-their recomposition equality (−131), which halves the padded domain
-from 16 384 to 8 192 — so the merged proof now costs one power of two
-less than the old one.
-
-## 6. What the chain verifies, writing by writing
+## 5. What the chain verifies, writing by writing
 
 **`SubmitCompareCoZk2p`** — pair preconditions (`loadMatchedPair`):
 both orders exist, both `Matched`, mutually linked, opposite sides,
@@ -536,20 +383,12 @@ height, fresh commitments) + journal DONE in one transaction → re-match
 + cleanup. A crash anywhere is completed by resubmission or by the
 boot-time recovery.
 
-**`SettlePairCoZk2p`** — canonical-form checks on the four
-request-carried commitments; the SAME pair preconditions as the
-compare writing (the pair is still `Matched`); both signatures over
-the merged message; ONE PLONK proof against the 11-signal statement
-(signals 0–4 from the request, 5–10 rebuilt from the order rows). Then
-the SAME journaled pipeline as `SettlePair`, with `cmp` taken from the
-proven statement instead of a recorded row.
+## 6. Security-ordering summary
 
-## 7. Security-ordering summary
-
-| property | split | merged |
-|---|---|---|
-| anchor before disclosure | F1: the reveal of `(q, r_locked)` waits for `Settling` on chain | the anchor IS the final settlement; the fill reveal waits for finality |
-| what the counterparty learns | `cmp`, then the smaller side's full opening `(q, r_locked)` | `cmp`, then (larger side only) the fill value |
-| fair exchange | F2: one atomic `SettlePair` — both notes or nothing | same pipeline, one writing |
-| circuit-role gating | F3: the chain's `cmp` decides who may use π_A/π_B | not needed — one relation proves both legs and the comparison consistently |
-| abort after learning | smaller's opening is known to the larger side once revealed; the `Settling` anchor attributes the abort | nothing to abort into: the trade is already final before anyone learns anything |
+| property | how the protocol gets it |
+|---|---|
+| anchor before disclosure | F1: the reveal of `(q, r_locked)` waits for `Settling` on chain |
+| what the counterparty learns | `cmp`, then the smaller side's full opening `(q, r_locked)` |
+| fair exchange | F2: one atomic `SettlePair` — both notes or nothing |
+| circuit-role gating | F3: the chain's `cmp` decides who may use π_A/π_B |
+| abort after learning | the smaller side's opening is known to the larger side once revealed; the `Settling` anchor attributes the abort |
