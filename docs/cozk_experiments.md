@@ -253,11 +253,49 @@ the cryptographic cost of the whole settlement is ~4 s of MPC/PLONK plus
 
 The merged path ([cozk2p_design.md](cozk2p_design.md) §8) proves the
 comparison AND both settle legs in ONE collaborative proof
-(`relation_pair`, 6 259 gates / 8 192 padded, vs the compare relation's
-1 519 / 2 048). Same trade, same machine (24 cores, 29 GB, otherwise
-idle), same chain (3 s blocks), both flavors verified on chain. One run
-of each twin, back to back, on the LOCKED-ONLY model (2026-08-18,
-branch `cozk-merged-settle`):
+(`relation_pair`, 6 259 gates / 8 192 padded), against the split path's
+compare-only relation (1 519 / 2 048) plus two single-prover settle
+legs.
+
+**Experimental setup.** All measurements run on one host: an Intel Core
+i9-12900HX (8 performance and 8 efficiency cores, 24 hardware threads)
+with 29 GB of RAM, under Linux 6.18 (WSL2), otherwise idle. Both traders
+execute as separate operating-system processes on that host and speak
+QUIC over the loopback interface, so the figures carry no wide-area
+network latency. The chain is a third process — a single-node PoA
+deployment of the yu framework, chain id 1926, RPC over loopback — whose
+block interval we measured at 3.0 s; the wallet polls order state every
+2 s, so every chain-wait row is quantized by both periods. The
+cryptographic stack is BN254 throughout: single-prover statements are
+circom 2.2.3 circuits set up with snarkjs 0.7.6 and proved with
+rapidsnark, while the two-party statements use collaborative TurboPlonk
+(mpc-jellyfish) over ark-mpc's malicious-secure SPDZ on Rust
+nightly-2025-02-20, and the Go 1.26.2 chain links the PLONK verifier
+over cgo. The KZG structured reference string is a fixed-seed
+development SRS of maximum degree 2^15; proving and verifying keys are
+generated once and warmed before measurement, so no measured run pays
+key generation. The shielded pool is a depth-20 Poseidon Merkle tree
+seeded with exactly two notes. The workload is a single trade: trader A,
+the maker, sells 2 ETH at price 3 and locks 2 ETH; trader B buys 1 ETH
+at the same price and locks 3 USDT. Collateral covers each order
+exactly and the fee is zero, so `cmp = +1` and the run exercises the
+cross-quantity path — B closes fully while A is relisted with its
+residual. Both traders' settlement drivers run concurrently, on-chain
+proof verification is enabled for both flavors, and we report trader A's
+column from one run of each flavor; per-step figures come from a
+stopwatch inside the session process (written to `stats.json`), and the
+steps before the session are timed by the harness.
+
+**Setup caveats.** Two development substitutions make these numbers
+optimistic rather than conservative. Beaver triples come from a mock
+source instead of a real SPDZ offline phase, and the SRS is publicly
+reproducible, so the proofs carry no soundness. Loopback transport also
+removes the round-trip latency that dominates the open phase; because
+that phase is network-round bound, a wide-area deployment would move the
+merged flow's cost up, not down.
+
+Numbers below are from one run of each twin, back to back, on the
+locked-only model (2026-08-18, branch `cozk-merged-settle`):
 
 | phase (ms) | split alice | split bob | merged alice | merged bob |
 |---|---|---|---|---|
