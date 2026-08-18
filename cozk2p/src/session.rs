@@ -172,6 +172,10 @@ pub struct SessionResult {
     /// report it separately from the MPC/prove phases).
     #[serde(default)]
     pub onchain_wait_ms: f64,
+    /// Wall-clock of the local verification each trader runs on the opened
+    /// proof before releasing it (part of the prove step, reported apart).
+    #[serde(default)]
+    pub verify_ms: f64,
     /// Wall-clock of every protocol step, labelled to match
     /// `docs/settlement_protocol.md` §2.2.
     #[serde(default)]
@@ -494,7 +498,9 @@ where
         prove_collaborative_timed(fabric.clone(), my_party, &side, &public, config.pk).await?;
 
     emit("verify", "verifying the proof locally before release");
+    let verify_start = std::time::Instant::now();
     verify_settle(config.vk, &public, &proof)?;
+    let verify_ms = verify_start.elapsed().as_secs_f64() * 1e3;
     let mut proof_bytes = Vec::new();
     ark_serialize::CanonicalSerialize::serialize_compressed(&proof, &mut proof_bytes)
         .context("serializing proof")?;
@@ -684,6 +690,7 @@ where
         my: my_outcome,
         timings,
         onchain_wait_ms,
+        verify_ms,
         steps: step.finish(),
     })
 }

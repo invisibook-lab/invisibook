@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 )
 
 // ────────────────────── PLONK Verifier Infrastructure ──────────────────────
@@ -69,10 +70,13 @@ func verifyPlonkWith(
 		return fmt.Errorf("%s proof or public statement is empty", vk.Name)
 	}
 	log.Printf("[zk] verifying %s: %d B proof (PLONK)", vk.Name, len(proofBytes))
+	// Same timing contract as VerifyGroth16: the experiment harness reads
+	// the on-chain verification cost from this log line.
+	start := time.Now()
 	if err := verify(vk.VKBytes, publicJSON, proofBytes); err != nil {
 		log.Printf("[zk] %s REJECTED: %v", vk.Name, err)
 		return fmt.Errorf("plonk verification failed for %s: %w", vk.Name, err)
 	}
-	log.Printf("[zk] %s ok", vk.Name)
+	log.Printf("[zk] %s ok in %.3f ms", vk.Name, float64(time.Since(start).Microseconds())/1e3)
 	return nil
 }

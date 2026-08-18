@@ -17,6 +17,7 @@
 use std::{
     fs,
     io::Write as _,
+    net::SocketAddr,
     path::PathBuf,
     process::{Child, Command, Stdio},
     time::Instant,
@@ -149,12 +150,28 @@ struct Args {
     /// Measured runs per configuration.
     #[arg(long, default_value_t = 3)]
     runs: usize,
+    /// Unmeasured runs before the measured ones, per configuration. They
+    /// warm the key cache, the allocator, and the OS page cache.
+    #[arg(long, default_value_t = 0)]
+    warmup: usize,
     /// Base port for the 2-process QUIC mode (each run uses a fresh pair).
     #[arg(long, default_value_t = 23411)]
     base_port: u16,
+    /// Address trader A dials instead of trader B's own port. Point it at a
+    /// delay relay (experiments/netdelay) to measure the session under an
+    /// emulated round-trip time. With this flag every run reuses the SAME
+    /// port pair, so one relay serves the whole sweep.
+    #[arg(long)]
+    quic_peer_a: Option<SocketAddr>,
     /// Skip the 2-process QUIC mode.
     #[arg(long)]
     skip_quic: bool,
+    /// Skip the single-prover baseline.
+    #[arg(long)]
+    skip_single: bool,
+    /// Skip the in-process (mock network) 2-party mode.
+    #[arg(long)]
+    skip_mock: bool,
     /// Stand-in for the F1 on-chain compare confirmation in the mock mode:
     /// each party blocks this long in `confirm_compare_onchain`. Reported
     /// as `onchain_wait_ms`, SEPARATE from the cryptographic phases.
@@ -191,12 +208,20 @@ async fn main() -> Result<()> {
     );
 
     // ── Baseline: single prover (trusted party holding both secrets) ──
+    // Always run once even when skipped, so the report still carries the
+    // proof/VK sizes of this relation.
+    let single_runs = if args.skip_single { 1 } else { args.runs };
+    let single_warmup = if args.skip_single { 0 } else { args.warmup };
     println!("=== baseline: single-prover TurboPlonk ===");
     let mut single_ms = Vec::new();
     let mut verify_ms = Vec::new();
     let mut proof_compressed = 0usize;
     let mut proof_uncompressed = 0usize;
-    for _ in 0..args.runs {
+    for _ in 0..single_warmup {
+        let proof = prove_single(&a, &b, &public, &pk)?;
+        verify_settle(&vk, &public, &proof)?;
+    }
+    for _ in 0..single_runs {
         let t = Instant::now();
         let proof = prove_single(&a, &b, &public, &pk)?;
         single_ms.push(t.elapsed().as_secs_f64() * 1e3);
@@ -212,6 +237,11 @@ async fn main() -> Result<()> {
         mean(&verify_ms),
         proof_compressed
     );
+    if args.skip_single {
+        // The one run above only sized the proof; drop its timings.
+        single_ms.clear();
+        verify_ms.clear();
+    }
 
     // ── Full 2-party session, in-process (mock duplex channels) ──
     // Now the ENTIRE settlement session the app runs: MPC comparison, fill
@@ -224,7 +254,12 @@ async fn main() -> Result<()> {
     fs::create_dir_all(&session_tmp)?;
     let mut mock_runs = Vec::new();
     let confirm_delay = std::time::Duration::from_millis(args.confirm_delay_ms);
-    for run in 0..args.runs {
+    let mock_total = if args.skip_mock {
+        0
+    } else {
+        args.warmup + args.runs
+    };
+    for run in 0..mock_total {
         let dir_a = session_tmp.join(format!("mock_{run}_a"));
         let dir_b = session_tmp.join(format!("mock_{run}_b"));
         let t = Instant::now();
@@ -276,6 +311,7 @@ async fn main() -> Result<()> {
         let total_ms = t.elapsed().as_secs_f64() * 1e3;
         let (result, leg_exchange_ms) = r0;
         let tim = result.timings;
+        let measured = run >= args.warmup;
         // Everything in `total` that is neither the prove's own phases nor
         // a host/chain wait: the MPC compare, the fill reveal, the
         // commitment/signature exchange.
@@ -286,7 +322,7 @@ async fn main() -> Result<()> {
             - result.onchain_wait_ms
             - leg_exchange_ms)
             .max(0.0);
-        mock_runs.push(json!({
+        let record = json!({
             "total_ms": total_ms,
             "session_overhead_ms": session_overhead_ms,
             "build_ms": tim.build_ms,
@@ -296,7 +332,11 @@ async fn main() -> Result<()> {
             // confirmation stand-in and the settle-leg round.
             "onchain_wait_ms": result.onchain_wait_ms,
             "leg_exchange_ms": leg_exchange_ms,
-        }));
+            "verify_ms": result.verify_ms,
+        });
+        if measured {
+            mock_runs.push(record);
+        }
         println!(
             "  run: total {:.0} ms (compare+reveal+exchange ~{:.0}, prove build {:.0}/prove {:.0}/open {:.0}, onchain-wait {:.0}, leg-exchange {:.0})",
             total_ms,
@@ -332,9 +372,14 @@ async fn main() -> Result<()> {
             serde_json::to_string(&input_b)?,
         )?;
 
-        for run in 0..args.runs {
-            // Fresh port pair per run to avoid rebind races.
-            let pa = args.base_port + (run as u16) * 2;
+        for run in 0..(args.warmup + args.runs) {
+            // Fresh port pair per run to avoid rebind races; a relay run
+            // keeps one pair so the relay's addresses stay valid.
+            let pa = if args.quic_peer_a.is_some() {
+                args.base_port
+            } else {
+                args.base_port + (run as u16) * 2
+            };
             let pb = pa + 1;
             let t = Instant::now();
             let mut children: Vec<Child> = Vec::new();
@@ -344,13 +389,18 @@ async fn main() -> Result<()> {
                 ("trader-a", "a_input.json", pa, pb),
             ] {
                 let out_dir = session_tmp.join(format!("out_{role}"));
+                // Trader A's dial target is the relay when one is configured.
+                let peer_addr = match args.quic_peer_a {
+                    Some(relay) if role == "trader-a" => relay.to_string(),
+                    _ => format!("127.0.0.1:{peer}"),
+                };
                 let mut cmd = Command::new(&session_bin);
                 cmd.arg("--role")
                     .arg(role)
                     .arg("--listen")
                     .arg(format!("127.0.0.1:{listen}"))
                     .arg("--peer")
-                    .arg(format!("127.0.0.1:{peer}"))
+                    .arg(peer_addr)
                     .arg("--input")
                     .arg(session_tmp.join(input_file))
                     .arg("--out-dir")
@@ -400,7 +450,9 @@ async fn main() -> Result<()> {
             println!(
                 "  run: total {total_ms:.0} ms (incl. process startup + key load + full session)"
             );
-            quic_runs.push(json!({ "total_ms": total_ms, "per_party": per_party }));
+            if run >= args.warmup {
+                quic_runs.push(json!({ "total_ms": total_ms, "per_party": per_party }));
+            }
         }
     }
 

@@ -649,6 +649,7 @@ func settlementID(a, b OrderID) string {
 // registered settlement writing.
 func (ot *OrderBook) SettlePair(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
+	LogPayloadSize("SettlePair", ctx.GetRequestBytes())
 
 	req := new(SettlePairRequest)
 	if err := ctx.BindJson(req); err != nil {
