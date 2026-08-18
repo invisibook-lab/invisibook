@@ -71,18 +71,23 @@ type BridgeSeenScheme struct {
 func (BridgeSeenScheme) TableName() string { return "bridge_seen" }
 
 // SettlementSeenScheme makes payout minting IDEMPOTENT per settlement: the
-// row is created in the SAME transaction as the two payout notes, keyed by
+// row is created in the SAME transaction as both payouts and both hiding
+// refund notes, keyed by
 // the settlement id. A retry (crash between the mint and the order-side
 // updates, then resubmission or restart) finds the row and skips the mint
 // instead of minting again. The note commitments are recorded so a retry
 // carrying DIFFERENT legs is rejected instead of silently skipped.
 type SettlementSeenScheme struct {
-	SettlementID string `gorm:"primaryKey;column:settlement_id"`
-	CmNoteA      string `gorm:"column:cm_note_a;not null"`
-	CmNoteB      string `gorm:"column:cm_note_b;not null"`
-	ALeafIndex   uint64 `gorm:"column:a_leaf_index"`
-	BLeafIndex   uint64 `gorm:"column:b_leaf_index"`
-	Height       uint64 `gorm:"column:height"`
+	SettlementID     string `gorm:"primaryKey;column:settlement_id"`
+	CmNoteA          string `gorm:"column:cm_note_a;not null"`
+	CmNoteB          string `gorm:"column:cm_note_b;not null"`
+	CmRefundA        string `gorm:"column:cm_refund_a;not null;default:''"`
+	CmRefundB        string `gorm:"column:cm_refund_b;not null;default:''"`
+	ALeafIndex       uint64 `gorm:"column:a_leaf_index"`
+	BLeafIndex       uint64 `gorm:"column:b_leaf_index"`
+	ARefundLeafIndex uint64 `gorm:"column:a_refund_leaf_index"`
+	BRefundLeafIndex uint64 `gorm:"column:b_refund_leaf_index"`
+	Height           uint64 `gorm:"column:height"`
 }
 
 func (SettlementSeenScheme) TableName() string { return "settlement_seen" }
@@ -293,22 +298,23 @@ func (a *Account) SettlementMinted(settlementID string) (*SettlementSeenScheme, 
 	return &row, nil
 }
 
-// MintSettlementNotes mints the two payout notes of one settlement EXACTLY
-// ONCE. The first call appends both notes and records the settlement id in
+// MintSettlementNotes mints the two payouts and two hiding refund notes of
+// one settlement EXACTLY ONCE. The first call appends all four and records the settlement id in
 // the same transaction; every later call with the same id returns the
 // recorded leaf indices with `already = true` and appends nothing. A retry
 // whose note commitments differ from the recorded ones is an error — a
-// diverging resubmission must never mint a second pair.
-// `cmAHex`/`cmBHex` must be canonical 64-char field-element hexes.
+// diverging resubmission must never mint a second output set.
+// All commitment arguments must be canonical 64-char field-element hexes.
 func (a *Account) MintSettlementNotes(
-	settlementID, cmAHex, cmBHex string, height uint64, by string,
+	settlementID, cmAHex, cmBHex, cmRefundAHex, cmRefundBHex string, height uint64, by string,
 ) (indices []uint64, already bool, err error) {
 	check := func(row *SettlementSeenScheme) ([]uint64, bool, error) {
-		if row.CmNoteA != cmAHex || row.CmNoteB != cmBHex {
+		if row.CmNoteA != cmAHex || row.CmNoteB != cmBHex ||
+			row.CmRefundA != cmRefundAHex || row.CmRefundB != cmRefundBHex {
 			return nil, false, fmt.Errorf(
 				"settlement %s already minted different payout notes", settlementID)
 		}
-		return []uint64{row.ALeafIndex, row.BLeafIndex}, true, nil
+		return []uint64{row.ALeafIndex, row.BLeafIndex, row.ARefundLeafIndex, row.BRefundLeafIndex}, true, nil
 	}
 	if row, rerr := a.SettlementMinted(settlementID); rerr != nil {
 		return nil, false, rerr
@@ -323,8 +329,16 @@ func (a *Account) MintSettlementNotes(
 	if err != nil {
 		return nil, false, fmt.Errorf("cm_note_b: %w", err)
 	}
+	cmRefundA, err := ParseFrHex(cmRefundAHex)
+	if err != nil {
+		return nil, false, fmt.Errorf("cm_refund_a: %w", err)
+	}
+	cmRefundB, err := ParseFrHex(cmRefundBHex)
+	if err != nil {
+		return nil, false, fmt.Errorf("cm_refund_b: %w", err)
+	}
 	minted, err := a.ApplyPoolMutation(PoolMutation{
-		NoteCms: []*big.Int{cmA, cmB},
+		NoteCms: []*big.Int{cmA, cmB, cmRefundA, cmRefundB},
 		Height:  height,
 		Source:  "settle",
 		By:      by,
@@ -333,6 +347,8 @@ func (a *Account) MintSettlementNotes(
 				SettlementID: settlementID,
 				CmNoteA:      cmAHex,
 				CmNoteB:      cmBHex,
+				CmRefundA:    cmRefundAHex,
+				CmRefundB:    cmRefundBHex,
 				ALeafIndex:   0, // placeholder, set below
 				BLeafIndex:   0,
 				Height:       height,
@@ -351,7 +367,8 @@ func (a *Account) MintSettlementNotes(
 	// holds the id + commitments that gate idempotency).
 	if err := a.db.Model(&SettlementSeenScheme{}).
 		Where("settlement_id = ?", settlementID).
-		Updates(map[string]any{"a_leaf_index": minted[0], "b_leaf_index": minted[1]}).Error; err != nil {
+		Updates(map[string]any{"a_leaf_index": minted[0], "b_leaf_index": minted[1],
+			"a_refund_leaf_index": minted[2], "b_refund_leaf_index": minted[3]}).Error; err != nil {
 		return nil, false, err
 	}
 	return minted, false, nil

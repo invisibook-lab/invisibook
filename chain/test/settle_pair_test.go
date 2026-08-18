@@ -86,9 +86,11 @@ func TestSettlePairAtomic(t *testing.T) {
 		MatchOrderID:     buyOrderID,
 		CmLockedResidual: hexCommit(0xA2),
 		CmNoteOut:        hexCommit(0xC2), // alice mints bob's fill note
+		CmRefundOut:      hexCommit(0xD2),
 	}
 	aLeg := core.SettlePairLeg{
 		CmNoteOut:        largeSig.CmNoteOut,
+		CmRefundOut:      largeSig.CmRefundOut,
 		CmLockedResidual: largeSig.CmLockedResidual,
 		ZkProof:          "test-proof-skip",
 		Signature: hex.EncodeToString(
@@ -98,10 +100,12 @@ func TestSettlePairAtomic(t *testing.T) {
 		OrderID:      buyOrderID,
 		MatchOrderID: sellOrderID,
 		CmNoteOut:    hexCommit(0xC1), // bob mints alice's payout note
+		CmRefundOut:  hexCommit(0xD1),
 	}
 	bLeg := core.SettlePairLeg{
-		CmNoteOut: smallSig.CmNoteOut,
-		ZkProof:   "test-proof-skip",
+		CmNoteOut:   smallSig.CmNoteOut,
+		CmRefundOut: smallSig.CmRefundOut,
+		ZkProof:     "test-proof-skip",
 		Signature: hex.EncodeToString(
 			ed25519.Sign(bobPriv, core.SettleSmallSigMessage(smallSig))),
 	}
@@ -149,14 +153,17 @@ func TestSettlePairAtomic(t *testing.T) {
 			sellAfter.LockedCommitment, aLeg.CmLockedResidual)
 	}
 
-	// BOTH payout notes landed in the SAME step (+2 leaves).
+	// Both payouts and both private refund notes land atomically (+4 leaves).
 	afterPair := getPoolInfo(t)
-	if afterPair.LeafCount != poolBefore.LeafCount+2 {
-		t.Fatalf("SettlePair must append exactly two notes, %d → %d",
+	if afterPair.LeafCount != poolBefore.LeafCount+4 {
+		t.Fatalf("SettlePair must append exactly four notes, %d → %d",
 			poolBefore.LeafCount, afterPair.LeafCount)
 	}
 	if getNoteByCm(t, aLeg.CmNoteOut) < 0 || getNoteByCm(t, bLeg.CmNoteOut) < 0 {
 		t.Fatal("both payout notes must be in the pool tree")
+	}
+	if getNoteByCm(t, aLeg.CmRefundOut) < 0 || getNoteByCm(t, bLeg.CmRefundOut) < 0 {
+		t.Fatal("both refund notes must be in the pool tree")
 	}
 
 	t.Log("=== SettlePair atomic settlement verified on-chain ===")

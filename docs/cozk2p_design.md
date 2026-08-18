@@ -1,6 +1,7 @@
 # 2-Party Collaborative-ZK Settlement (cozk2p)
 
-> **Status:** Current (2026-08-17, locked-only model + two-phase
+> **Status:** Current (2026-08-18, crossing prices + encrypted reveal +
+> pre-open checkpoint,
 > session). For every place this design differs from the paper, see
 > [paper_deviations.md](paper_deviations.md). The 3-party co-snarks
 > experiment it replaced lives only in git history (branch
@@ -36,16 +37,17 @@ MAC-checks every revealed value, including the proof itself.
 
 Roles: trader A = maker = `PARTY0` (QUIC dialer), trader B = taker =
 `PARTY1` (listener) — deterministic from the matched pair (block
-height, tie → order id). Both parties run the identical program over
+height, intra-block index, then order id). Both parties run the identical program over
 one `MpcFabric`; the host app drives the `settle2p_session` subprocess
 over stdio ([app_design.md](app_design.md) §4.2).
 
 1. **Preamble.** Exchange a Poseidon fingerprint of the chain-sourced
-   statement (the two collateral commitments, price, side). Divergent
+   statement (the two collateral commitments, both own prices, execution
+   price, side). Divergent
    chain reads abort before any secret flows.
 2. **Bind.** Share both quantities and collateral blindings into the
    fabric; compute each side's `needed(q, side)` on shares (the side
-   flags and price are public, so the scaling is share-local) and
+   flags and each order's own price are public, so the scaling is share-local) and
    verify it opens that side's ON-CHAIN collateral commitment inside
    the MPC (Poseidon on shares). The collateral commitment is the
    order's ONLY commitment — there is no separate quantity commitment.
@@ -55,12 +57,15 @@ over stdio ([app_design.md](app_design.md) §4.2).
    `(order_a, order_b, cmp)` are ferried in and exchanged; the
    collaborative prove of π_cmp runs; the opened proof is verified
    locally before release.
-5. **On-chain anchor (F1 gate).** The session hands
+5. **On-chain anchor + checkpoint (F1 gate).** The session hands
    `{cmp, π_cmp, sig_A, sig_B}` to the host
    (`confirm_compare_onchain`) and BLOCKS until the host confirms both
-   orders are `Settling` on chain. Abort here leaks nothing and leaves
-   no trace. **The reveal never precedes this anchor.**
-6. **Reveal.** The smaller party reveals `(q, r_locked)` in plaintext;
+   orders are `Settling`, then uploads a signed checkpoint for the exact
+   match round and waits for the peer's checkpoint. A sole uploader can
+   freeze a silent peer after the deadline. **The reveal never precedes
+   both durable checkpoints.**
+6. **Encrypted reveal.** The smaller party sends `(q, r_locked)` under a
+   chain-authenticated per-round X25519/ChaCha20-Poly1305 channel;
    both sides open `share − revealed` and require zero, so a lying
    reveal aborts instantly. The larger side now holds its complete
    `settle_large` witness.
@@ -77,31 +82,32 @@ phases separately from the host/chain waits (`compare_onchain_wait_ms`,
 `leg_exchange_ms`), so chain latency never contaminates the
 cryptographic numbers.
 
-## 3. The relation (compare-only, 5 publics)
+## 3. The relation (compare-only, 6 publics)
 
-π_cmp proves exactly (with `needed(q, s) = q·price + s·(q − q·price)`
+π_cmp proves exactly (with `needed(q, p, s) = q·p + s·(q − q·p)`
 and `s_B = 1 − s_A`):
 
 ```
-P2(needed(q_A, s_A), r_A) = locked_A
-P2(needed(q_B, s_B), r_B) = locked_B
+P2(needed(q_A, price_A, s_A), r_A) = locked_A
+P2(needed(q_B, price_B, s_B), r_B) = locked_B
 cmp = sign(q_A − q_B) ∈ {−1, 0, 1}
 ```
 
-Publics: `[cmp, locked_a, locked_b, price, a_is_seller]` — the same
-5-signal statement as the Groth16 twin `settle_cozk.circom`. In the
+Publics: `[cmp, locked_a, locked_b, price_a, price_b, a_is_seller]` — the same
+6-signal statement as the Groth16 twin `settle_cozk.circom`. In the
 locked-only model an order commits ONLY its collateral, so the
 compared quantities are pinned by opening each collateral against its
-in-circuit `needed` (input legitimacy); `price` and `a_is_seller`
+in-circuit `needed` (input legitimacy); both prices and `a_is_seller`
 therefore enter the statement (the equation is injective in `q` for
-`price > 0` — see [paper_deviations.md](paper_deviations.md) D17).
+the corresponding price is positive — see
+[paper_deviations.md](paper_deviations.md) D17).
 
 `MpcPlonkCircuit` has no gadget library and cannot bit-decompose a
 shared value, so each quantity enters as 64 little-endian bits supplied
 by its owner (boolean-constrained in-circuit — the PLONK mirror of the
-circom twin's `Num2Bits(64)` range check). `price` and `a_is_seller` are
-PUBLIC wires and are used as they are: the chain builds both from the
-order rows (a u64 price, a 0-1 flag), a prover cannot lie about a public
+circom twin's `Num2Bits(64)` range check). Both prices and `a_is_seller` are
+PUBLIC wires and are used as they are: the chain builds them from the
+order rows (u64 prices and a 0-1 flag), a prover cannot lie about a public
 input, so neither is re-checked in-circuit (88 constraints saved).
 Comparison is an MSB-first equality-prefix scan; Poseidon is a
 hand-written gadget matching the circom permutation (t=3, 8 full +
@@ -120,10 +126,10 @@ staticlib over cgo:
 - `cozk2p/src/ffi.rs` exports `cozk2p_verify_settle(vk, public_json,
   proof)`.
 - `chain/core/plonkverify.go` + the `SubmitCompareCoZk2p` writing
-  rebuild the 5-signal statement from the order rows (collateral
-  commitments, execution price, order A's side) and call the bridge.
+  rebuild the 6-signal statement from the order rows (collateral
+  commitments, each order's own public price, order A's side) and call the bridge.
   The dual-signed compare message is domain-separated
-  (`invisibook-cozk2p-compare-v2`).
+  (`invisibook-cozk2p-compare-v3`).
 - The bridge compiles only with `go build -tags cozk2p`
   (`make build-chain-cozk2p`); without the tag the writing rejects
   PLONK compares at runtime.
@@ -142,7 +148,7 @@ staticlib over cgo:
 |---|---|
 | KZG SRS | fixed-seed dev SRS (`setup.rs`) — the toxic tau is publicly recomputable, so **anyone can forge a π_cmp**: on-chain soundness is zero. Needs a ceremony SRS |
 | Beaver triples | `PartyIDBeaverSource` mock — masks are predictable constants, so **a counterparty reads the other trader's inputs off the shares** and the opened proof has no zero-knowledge. Needs a real SPDZ offline phase (LowGear or an OT-based generator) |
-| QUIC TLS | self-signed cert + pass-through verifier: transport encryption without peer authentication; peers authenticate at the application layer (dual ed25519 signatures) and SPDZ MACs abort on tampering |
+| QUIC TLS | self-signed cert + pass-through verifier; settlement reveal confidentiality/authentication is supplied separately by signed per-round X25519 keys and ChaCha20-Poly1305, while SPDZ MACs protect shared computation |
 | Rendezvous | peer addresses exchanged in plaintext on chain (`RegisterSettleAddr`) — production needs an anonymous overlay ([paper_deviations.md](paper_deviations.md) D9) |
 | Toolchain | pinned `nightly-2025-02-20` (ark-mpc needs the unstable `inherent_associated_types` feature); `time`/`time-core` held back |
 | `price` range | the circuits do not re-range-check `price`; the chain guarantees `price < 2^64` at admission |

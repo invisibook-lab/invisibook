@@ -77,24 +77,28 @@ pub fn classify_submit_error(msg: &str) -> SubmitError {
 
 // ────────────────────── Request/Response Types ──────────────────────
 
-/// Mirror of chain Go `SendOrderRequest` (v2): spend two pool notes, lock
-/// the order's collateral (its ONLY commitment — locked-only model),
-/// destroy the plaintext `fee`, and mint the change note.
+/// Mirror of chain Go `SendOrderRequest` (v4): collateral and native-fee
+/// notes are separate spend banks with separate change commitments.
 #[derive(Debug, Clone, Serialize)]
 pub struct SendOrderParams {
     pub id: OrderID,
+    pub kind: u8,
     #[serde(rename = "type")]
     pub trade_type: u8,
     pub subject: TradePairJson,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protection_price: Option<u64>,
     pub pubkey: String,
     pub signature: String,
     pub anchor: String,
-    pub input_nullifiers: Vec<String>,
+    pub collateral_nullifiers: Vec<String>,
+    pub fee_nullifiers: Vec<String>,
     pub locked_commitment: String,
     pub fee: u64,
-    pub change_commitment: String,
+    pub collateral_change_commitment: String,
+    pub fee_change_commitment: String,
     pub zk_proof: String,
 }
 
@@ -108,7 +112,7 @@ pub struct TradePairJson {
 
 /// Domain tag separating the SendOrder signing message from every other
 /// ed25519 message in the system (e.g. the co-zk settle messages).
-const SEND_ORDER_SIGNING_DOMAIN: &str = "invisibook-send-order-v2";
+const SEND_ORDER_SIGNING_DOMAIN: &str = "invisibook-send-order-v4";
 
 /// Appends `s` to `buf` prefixed with its u32 big-endian byte length, so
 /// consecutive fields of arbitrary content concatenate without ambiguity.
@@ -125,23 +129,32 @@ fn put_signing_field(buf: &mut Vec<u8>, s: &str) {
 /// `core.SendOrderSigningMessage`.
 pub fn send_order_signing_message(params: &SendOrderParams) -> Vec<u8> {
     let price = params.price.map(|p| p.to_string()).unwrap_or_default();
+    let protection_price = params
+        .protection_price
+        .map(|p| p.to_string())
+        .unwrap_or_default();
     let mut buf = Vec::with_capacity(256);
     put_signing_field(&mut buf, SEND_ORDER_SIGNING_DOMAIN);
     put_signing_field(&mut buf, &params.id);
+    put_signing_field(&mut buf, &params.kind.to_string());
     put_signing_field(&mut buf, &params.trade_type.to_string());
     put_signing_field(&mut buf, &params.subject.token1);
     put_signing_field(&mut buf, &params.subject.token2);
     put_signing_field(&mut buf, &price);
+    put_signing_field(&mut buf, &protection_price);
     put_signing_field(&mut buf, &params.pubkey);
     put_signing_field(&mut buf, &params.anchor);
-    put_signing_field(&mut buf, &params.input_nullifiers[0]);
-    put_signing_field(&mut buf, &params.input_nullifiers[1]);
+    put_signing_field(&mut buf, &params.collateral_nullifiers[0]);
+    put_signing_field(&mut buf, &params.collateral_nullifiers[1]);
+    put_signing_field(&mut buf, &params.fee_nullifiers[0]);
+    put_signing_field(&mut buf, &params.fee_nullifiers[1]);
     put_signing_field(&mut buf, &params.locked_commitment);
     // Fee as a raw u64-BE 8-byte field (matches Go's binary.BigEndian).
     let fee_bytes = params.fee.to_be_bytes();
     buf.extend_from_slice(&(fee_bytes.len() as u32).to_be_bytes());
     buf.extend_from_slice(&fee_bytes);
-    put_signing_field(&mut buf, &params.change_commitment);
+    put_signing_field(&mut buf, &params.collateral_change_commitment);
+    put_signing_field(&mut buf, &params.fee_change_commitment);
     buf
 }
 
@@ -178,13 +191,13 @@ fn compare_message_with_prefix(prefix: &str, params: &CompareParams) -> Vec<u8> 
 /// Canonical byte string both traders ed25519-sign for the Groth16 compare
 /// variant. Lockstep with Go `core.CoZkCompareMessage`.
 pub fn compare_cozk_message(params: &CompareParams) -> Vec<u8> {
-    compare_message_with_prefix("invisibook-cozk-compare-v2", params)
+    compare_message_with_prefix("invisibook-cozk-compare-v3", params)
 }
 
 /// Canonical byte string both traders ed25519-sign for the 2-party PLONK
 /// compare variant. Lockstep with Go `core.CoZk2pCompareMessage`.
 pub fn compare_cozk2p_message(params: &CompareParams) -> Vec<u8> {
-    compare_message_with_prefix("invisibook-cozk2p-compare-v2", params)
+    compare_message_with_prefix("invisibook-cozk2p-compare-v3", params)
 }
 
 /// Verifies an ed25519 signature over `compare_cozk2p_message(params)`.
@@ -219,6 +232,7 @@ pub struct SettleSmallParams {
     pub order_id: OrderID,
     pub match_order_id: OrderID,
     pub cm_note_out: String,
+    pub cm_refund_out: String,
     pub signature: String,
     pub zk_proof: String,
 }
@@ -232,6 +246,7 @@ pub struct SettleLargeParams {
     pub match_order_id: OrderID,
     pub cm_locked_residual: String,
     pub cm_note_out: String,
+    pub cm_refund_out: String,
     pub signature: String,
     pub zk_proof: String,
 }
@@ -245,6 +260,7 @@ pub struct SettleLargeParams {
 #[derive(Debug, Clone, Serialize)]
 pub struct SettlePairLegParams {
     pub cm_note_out: String,
+    pub cm_refund_out: String,
     pub signature: String,
     pub zk_proof: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -254,9 +270,15 @@ pub struct SettlePairLegParams {
 impl SettlePairLegParams {
     /// A fully filled leg (π_A): the whole collateral transfers as one note;
     /// no residual. `signature` is over the SettleSmall message.
-    pub fn small(cm_note_out: String, signature: String, zk_proof: String) -> Self {
+    pub fn small(
+        cm_note_out: String,
+        cm_refund_out: String,
+        signature: String,
+        zk_proof: String,
+    ) -> Self {
         Self {
             cm_note_out,
+            cm_refund_out,
             signature,
             zk_proof,
             cm_locked_residual: String::new(),
@@ -267,12 +289,14 @@ impl SettlePairLegParams {
     /// collateral. `signature` is over the SettleLarge message.
     pub fn large(
         cm_note_out: String,
+        cm_refund_out: String,
         cm_locked_residual: String,
         signature: String,
         zk_proof: String,
     ) -> Self {
         Self {
             cm_note_out,
+            cm_refund_out,
             signature,
             zk_proof,
             cm_locked_residual,
@@ -311,11 +335,12 @@ fn settle_sig_message(domain: &str, fields: &[&str]) -> Vec<u8> {
 /// The owner-signed message for SettleSmall (Go `core.SettleSmallSigMessage`).
 pub fn settle_small_message(params: &SettleSmallParams) -> Vec<u8> {
     settle_sig_message(
-        "invisibook-settle-small-v1",
+        "invisibook-settle-small-v2",
         &[
             &params.order_id,
             &params.match_order_id,
             &params.cm_note_out,
+            &params.cm_refund_out,
         ],
     )
 }
@@ -323,12 +348,13 @@ pub fn settle_small_message(params: &SettleSmallParams) -> Vec<u8> {
 /// The owner-signed message for SettleLarge (Go `core.SettleLargeSigMessage`).
 pub fn settle_large_message(params: &SettleLargeParams) -> Vec<u8> {
     settle_sig_message(
-        "invisibook-settle-large-v1",
+        "invisibook-settle-large-v2",
         &[
             &params.order_id,
             &params.match_order_id,
             &params.cm_locked_residual,
             &params.cm_note_out,
+            &params.cm_refund_out,
         ],
     )
 }
@@ -338,7 +364,10 @@ pub fn settle_large_message(params: &SettleLargeParams) -> Vec<u8> {
 struct RegisterSettleAddrParams {
     order_id: OrderID,
     match_order_id: OrderID,
+    match_round: u64,
     addr: String,
+    encryption_pubkey: String,
+    signature: String,
 }
 
 /// Query settle address request params.
@@ -353,6 +382,62 @@ struct QuerySettleAddrParams {
 struct QuerySettleAddrResponse {
     #[serde(default)]
     addr: String,
+    #[serde(default)]
+    encryption_pubkey: String,
+    #[serde(default)]
+    match_round: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SettlePeer {
+    pub addr: String,
+    pub encryption_pubkey: String,
+}
+
+fn settle_addr_message(params: &RegisterSettleAddrParams) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(192);
+    put_signing_field(&mut buf, "invisibook-settle-addr-v2");
+    put_signing_field(&mut buf, &params.order_id);
+    put_signing_field(&mut buf, &params.match_order_id);
+    put_signing_field(&mut buf, &params.match_round.to_string());
+    put_signing_field(&mut buf, &params.addr);
+    put_signing_field(&mut buf, &params.encryption_pubkey);
+    buf
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettleCheckpointParams {
+    pub order_id: OrderID,
+    pub match_order_id: OrderID,
+    pub match_round: u64,
+    pub signature: String,
+}
+
+#[derive(Debug, Serialize)]
+struct QuerySettleCheckpointParams {
+    order_id: OrderID,
+    match_order_id: OrderID,
+    match_round: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SettleCheckpointStatus {
+    pub state_commitment: String,
+    pub my_submitted: bool,
+    pub peer_submitted: bool,
+    pub ready: bool,
+    pub deadline_height: u64,
+    #[serde(default)]
+    pub aborted_order_id: String,
+}
+
+fn checkpoint_message(domain: &str, params: &SettleCheckpointParams) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(128);
+    put_signing_field(&mut buf, domain);
+    put_signing_field(&mut buf, &params.order_id);
+    put_signing_field(&mut buf, &params.match_order_id);
+    put_signing_field(&mut buf, &params.match_round.to_string());
+    buf
 }
 
 #[derive(Debug, Serialize)]
@@ -381,11 +466,19 @@ pub struct QueryOrdersResponse {
 #[derive(Debug, Deserialize)]
 pub struct QueryOrderItem {
     pub id: OrderID,
+    #[serde(default)]
+    pub kind: u8,
     #[serde(rename = "type")]
     pub trade_type: u8,
     pub subject: QueryTradePair,
     #[serde(default, deserialize_with = "deserialize_price")]
     pub price: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_price")]
+    pub protection_price: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_price")]
+    pub execution_price: Option<u64>,
+    #[serde(default)]
+    pub match_round: u64,
     pub pubkey: String,
     #[serde(default)]
     pub locked_commitment: String,
@@ -551,9 +644,10 @@ impl ChainClient {
         hex::encode(kp.sign(message))
     }
 
-    /// Submits a SendOrder v2 request. The caller assembles `params`
-    /// (nullifiers, locked commitment, fee, change commitment) and the
-    /// send_order proof; this method signs the canonical message and submits.
+    /// Submits a SendOrder v4 request. The caller assembles `params`
+    /// (both input banks, locked commitment, fee, and both change
+    /// commitments) and the send_order proof; this method signs the canonical
+    /// message and submits.
     /// The error is CLASSIFIED (see `SubmitError`): the caller must keep its
     /// wallet records on an `Uncertain` outcome — the transaction may have
     /// landed despite the transport failure.
@@ -623,13 +717,19 @@ impl ChainClient {
         &self,
         order_id: OrderID,
         match_order_id: OrderID,
+        match_round: u64,
         addr: &str,
+        encryption_pubkey: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let params = RegisterSettleAddrParams {
+        let mut params = RegisterSettleAddrParams {
             order_id,
             match_order_id,
+            match_round,
             addr: addr.to_string(),
+            encryption_pubkey: encryption_pubkey.to_string(),
+            signature: String::new(),
         };
+        params.signature = self.sign(&settle_addr_message(&params));
         self.client
             .write_chain(
                 "orderbook",
@@ -648,7 +748,8 @@ impl ChainClient {
         &self,
         order_id: OrderID,
         match_order_id: OrderID,
-    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        match_round: u64,
+    ) -> Result<Option<SettlePeer>, Box<dyn std::error::Error>> {
         let params = QuerySettleAddrParams {
             order_id,
             match_order_id,
@@ -660,9 +761,95 @@ impl ChainClient {
         let resp: QuerySettleAddrResponse = serde_json::from_value(value)?;
         if resp.addr.is_empty() {
             Ok(None)
+        } else if resp.match_round != match_round || resp.encryption_pubkey.len() != 64 {
+            Err("peer rendezvous belongs to a stale round or has no encryption key".into())
         } else {
-            Ok(Some(resp.addr))
+            Ok(Some(SettlePeer {
+                addr: resp.addr,
+                encryption_pubkey: resp.encryption_pubkey,
+            }))
         }
+    }
+
+    /// Uploads this owner's durable pre-open checkpoint. The chain derives
+    /// and stores the exact state commitment from the matched rows.
+    pub async fn submit_settle_checkpoint(
+        &self,
+        order_id: OrderID,
+        match_order_id: OrderID,
+        match_round: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut params = SettleCheckpointParams {
+            order_id,
+            match_order_id,
+            match_round,
+            signature: String::new(),
+        };
+        params.signature = self.sign(&checkpoint_message(
+            "invisibook-settle-checkpoint-v1",
+            &params,
+        ));
+        self.client
+            .write_chain(
+                "orderbook",
+                "SubmitSettleCheckpoint",
+                &params,
+                self.chain_id,
+                20,
+                0,
+            )
+            .await
+    }
+
+    pub async fn query_settle_checkpoint(
+        &self,
+        order_id: OrderID,
+        match_order_id: OrderID,
+        match_round: u64,
+    ) -> Result<SettleCheckpointStatus, Box<dyn std::error::Error>> {
+        let value: Value = self
+            .client
+            .read_chain(
+                "orderbook",
+                "QuerySettleCheckpoint",
+                &QuerySettleCheckpointParams {
+                    order_id,
+                    match_order_id,
+                    match_round,
+                },
+            )
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// After the checkpoint deadline, requeues this order and freezes the
+    /// peer that failed to upload its checkpoint.
+    pub async fn abort_settle_round(
+        &self,
+        order_id: OrderID,
+        match_order_id: OrderID,
+        match_round: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut params = SettleCheckpointParams {
+            order_id,
+            match_order_id,
+            match_round,
+            signature: String::new(),
+        };
+        params.signature = self.sign(&checkpoint_message(
+            "invisibook-abort-settle-round-v1",
+            &params,
+        ));
+        self.client
+            .write_chain(
+                "orderbook",
+                "AbortSettleRound",
+                &params,
+                self.chain_id,
+                30,
+                0,
+            )
+            .await
     }
 
     /// Queries orders from the chain with optional filters and pagination.
@@ -968,12 +1155,20 @@ fn query_item_to_order(item: QueryOrderItem) -> Order {
     };
     Order {
         id: item.id,
+        kind: if item.kind == 1 {
+            OrderKind::Market
+        } else {
+            OrderKind::Limit
+        },
         trade_type,
         subject: TradePair {
             token1: item.subject.token1,
             token2: item.subject.token2,
         },
         price: item.price,
+        protection_price: item.protection_price,
+        execution_price: item.execution_price,
+        match_round: item.match_round,
         pubkey: item.pubkey,
         locked_commitment: item.locked_commitment,
         fee: item.fee,
@@ -1007,7 +1202,7 @@ mod tests {
     fn compare_cozk2p_message_lockstep() {
         for (cmp, cmp_str) in [(-1i8, "-1"), (0i8, "0"), (1i8, "1")] {
             let p = test_params(cmp);
-            let expected = String::from("invisibook-cozk2p-compare-v2:")
+            let expected = String::from("invisibook-cozk2p-compare-v3:")
                 + &p.order_a_id
                 + ":"
                 + &p.order_b_id
@@ -1031,16 +1226,18 @@ mod tests {
             order_id: "order-b-id".into(),
             match_order_id: "order-a-id".into(),
             cm_note_out: "77".repeat(32),
+            cm_refund_out: "88".repeat(32),
             signature: String::new(),
             zk_proof: String::new(),
         };
         let msg = settle_small_message(&small);
         let mut expected = Vec::new();
         for f in [
-            "invisibook-settle-small-v1",
+            "invisibook-settle-small-v2",
             "order-b-id",
             "order-a-id",
             &"77".repeat(32),
+            &"88".repeat(32),
         ] {
             expected.extend_from_slice(&(f.len() as u32).to_be_bytes());
             expected.extend_from_slice(f.as_bytes());
@@ -1052,6 +1249,7 @@ mod tests {
             match_order_id: "order-b-id".into(),
             cm_locked_residual: "99".repeat(32),
             cm_note_out: "aa".repeat(32),
+            cm_refund_out: "bb".repeat(32),
             signature: String::new(),
             zk_proof: String::new(),
         };
@@ -1063,7 +1261,12 @@ mod tests {
     /// it, and the field names line up with the Go json tags.
     #[test]
     fn settle_pair_leg_json_lockstep() {
-        let small = SettlePairLegParams::small("11".repeat(32), "sig-b".into(), "pf".into());
+        let small = SettlePairLegParams::small(
+            "11".repeat(32),
+            "12".repeat(32),
+            "sig-b".into(),
+            "pf".into(),
+        );
         let sj = serde_json::to_value(&small).unwrap();
         assert!(
             sj.get("cm_locked_residual").is_none(),
@@ -1073,6 +1276,7 @@ mod tests {
 
         let large = SettlePairLegParams::large(
             "22".repeat(32),
+            "23".repeat(32),
             "44".repeat(32),
             "sig-a".into(),
             "pf".into(),
@@ -1177,19 +1381,23 @@ mod tests {
     fn full_send_order_params() -> SendOrderParams {
         SendOrderParams {
             id: "order-1".to_string(),
+            kind: 0,
             trade_type: 0,
             subject: TradePairJson {
                 token1: "ETH".to_string(),
                 token2: "USDT".to_string(),
             },
             price: Some(3500),
+            protection_price: None,
             pubkey: "alice-pk".to_string(),
             signature: String::new(),
             anchor: "b".repeat(64),
-            input_nullifiers: vec!["c".repeat(64), "d".repeat(64)],
+            collateral_nullifiers: vec!["c".repeat(64), "d".repeat(64)],
+            fee_nullifiers: vec!["1".repeat(64), "2".repeat(64)],
             locked_commitment: "e".repeat(64),
             fee: 7,
-            change_commitment: "f".repeat(64),
+            collateral_change_commitment: "f".repeat(64),
+            fee_change_commitment: "a".repeat(64),
             zk_proof: String::new(),
         }
     }
@@ -1199,7 +1407,7 @@ mod tests {
     /// asserts the identical bytes.
     #[test]
     fn send_order_signing_message_lockstep_vectors() {
-        let want = "00000018696e76697369626f6f6b2d73656e642d6f726465722d7632000000076f726465722d310000000130000000034554480000000455534454000000043335303000000008616c6963652d706b00000040626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262620000004063636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363000000406464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646400000040656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565650000000800000000000000070000004066666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666";
+        let want = "00000018696e76697369626f6f6b2d73656e642d6f726465722d7634000000076f726465722d310000000130000000013000000003455448000000045553445400000004333530300000000000000008616c6963652d706b00000040626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262620000004063636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363000000406464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646400000040313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131310000004032323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232000000406565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656500000008000000000000000700000040666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666660000004061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161";
         assert_eq!(
             hex::encode(send_order_signing_message(&full_send_order_params())),
             want

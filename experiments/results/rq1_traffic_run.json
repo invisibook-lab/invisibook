@@ -3,114 +3,114 @@
     "prove_ms": [],
     "verify_ms": []
   },
-  "bench_process_peak_rss_bytes": 27267072,
+  "bench_process_peak_rss_bytes": 27410432,
   "circuit_gates": 2048,
   "cozk2p_mock_inprocess": [],
   "cozk2p_quic_2process": [
     {
       "per_party": [
         {
-          "build_ms": 119.51399,
+          "build_ms": 86.349238,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.4076610000000001,
-          "leg_exchange_ms": 1.835073,
-          "open_ms": 4056.798864,
-          "peak_rss_bytes": 1702817792,
+          "compare_onchain_wait_ms": 0.343513,
+          "leg_exchange_ms": 2.449097,
+          "open_ms": 5818.016957,
+          "peak_rss_bytes": 1790881792,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1457.889197,
+          "prove_ms": 1611.84356,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              3.369119
+              6.397467000000001
             ],
             [
               "2 share inputs + collateral binding",
-              190.344979
+              91.074237
             ],
             [
               "3 three-way compare",
-              48.085878
+              25.625809
             ],
             [
               "4 signature ferry + exchange",
-              1.58834
+              1.182806
             ],
             [
               "5 collaborative prove + local verify",
-              5639.1921680000005
+              7525.936541
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.456706
+              0.417845
             ],
             [
               "7 smaller-side reveal",
-              2.5396680000000003
+              4.569882
             ],
             [
               "8 payout-note keys + WAL",
-              1.647121
+              3.335987
             ]
           ],
-          "total_ms": 5982.545961999999,
-          "verify_ms": 4.821008
+          "total_ms": 7749.56051,
+          "verify_ms": 9.515229
         },
         {
-          "build_ms": 119.398001,
+          "build_ms": 86.609434,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.241972,
-          "leg_exchange_ms": 1.414095,
-          "open_ms": 4084.973333,
-          "peak_rss_bytes": 1694650368,
+          "compare_onchain_wait_ms": 0.257416,
+          "leg_exchange_ms": 2.22933,
+          "open_ms": 5780.59849,
+          "peak_rss_bytes": 1803317248,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1429.801486,
+          "prove_ms": 1650.067136,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.517471
+              0.747526
             ],
             [
               "2 share inputs + collateral binding",
-              191.347317
+              92.088556
             ],
             [
               "3 three-way compare",
-              47.38087
+              26.225329
             ],
             [
               "4 signature ferry + exchange",
-              1.580402
+              0.488224
             ],
             [
               "5 collaborative prove + local verify",
-              5639.700307
+              7526.847751
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.257726
+              0.32986400000000005
             ],
             [
               "7 smaller-side reveal",
-              2.189675
+              3.250414
             ],
             [
               "8 payout-note keys + WAL",
-              1.655937
+              3.456308
             ]
           ],
-          "total_ms": 5981.74737,
-          "verify_ms": 5.34652
+          "total_ms": 7749.569374,
+          "verify_ms": 9.072879
         }
       ],
-      "total_ms": 6049.402078
+      "total_ms": 7864.9053030000005
     }
   ],
   "proof_size_bytes": {
     "compressed": 769,
     "uncompressed": 1185
   },
-  "public_signals": 5,
+  "public_signals": 6,
   "vk_size_bytes_compressed": 938
 }

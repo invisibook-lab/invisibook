@@ -6,8 +6,10 @@ pub mod wallet;
 
 use std::{
     any::TypeId,
+    collections::{BTreeSet, hash_map::DefaultHasher},
     env,
-    fs::{File, create_dir_all},
+    fs::{self, File, create_dir_all},
+    hash::{Hash, Hasher},
     io::{BufReader, BufWriter},
     path::{Path, PathBuf},
     process::Command,
@@ -205,12 +207,86 @@ fn compile_circuit(name: &str) -> anyhow::Result<PathBuf> {
 
     let wasm = out_dir.join(format!("{name}_js/{name}.wasm"));
     let r1cs = out_dir.join(format!("{name}.r1cs"));
-    // Skip compilation if artifacts already exist
-    if wasm.exists() && r1cs.exists() {
+    let source_hash_path = out_dir.join(".source_hash");
+    // Hash only this circuit's transitive include closure. Hashing every
+    // template made a change to one settlement circuit invalidate unrelated
+    // deposit/withdraw proving keys as well.
+    fn collect_dependencies(
+        source: &Path,
+        include_dir: &Path,
+        out: &mut BTreeSet<PathBuf>,
+    ) -> anyhow::Result<()> {
+        let source = fs::canonicalize(source)?;
+        if !out.insert(source.clone()) {
+            return Ok(());
+        }
+        let text = fs::read_to_string(&source)?;
+        for line in text.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("include \"") else {
+                continue;
+            };
+            let Some((relative, _)) = rest.split_once('"') else {
+                continue;
+            };
+            let beside_source = source.parent().unwrap_or(include_dir).join(relative);
+            let dependency = if beside_source.exists() {
+                beside_source
+            } else {
+                include_dir.join(relative)
+            };
+            collect_dependencies(&dependency, include_dir, out)?;
+        }
+        Ok(())
+    }
+    let mut sources = BTreeSet::new();
+    collect_dependencies(&circuit_path, &include_dir, &mut sources)?;
+    let mut hasher = DefaultHasher::new();
+    for source in &sources {
+        source
+            .strip_prefix(&include_dir)
+            .unwrap_or(&source)
+            .hash(&mut hasher);
+        fs::read(source)?.hash(&mut hasher);
+    }
+    let source_hash = format!("v2:{:016x}", hasher.finish());
+    let cache_current =
+        fs::read_to_string(&source_hash_path).is_ok_and(|cached| cached == source_hash);
+    if cache_current && wasm.exists() && r1cs.exists() {
         return Ok(out_dir);
     }
 
+    // One-time migration from the old all-template hash (or caches created
+    // before hashes existed): if the artifacts are newer than every actual
+    // dependency, retain them and stamp the dependency-specific hash.
+    let legacy_hash = fs::read_to_string(&source_hash_path)
+        .map(|hash| !hash.starts_with("v2:"))
+        .unwrap_or(true);
+    if legacy_hash && wasm.exists() && r1cs.exists() {
+        let artifact_time = fs::metadata(&wasm)?
+            .modified()?
+            .min(fs::metadata(&r1cs)?.modified()?);
+        let dependencies_older = sources.iter().try_fold(true, |older, source| {
+            Ok::<_, std::io::Error>(older && fs::metadata(source)?.modified()? <= artifact_time)
+        })?;
+        if dependencies_older {
+            fs::write(&source_hash_path, &source_hash)?;
+            return Ok(out_dir);
+        }
+    }
+
     create_dir_all(&out_dir)?;
+    // A changed R1CS invalidates its circuit-specific Groth16 setup too.
+    for stale in [
+        wasm.clone(),
+        r1cs.clone(),
+        out_dir.join(format!("{name}.zkey")),
+        out_dir.join("vk.json"),
+    ] {
+        if stale.exists() {
+            fs::remove_file(stale)?;
+        }
+    }
 
     let output = Command::new("circom")
         .args([
@@ -235,6 +311,8 @@ fn compile_circuit(name: &str) -> anyhow::Result<PathBuf> {
         let stdout = String::from_utf8_lossy(&output.stdout);
         anyhow::bail!("circom compilation failed:\n{}\n{}", stdout, stderr);
     }
+
+    fs::write(source_hash_path, source_hash)?;
 
     Ok(out_dir)
 }
@@ -531,7 +609,7 @@ mod tests {
         out
     }
 
-    /// Prove + verify the comparison statement and pin the 5-signal public
+    /// Prove + verify the comparison statement and pin the 6-signal public
     /// vector [cmp, locked_a, locked_b, price, a_is_seller] the chain
     /// rebuilds. A sells (locks q), B buys (locks q·price).
     fn cmp_prove_and_check(a: u64, b: u64, expected_cmp: i8) {

@@ -28,17 +28,18 @@ use crate::relation::{
     side_wires_from_vars,
 };
 
-/// Group the 5 canonical public wires
-/// ([cmp, locked_a, locked_b, price, a_is_seller]).
+/// Group the 6 canonical public wires
+/// ([cmp, locked_a, locked_b, price_a, price_b, a_is_seller]).
 /// `vars` must be the public variables in canonical order.
 fn public_wires_from_vars(vars: &[Variable]) -> PublicWires {
-    assert_eq!(vars.len(), 5);
+    assert_eq!(vars.len(), 6);
     PublicWires {
         cmp: vars[0],
         locked_a: vars[1],
         locked_b: vars[2],
-        price: vars[3],
-        a_is_seller: vars[4],
+        price_a: vars[3],
+        price_b: vars[4],
+        a_is_seller: vars[5],
     }
 }
 

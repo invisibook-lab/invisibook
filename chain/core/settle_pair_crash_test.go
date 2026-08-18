@@ -60,9 +60,12 @@ func newPairFixture(t *testing.T) *pairFixture {
 	mk := func(id OrderID, typ TradeType, pub ed25519.PublicKey, match OrderID, height uint32) *Order {
 		return &Order{
 			ID:               id,
+			Kind:             Limit,
 			Type:             typ,
 			Subject:          pair,
 			Price:            price,
+			ExecutionPrice:   new(big.Int).Set(price),
+			MatchRound:       1,
 			Pubkey:           hex.EncodeToString(pub),
 			LockedCommitment: canonicalTestHex(byte(id[6]) + 1),
 			BlockHeight:      height,
@@ -96,30 +99,36 @@ func newPairFixture(t *testing.T) *pairFixture {
 // signedPair builds a SettlePair request whose legs carry fresh signatures
 // over the given payout note commitments (A large with residuals, B small).
 func (fx *pairFixture) signedPair(cmNoteA, cmNoteB string) *SettlePairRequest {
+	cmRefundA := canonicalTestHex(0xD2)
+	cmRefundB := canonicalTestHex(0xD1)
 	largeSig := &SettleLargeRequest{
 		OrderID:          fx.orderA,
 		MatchOrderID:     fx.orderB,
 		CmLockedResidual: canonicalTestHex(0xA2),
 		CmNoteOut:        cmNoteA,
+		CmRefundOut:      cmRefundA,
 	}
 	smallSig := &SettleSmallRequest{
 		OrderID:      fx.orderB,
 		MatchOrderID: fx.orderA,
 		CmNoteOut:    cmNoteB,
+		CmRefundOut:  cmRefundB,
 	}
 	return &SettlePairRequest{
 		OrderAID: fx.orderA,
 		OrderBID: fx.orderB,
 		A: SettlePairLeg{
 			CmNoteOut:        cmNoteA,
+			CmRefundOut:      cmRefundA,
 			CmLockedResidual: largeSig.CmLockedResidual,
 			ZkProof:          "test-proof-skip",
 			Signature: hex.EncodeToString(
 				ed25519.Sign(fx.alicePriv, SettleLargeSigMessage(largeSig))),
 		},
 		B: SettlePairLeg{
-			CmNoteOut: cmNoteB,
-			ZkProof:   "test-proof-skip",
+			CmNoteOut:   cmNoteB,
+			CmRefundOut: cmRefundB,
+			ZkProof:     "test-proof-skip",
 			Signature: hex.EncodeToString(
 				ed25519.Sign(fx.bobPriv, SettleSmallSigMessage(smallSig))),
 		},
@@ -151,7 +160,7 @@ func TestSettlePairCrashBetweenDatabasesThenRetry(t *testing.T) {
 		t.Fatalf("expected the injected crash, got %v", err)
 	}
 	// The crash left the two databases split: notes minted, orders not.
-	if got := fx.acc.PoolSize(); got != 2 {
+	if got := fx.acc.PoolSize(); got != 4 {
 		t.Fatalf("payout notes must be minted before the crash point, pool = %d", got)
 	}
 	mustStatus(t, fx.ot, fx.orderA, Settling)
@@ -168,7 +177,7 @@ func TestSettlePairCrashBetweenDatabasesThenRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("retry must succeed: %v", err)
 	}
-	if got := fx.acc.PoolSize(); got != 2 {
+	if got := fx.acc.PoolSize(); got != 4 {
 		t.Fatalf("retry must NOT mint again, pool = %d", got)
 	}
 	mustStatus(t, fx.ot, fx.orderA, Pending) // relisted with the residual
@@ -203,7 +212,7 @@ func TestSettlePairCrashThenRestartRecovery(t *testing.T) {
 	// Simulates InitChain on reboot.
 	fx.ot.recoverPendingSettlements()
 
-	if got := fx.acc.PoolSize(); got != 2 {
+	if got := fx.acc.PoolSize(); got != 4 {
 		t.Fatalf("recovery must not mint again, pool = %d", got)
 	}
 	mustStatus(t, fx.ot, fx.orderA, Pending)
@@ -229,7 +238,7 @@ func TestSettlePairDivergentRetryRejected(t *testing.T) {
 		!strings.Contains(err.Error(), "already minted different") {
 		t.Fatalf("divergent retry must be rejected, got %v", err)
 	}
-	if got := fx.acc.PoolSize(); got != 2 {
+	if got := fx.acc.PoolSize(); got != 4 {
 		t.Fatalf("divergent retry must not mint, pool = %d", got)
 	}
 	mustStatus(t, fx.ot, fx.orderA, Settling)
@@ -246,7 +255,7 @@ func TestSettlePairReplayAfterDoneRejected(t *testing.T) {
 	if _, err := fx.ot.executeSettlePair(fx.pairRequest, 11); err == nil {
 		t.Fatal("replay after completion must be rejected")
 	}
-	if got := fx.acc.PoolSize(); got != 2 {
+	if got := fx.acc.PoolSize(); got != 4 {
 		t.Fatalf("replay must not mint, pool = %d", got)
 	}
 	mustStatus(t, fx.ot, fx.orderA, Pending)
@@ -265,6 +274,8 @@ func TestSettlePairPreMintCrashJournalDropped(t *testing.T) {
 		OrderBID:     string(fx.orderB),
 		CmNoteA:      canonicalTestHex(0xC2),
 		CmNoteB:      canonicalTestHex(0xC1),
+		CmRefundA:    canonicalTestHex(0xD2),
+		CmRefundB:    canonicalTestHex(0xD1),
 		ALarge:       true,
 		State:        SettlementPending,
 	}); err != nil {

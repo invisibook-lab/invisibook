@@ -9,16 +9,18 @@ import (
 // validation.
 func validSendOrderRequest() *SendOrderRequest {
 	return &SendOrderRequest{
-		ID:               "order-1",
-		Type:             Buy,
-		Subject:          TradePair{Token1: "ETH", Token2: "USDT"},
-		Pubkey:           "alice-pk",
-		Signature:        "sig",
-		Anchor:           strings.Repeat("b", 64),
-		InputNullifiers:  []string{strings.Repeat("c", 64), strings.Repeat("d", 64)},
-		LockedCommitment: strings.Repeat("e", 64),
-		ChangeCommitment: strings.Repeat("f", 64),
-		ZkProof:          "proof",
+		ID:                         "order-1",
+		Type:                       Buy,
+		Subject:                    TradePair{Token1: "ETH", Token2: "USDT"},
+		Pubkey:                     "alice-pk",
+		Signature:                  "sig",
+		Anchor:                     strings.Repeat("b", 64),
+		CollateralNullifiers:       []string{strings.Repeat("c", 64), strings.Repeat("d", 64)},
+		FeeNullifiers:              []string{strings.Repeat("1", 64), strings.Repeat("2", 64)},
+		LockedCommitment:           strings.Repeat("e", 64),
+		CollateralChangeCommitment: strings.Repeat("f", 64),
+		FeeChangeCommitment:        strings.Repeat("a", 64),
+		ZkProof:                    "proof",
 	}
 }
 
@@ -34,7 +36,7 @@ func TestSendOrderNullifierShapeValidates(t *testing.T) {
 	}
 	// Wrong length (one nullifier) must fail the len=2 tag.
 	bad := validSendOrderRequest()
-	bad.InputNullifiers = []string{strings.Repeat("c", 64)}
+	bad.CollateralNullifiers = []string{strings.Repeat("c", 64)}
 	if err := Validator.Struct(bad); err == nil {
 		t.Fatal("a request without two nullifier slots must fail validation")
 	}

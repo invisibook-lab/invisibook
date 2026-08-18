@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"strconv"
 
 	"gorm.io/gorm"
 
@@ -113,36 +114,42 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	// its payout alone. The per-leg verify helpers stay internal to
 	// SettlePair.
 	ot.SetWritings(ot.SendOrder, ot.SubmitCompareCoZk, ot.SubmitCompareCoZk2p,
-		ot.SettlePair, ot.ClaimFees, ot.RegisterSettleAddr)
-	ot.SetReadings(ot.QueryOrders, ot.QuerySettleAddr, ot.QueryFees)
+		ot.SettlePair, ot.ClaimFees, ot.RegisterSettleAddr,
+		ot.SubmitSettleCheckpoint, ot.AbortSettleRound)
+	ot.SetReadings(ot.QueryOrders, ot.QuerySettleAddr, ot.QueryFees, ot.QuerySettleCheckpoint)
 	return ot
 }
 
 // ────────────────────── Writing: SendOrder ──────────────────────
 
-// SendOrderRequest (v2) is the JSON payload accepted by SendOrder. Placing
-// an order spends up to two pool notes (by nullifier), locks its collateral
+// SendOrderRequest (v4) is the JSON payload accepted by SendOrder. Placing
+// an order spends separate two-slot note banks for collateral and native fees, locks its collateral
 // as `LockedCommitment` (the order's ONLY commitment — locked-only model),
-// destroys the plaintext `Fee`, and mints a change note — all proven by the
+// destroys the plaintext `Fee`, and mints collateral/fee change notes — all proven by the
 // send_order circuit. The order ID is SHA-256 over the input nullifiers,
 // and the ed25519 signature covers the whole request.
 type SendOrderRequest struct {
-	ID               OrderID   `json:"id"                 validate:"required"`
-	Type             TradeType `json:"type"               validate:"oneof=0 1"`
-	Subject          TradePair `json:"subject"`
-	Price            *big.Int  `json:"price,omitempty"`
-	Pubkey           string    `json:"pubkey"             validate:"required"`
-	Signature        string    `json:"signature"          validate:"required"`
-	Anchor           string    `json:"anchor"             validate:"required,len=64"`
-	InputNullifiers  []string  `json:"input_nullifiers"   validate:"required,len=2,dive,len=64"`
-	LockedCommitment string    `json:"locked_commitment"  validate:"required,len=64"`
-	Fee              uint64    `json:"fee"`
-	ChangeCommitment string    `json:"change_commitment"  validate:"required,len=64"`
-	ZkProof          string    `json:"zk_proof"           validate:"required"`
+	ID                         OrderID   `json:"id"                 validate:"required"`
+	Kind                       OrderKind `json:"kind"               validate:"oneof=0 1"`
+	Type                       TradeType `json:"type"               validate:"oneof=0 1"`
+	Subject                    TradePair `json:"subject"`
+	Price                      *big.Int  `json:"price,omitempty"`
+	ProtectionPrice            *big.Int  `json:"protection_price,omitempty"`
+	Pubkey                     string    `json:"pubkey"             validate:"required"`
+	Signature                  string    `json:"signature"          validate:"required"`
+	Anchor                     string    `json:"anchor"             validate:"required,len=64"`
+	CollateralNullifiers       []string  `json:"collateral_nullifiers" validate:"required,len=2,dive,len=64"`
+	FeeNullifiers              []string  `json:"fee_nullifiers"        validate:"required,len=2,dive,len=64"`
+	LockedCommitment           string    `json:"locked_commitment"  validate:"required,len=64"`
+	Fee                        uint64    `json:"fee"`
+	CollateralChangeCommitment string    `json:"collateral_change_commitment" validate:"required,len=64"`
+	FeeChangeCommitment        string    `json:"fee_change_commitment"        validate:"required,len=64"`
+	ZkProof                    string    `json:"zk_proof"           validate:"required"`
 }
 
-// validateOrderPrice rejects prices the settlement circuits cannot represent.
-// A nil price is allowed: such an order simply never matches (see matchOrder).
+// validateOrderPrice rejects non-nil prices the settlement circuits cannot
+// represent. validateOrderTerms separately decides which order kind may use a
+// nil limit price.
 //
 // The settlement relation takes `price` as a public input and multiplies it by
 // 64-bit amounts. That arithmetic is only integer-exact while the products stay
@@ -167,8 +174,36 @@ func validateOrderPrice(price *big.Int) error {
 	return nil
 }
 
+// validateOrderTerms enforces the unambiguous v4 representation. Limit
+// orders carry a limit price and no protection price. Market orders carry no
+// limit price and use a public protection price solely for collateralization
+// and slippage bounds.
+func validateOrderTerms(kind OrderKind, price, protection *big.Int) error {
+	switch kind {
+	case Limit:
+		if price == nil || protection != nil {
+			return fmt.Errorf("limit order requires price and forbids protection_price")
+		}
+		return validateOrderPrice(price)
+	case Market:
+		if price != nil || protection == nil {
+			return fmt.Errorf("market order requires protection_price and forbids price")
+		}
+		return validateOrderPrice(protection)
+	default:
+		return fmt.Errorf("unknown order kind %d", kind)
+	}
+}
+
+func collateralPrice(order *Order) *big.Int {
+	if order.Kind == Market {
+		return order.ProtectionPrice
+	}
+	return order.Price
+}
+
 // SendOrder spends the input notes, verifies the send_order proof (which
-// enforces admission-time full collateralization), mints the change note,
+// enforces admission-time full collateralization), mints both change notes,
 // accrues the fee to the block producer, stores the order, and matches it.
 func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
@@ -181,15 +216,13 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	if err := Validator.Struct(req); err != nil {
 		return err
 	}
-	if err := validateOrderPrice(req.Price); err != nil {
+	if err := validateOrderTerms(req.Kind, req.Price, req.ProtectionPrice); err != nil {
 		return fmt.Errorf("order %s: %w", req.ID, err)
-	}
-	if req.Price == nil {
-		return fmt.Errorf("order %s: send_order requires a price", req.ID)
 	}
 
 	// The order ID is the hash of the input nullifiers.
-	if expectedID := ComputeOrderID(req.InputNullifiers); req.ID != expectedID {
+	allNullifiers := append(append([]string{}, req.CollateralNullifiers...), req.FeeNullifiers...)
+	if expectedID := ComputeOrderID(allNullifiers); req.ID != expectedID {
 		return fmt.Errorf("order ID mismatch: got %s, expected %s", req.ID, expectedID)
 	}
 
@@ -217,19 +250,25 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	if err != nil {
 		return err
 	}
+	nativeAssetID, err := AssetID(NativeToken.Name)
+	if err != nil {
+		return err
+	}
 
 	// Cheap checks first (zcashd ordering): canonical field elements,
 	// request-internal duplicate nullifier, spent set, anchor known.
-	for _, h := range []string{req.Anchor, req.InputNullifiers[0], req.InputNullifiers[1],
-		req.LockedCommitment, req.ChangeCommitment} {
+	for _, h := range append([]string{req.Anchor, req.LockedCommitment,
+		req.CollateralChangeCommitment, req.FeeChangeCommitment}, allNullifiers...) {
 		if _, perr := ParseFrHex(h); perr != nil {
 			return fmt.Errorf("non-canonical field element %q: %w", h, perr)
 		}
 	}
-	if req.InputNullifiers[0] == req.InputNullifiers[1] {
-		return fmt.Errorf("duplicate nullifier in request")
-	}
-	for _, nf := range req.InputNullifiers {
+	seenNullifiers := make(map[string]struct{}, len(allNullifiers))
+	for _, nf := range allNullifiers {
+		if _, exists := seenNullifiers[nf]; exists {
+			return fmt.Errorf("duplicate nullifier in request")
+		}
+		seenNullifiers[nf] = struct{}{}
 		spent, serr := ot.Account.NullifierSpent(nf)
 		if serr != nil {
 			return serr
@@ -247,8 +286,9 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	}
 
 	// Rebuild the send_order public vector:
-	// [anchor, nf_0, nf_1, lock_asset_id, locked_commitment, fee,
-	//  cm_change, price, side, bind].
+	// [anchor, coll_nf_0, coll_nf_1, fee_nf_0, fee_nf_1,
+	//  lock_asset_id, native_asset_id, locked_commitment, fee,
+	//  cm_coll_change, cm_fee_change, collateral_price, side, bind].
 	toDec := func(h, what string) (string, error) {
 		d, derr := HexToDecimal(h)
 		if derr != nil {
@@ -260,41 +300,52 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 	if err != nil {
 		return err
 	}
-	nf0Dec, err := toDec(req.InputNullifiers[0], "nullifiers[0]")
-	if err != nil {
-		return err
-	}
-	nf1Dec, err := toDec(req.InputNullifiers[1], "nullifiers[1]")
-	if err != nil {
-		return err
+	nfDec := make([]string, 4)
+	for i, nf := range allNullifiers {
+		nfDec[i], err = toDec(nf, fmt.Sprintf("nullifiers[%d]", i))
+		if err != nil {
+			return err
+		}
 	}
 	lockedDec, err := toDec(req.LockedCommitment, "locked_commitment")
 	if err != nil {
 		return err
 	}
-	changeDec, err := toDec(req.ChangeCommitment, "change_commitment")
+	collChangeDec, err := toDec(req.CollateralChangeCommitment, "collateral_change_commitment")
+	if err != nil {
+		return err
+	}
+	feeChangeDec, err := toDec(req.FeeChangeCommitment, "fee_change_commitment")
 	if err != nil {
 		return err
 	}
 	side := sideSignal(req.Type)
 	bind := sendOrderBind(ot.chainID, req)
+	collateralPrice := req.Price
+	if req.Kind == Market {
+		collateralPrice = req.ProtectionPrice
+	}
 	signals := []string{
-		anchorDec, nf0Dec, nf1Dec, assetID.String(), lockedDec,
-		fmt.Sprintf("%d", req.Fee), changeDec,
-		req.Price.String(), side, bind.String(),
+		anchorDec, nfDec[0], nfDec[1], nfDec[2], nfDec[3], assetID.String(),
+		nativeAssetID.String(), lockedDec, fmt.Sprintf("%d", req.Fee), collChangeDec,
+		feeChangeDec, collateralPrice.String(), side, bind.String(),
 	}
 	if err := VerifyGroth16(ot.sendOrderVK, req.ZkProof, signals); err != nil {
 		return fmt.Errorf("send_order proof verification failed: %w", err)
 	}
 
-	// Publish nullifiers + mint the change note atomically.
-	cmChange, err := ParseFrHex(req.ChangeCommitment)
+	// Publish nullifiers + mint both change notes atomically.
+	cmCollateralChange, err := ParseFrHex(req.CollateralChangeCommitment)
 	if err != nil {
-		return fmt.Errorf("change_commitment: %w", err)
+		return fmt.Errorf("collateral_change_commitment: %w", err)
+	}
+	cmFeeChange, err := ParseFrHex(req.FeeChangeCommitment)
+	if err != nil {
+		return fmt.Errorf("fee_change_commitment: %w", err)
 	}
 	if _, err := ot.Account.ApplyPoolMutation(PoolMutation{
-		Nullifiers: req.InputNullifiers,
-		NoteCms:    []*big.Int{cmChange},
+		Nullifiers: allNullifiers,
+		NoteCms:    []*big.Int{cmCollateralChange, cmFeeChange},
 		Height:     uint64(ctx.Block.Height),
 		Source:     "send-order-change",
 		By:         fmt.Sprintf("send-order:%s", req.ID[:8]),
@@ -312,9 +363,11 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 
 	order := &Order{
 		ID:               req.ID,
+		Kind:             req.Kind,
 		Type:             req.Type,
 		Subject:          req.Subject,
 		Price:            req.Price,
+		ProtectionPrice:  req.ProtectionPrice,
 		Pubkey:           req.Pubkey,
 		LockedCommitment: req.LockedCommitment,
 		Fee:              req.Fee,
@@ -349,14 +402,27 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 // NOTE: This on-chain address exchange is temporary. In production, peer
 // addresses will be exchanged via Tor or similar anonymous overlay network.
 type RegisterSettleAddrRequest struct {
-	OrderID      OrderID `json:"order_id"       validate:"required"`
-	MatchOrderID OrderID `json:"match_order_id" validate:"required"`
-	Addr         string  `json:"addr"           validate:"required"`
+	OrderID          OrderID `json:"order_id"          validate:"required"`
+	MatchOrderID     OrderID `json:"match_order_id"    validate:"required"`
+	MatchRound       uint64  `json:"match_round"       validate:"required"`
+	Addr             string  `json:"addr"              validate:"required"`
+	EncryptionPubkey string  `json:"encryption_pubkey" validate:"required,len=64"`
+	Signature        string  `json:"signature"         validate:"required"`
+}
+
+func SettleAddrSigningMessage(req *RegisterSettleAddrRequest) []byte {
+	buf := make([]byte, 0, 192)
+	for _, field := range []string{"invisibook-settle-addr-v2", string(req.OrderID),
+		string(req.MatchOrderID), strconv.FormatUint(req.MatchRound, 10), req.Addr, req.EncryptionPubkey} {
+		buf = appendSigningField(buf, field)
+	}
+	return buf
 }
 
 // RegisterSettleAddr stores the caller's QUIC address for MPC peer discovery.
 func (ot *OrderBook) RegisterSettleAddr(ctx *context.WriteContext) error {
 	ctx.SetLei(10)
+	LogPayloadSize("RegisterSettleAddr", ctx.GetRequestBytes())
 
 	req := new(RegisterSettleAddrRequest)
 	if err := ctx.BindJson(req); err != nil {
@@ -377,11 +443,22 @@ func (ot *OrderBook) RegisterSettleAddr(ctx *context.WriteContext) error {
 	if order.MatchOrder != req.MatchOrderID {
 		return fmt.Errorf("order %s match_order is %s, not %s", order.ID, order.MatchOrder, req.MatchOrderID)
 	}
+	if order.MatchRound != req.MatchRound {
+		return fmt.Errorf("stale match round %d", req.MatchRound)
+	}
+	if _, err := hex.DecodeString(req.EncryptionPubkey); err != nil {
+		return fmt.Errorf("invalid encryption_pubkey: %w", err)
+	}
+	if err := verifyOrderOwnerSignature(order, SettleAddrSigningMessage(req), req.Signature); err != nil {
+		return err
+	}
 
 	entry := &SettleAddrScheme{
-		OrderID:      string(req.OrderID),
-		MatchOrderID: string(req.MatchOrderID),
-		Addr:         req.Addr,
+		OrderID:          string(req.OrderID),
+		MatchOrderID:     string(req.MatchOrderID),
+		MatchRound:       req.MatchRound,
+		Addr:             req.Addr,
+		EncryptionPubkey: req.EncryptionPubkey,
 	}
 	if err := ot.UpsertSettleAddr(entry); err != nil {
 		return fmt.Errorf("failed to upsert settle addr: %w", err)
@@ -416,7 +493,8 @@ func (ot *OrderBook) QuerySettleAddr(ctx *context.ReadContext) {
 		ctx.JsonOk(map[string]string{"addr": ""})
 		return
 	}
-	ctx.JsonOk(map[string]string{"addr": entry.Addr})
+	ctx.JsonOk(map[string]any{"addr": entry.Addr, "encryption_pubkey": entry.EncryptionPubkey,
+		"match_round": entry.MatchRound})
 }
 
 // ────────────────────── Reading: QueryOrders ──────────────────────
@@ -465,28 +543,13 @@ func (ot *OrderBook) QueryOrders(ctx *context.ReadContext) {
 
 // matchOrder finds the counterparty for the incoming order.
 //
-// EQUAL-PRICE RULE: only candidates whose limit price EQUALS the incoming
-// order's price are considered. The settle circuits lock collateral at the
-// order's own price and equate it with the execution price, so a crossing
-// pair with different prices could match but never settle — and a Matched
-// pair has no cancel path, so it would be locked forever. Crossing but
-// unequal orders therefore stay Pending until an equal-price counterparty
-// arrives (price improvement is future work; see docs/paper_deviations.md
-// D6).
-//
-// Priority among equal-price candidates:
-//
-//  1. Block Height: earlier block (lower height) wins
-//  2. Fee: higher fee wins
-//  3. Intra-block index: earlier transaction wins
+// Crossing candidates follow conventional priority: market flag, best
+// price, block height, fee, intra-block index, then order id. A market order
+// has no execution price of its own; market/market therefore cannot match.
 //
 // If matched, both orders' Status is set to Matched and MatchOrder is set
 // to each other.
 func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
-	if order.Price == nil {
-		return nil, nil // cannot match without a price
-	}
-
 	// Determine counter side
 	counterType := Sell
 	if order.Type == Sell {
@@ -500,12 +563,7 @@ func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
 
 	var bestMatch *Order
 	for _, candidate := range candidates {
-		if candidate.Price == nil {
-			continue
-		}
-
-		// Equal-price rule: settlement requires it (see above).
-		if candidate.Price.Cmp(order.Price) != 0 {
+		if !ordersCross(order, candidate) {
 			continue
 		}
 
@@ -514,24 +572,7 @@ func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
 			continue
 		}
 
-		// ── Priority 1: Block Height (lower = earlier = better) ──
-		if candidate.BlockHeight < bestMatch.BlockHeight {
-			bestMatch = candidate
-			continue
-		} else if candidate.BlockHeight > bestMatch.BlockHeight {
-			continue
-		}
-
-		// ── Priority 2: Fee (higher = better) ──
-		if candidate.Fee > bestMatch.Fee {
-			bestMatch = candidate
-			continue
-		} else if candidate.Fee < bestMatch.Fee {
-			continue
-		}
-
-		// ── Priority 3: Intra-block transaction index (smaller = earlier) ──
-		if candidate.IntraBlockIndex < bestMatch.IntraBlockIndex {
+		if betterCounter(candidate, bestMatch) {
 			bestMatch = candidate
 		}
 	}
@@ -545,19 +586,78 @@ func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
 	order.MatchOrder = bestMatch.ID
 	bestMatch.Status = Matched
 	bestMatch.MatchOrder = order.ID
+	round := order.MatchRound
+	if bestMatch.MatchRound > round {
+		round = bestMatch.MatchRound
+	}
+	round++
+	order.MatchRound = round
+	bestMatch.MatchRound = round
+	exec := matchExecutionPrice(order, bestMatch)
+	order.ExecutionPrice = new(big.Int).Set(exec)
+	bestMatch.ExecutionPrice = new(big.Int).Set(exec)
 
-	if err := ot.UpdateOrderStatus(order.ID, Matched); err != nil {
-		return nil, err
-	}
-	if err := ot.UpdateOrderMatchOrder(order.ID, bestMatch.ID); err != nil {
-		return nil, err
-	}
-	if err := ot.UpdateOrderStatus(bestMatch.ID, Matched); err != nil {
-		return nil, err
-	}
-	if err := ot.UpdateOrderMatchOrder(bestMatch.ID, order.ID); err != nil {
+	if err := ot.db.Transaction(func(tx *gorm.DB) error {
+		for _, o := range []*Order{order, bestMatch} {
+			updates := map[string]interface{}{
+				"status": int(Matched), "match_order": string(o.MatchOrder),
+				"match_round": o.MatchRound, "execution_price": o.ExecutionPrice.String(),
+			}
+			if err := tx.Model(&OrderScheme{}).Where("id = ?", string(o.ID)).Updates(updates).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 
 	return bestMatch, nil
+}
+
+func ordersCross(x, y *Order) bool {
+	if x.Type == y.Type || (x.Kind == Market && y.Kind == Market) {
+		return false
+	}
+	var buy, sell *Order
+	if x.Type == Buy {
+		buy, sell = x, y
+	} else {
+		buy, sell = y, x
+	}
+	buyCap, sellFloor := collateralPrice(buy), collateralPrice(sell)
+	return buyCap != nil && sellFloor != nil && buyCap.Cmp(sellFloor) >= 0
+}
+
+func betterCounter(a, b *Order) bool {
+	if a.Kind != b.Kind {
+		return a.Kind == Market
+	}
+	if a.Kind == Limit {
+		cmp := a.Price.Cmp(b.Price)
+		if cmp != 0 {
+			if a.Type == Sell {
+				return cmp < 0
+			}
+			return cmp > 0
+		}
+	}
+	if a.BlockHeight != b.BlockHeight {
+		return a.BlockHeight < b.BlockHeight
+	}
+	if a.Fee != b.Fee {
+		return a.Fee > b.Fee
+	}
+	if a.IntraBlockIndex != b.IntraBlockIndex {
+		return a.IntraBlockIndex < b.IntraBlockIndex
+	}
+	return a.ID < b.ID
+}
+
+func matchExecutionPrice(x, y *Order) *big.Int {
+	maker, taker := makerTakerOrder(x, y)
+	if maker.Price != nil {
+		return maker.Price
+	}
+	return taker.Price
 }

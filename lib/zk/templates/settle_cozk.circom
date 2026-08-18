@@ -13,20 +13,23 @@ include "utils/comparators.circom";
 //
 // LOCKED-ONLY MODEL: orders commit only their collateral
 // `locked = P2(needed, r)` with the side-dependent equation
-//   needed(q, s) = q·price + s·(q − q·price)   (sell locks q, buy q·price).
+//   needed(q, p, s) = q·p + s·(q − q·p)   (sell locks q, buy q·p).
 // The equation is injective in q for price > 0, so opening each
 // collateral against its in-circuit `needed` pins the compared
 // quantities (input legitimacy). price and a_is_seller therefore enter
 // the statement.
 //
-// Public: [cmp, locked_a, locked_b, price, a_is_seller]
+// Crossing orders use their own public collateral prices; execution price
+// is irrelevant to quantity comparison.
+// Public: [cmp, locked_a, locked_b, price_a, price_b, a_is_seller]
 // Private: q_a, r_a, q_b, r_b (each side's quantity and collateral
 // blinding).
 template SettleCmp() {
     signal input cmp;
     signal input locked_a;
     signal input locked_b;
-    signal input price;
+    signal input price_a;
+    signal input price_b;
     signal input a_is_seller;
 
     signal input q_a;
@@ -49,13 +52,13 @@ template SettleCmp() {
 
     // The compared quantities back the on-chain collateral commitments;
     // A and B are on opposite sides.
-    signal qa_price <== q_a * price;
+    signal qa_price <== q_a * price_a;
     signal needed_a <== qa_price + a_is_seller * (q_a - qa_price);
     signal ha <== Poseidon(2)([needed_a, r_a]);
     ha === locked_a;
 
     signal b_is_seller <== 1 - a_is_seller;
-    signal qb_price <== q_b * price;
+    signal qb_price <== q_b * price_b;
     signal needed_b <== qb_price + b_is_seller * (q_b - qb_price);
     signal hb <== Poseidon(2)([needed_b, r_b]);
     hb === locked_b;
@@ -70,4 +73,4 @@ template SettleCmp() {
     cmp === gt.out - lt.out;
 }
 
-component main {public [cmp, locked_a, locked_b, price, a_is_seller]} = SettleCmp();
+component main {public [cmp, locked_a, locked_b, price_a, price_b, a_is_seller]} = SettleCmp();

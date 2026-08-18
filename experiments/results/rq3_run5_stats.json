@@ -1,106 +1,106 @@
 {
-  "full_trade_ms": 34552.640443,
+  "full_trade_ms": 43639.383292,
   "order": {
     "alice": {
-      "land_ms": 4008.087414,
-      "prove_ms": 191.588413
+      "land_ms": 4007.2833809999997,
+      "prove_ms": 300.08112
     },
     "bob": {
-      "land_ms": 6007.801450999999,
-      "prove_ms": 194.83284600000002
+      "land_ms": 6010.302992,
+      "prove_ms": 283.219424
     },
-    "match_ms": 4006.0780569999997
+    "match_ms": 4006.276487
   },
-  "scenario": "one trade: A sells 2 ETH @ 3 (maker), B buys 1 ETH @ 3",
+  "scenario": "one trade: A limit-sells 2 ETH @ 3 (maker), B market-buys 1 ETH with protection 4",
   "session": {
     "alice": {
-      "build_ms": 52.190579,
-      "compare_onchain_wait_ms": 6009.529321999999,
-      "leg_exchange_ms": 1.1051259999999998,
-      "open_ms": 2588.570079,
-      "peak_rss_bytes": 1684353024,
-      "prove_ms": 998.491439,
+      "build_ms": 76.75370500000001,
+      "compare_onchain_wait_ms": 12020.745791,
+      "leg_exchange_ms": 1.632976,
+      "open_ms": 3343.852845,
+      "peak_rss_bytes": 1845506048,
+      "prove_ms": 1059.816227,
       "steps": [
         [
           "1 preamble fingerprint",
-          2.189759
+          2.084686
         ],
         [
           "2 share inputs + collateral binding",
-          54.618275
+          44.680946
         ],
         [
           "3 three-way compare",
-          19.1411
+          14.441375
         ],
         [
           "4 signature ferry + exchange",
-          1.4675129999999998
+          0.8254980000000001
         ],
         [
           "5 collaborative prove + local verify",
-          3646.12191
+          4487.091571
         ],
         [
           "6 on-chain compare anchor (host wait)",
-          6009.555515999999
+          12020.793022
         ],
         [
           "7 smaller-side reveal",
-          1.5192910000000002
+          2.060398
         ],
         [
           "8 payout-note keys + WAL",
-          0.980959
+          0.997574
         ]
       ],
-      "total_ms": 10033.811882,
-      "verify_ms": 6.740352
+      "total_ms": 16916.858208,
+      "verify_ms": 6.464769
     },
     "bob": {
-      "build_ms": 52.262431,
-      "compare_onchain_wait_ms": 6009.158651,
-      "leg_exchange_ms": 99.629827,
-      "open_ms": 2612.036581,
-      "peak_rss_bytes": 1723133952,
-      "prove_ms": 975.243975,
+      "build_ms": 76.721139,
+      "compare_onchain_wait_ms": 12020.244636,
+      "leg_exchange_ms": 127.678799,
+      "open_ms": 3319.6752420000003,
+      "peak_rss_bytes": 1855205376,
+      "prove_ms": 1083.908769,
       "steps": [
         [
           "1 preamble fingerprint",
-          0.161418
+          0.236833
         ],
         [
           "2 share inputs + collateral binding",
-          55.271701
+          44.910754
         ],
         [
           "3 three-way compare",
-          18.866853
+          14.900617
         ],
         [
           "4 signature ferry + exchange",
-          1.419139
+          0.445888
         ],
         [
           "5 collaborative prove + local verify",
-          3643.41762
+          4488.314705
         ],
         [
           "6 on-chain compare anchor (host wait)",
-          6009.187417
+          12020.292992
         ],
         [
           "7 smaller-side reveal",
-          4.669143
+          1.1418419999999998
         ],
         [
           "8 payout-note keys + WAL",
-          0.68772
+          0.980231
         ]
       ],
-      "total_ms": 10033.762094,
-      "verify_ms": 3.652785
+      "total_ms": 16916.748901,
+      "verify_ms": 7.809011
     }
   },
-  "settle_ms": 20144.252261999998
+  "settle_ms": 29032.219888
 }

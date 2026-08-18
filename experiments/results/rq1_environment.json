@@ -7,6 +7,6 @@
   "rustc": "rustc 1.93.0-nightly (d5419f1e9 2025-10-30)",
   "cargo": "cargo 1.93.0-nightly (6c1b61003 2025-10-28)",
   "go": "go version go1.26.2 linux/amd64",
-  "git_commit": "7f6599d478898533d8842850a4f6a41c1b95248e",
+  "git_commit": "0d0559e4324ebc067ed2fda45d9fbe8d568b2d01",
   "git_branch": "cozk-split"
 }

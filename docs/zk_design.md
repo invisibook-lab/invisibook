@@ -70,9 +70,10 @@ nf  = P2(P2(TAG_NF=5,  nk), rho)
   `locked = P2(needed, r_locked)` with
   `needed = q·price + side·(q − q·price)` (a sell locks `q` token1, a
   buy locks `q·price` token2). The hidden quantity `q` is a pure
-  witness: for `price > 0` the equation is injective in `q`, so opening
-  `locked` also pins `q`. This holds ONLY under the equal-price
-  matching rule ([paper_deviations.md](paper_deviations.md) D6, D17).
+  witness: for the order's public price > 0 the equation is injective in
+  `q`, so opening `locked` also pins `q`. Crossing pairs use each order's
+  own public limit/protection price; the two prices need not be equal
+  ([paper_deviations.md](paper_deviations.md) D6, D17).
 - **Publics order** — the chain rebuilds each public-input vector
   itself; the per-circuit order below is normative.
 
@@ -93,13 +94,12 @@ cm_change, bind]`. Handler: `Account.NoteWithdraw`.
 ### 4.2 Order circuits
 
 **`send_order.circom`** — admission with full collateralization: spend
-2 note slots, compute the side-dependent collateral IN-CIRCUIT from the
-hidden `q` and the public price, commit it as the order's ONLY
-commitment (`locked_commitment` = `P2(needed, r_locked)`), pay the
-plaintext fee, mint the change note. Conservation:
-`inputs = collateral + fee + change`.
-Publics (10): `[anchor, nf_0, nf_1, lock_asset_id, locked_commitment,
-fee, cm_change, price, side, bind]`.
+two collateral slots and two native-fee slots, compute the side-dependent
+collateral from hidden `q` and public collateral price, commit it as the
+order's ONLY commitment, destroy the native `invis` fee, and mint separate
+changes. Publics (14): `[anchor, coll_nf_0, coll_nf_1, fee_nf_0, fee_nf_1,
+lock_asset_id, native_asset_id, locked_commitment, fee, cm_coll_change,
+cm_fee_change, collateral_price, side, bind]`.
 Handler: `OrderBook.SendOrder`. Prover:
 [`prove_send_order`](../lib/chain/src/note_prover.rs).
 
@@ -111,19 +111,21 @@ Handler: `OrderBook.ClaimFees`.
 
 **`settle_small.circom`** (π_A, the fully filled side) — opens the
 order's single collateral commitment against the in-circuit
-`needed(q, side)` at the execution price (which also pins the hidden
-`q`), and mints the WHOLE collateral as the counterparty's payout note
-(under the counterparty-chosen `npk`/`r`). Publics (6): `[locked,
-price, side, pay_asset, cm_note_out, bind]`.
+`needed(q, side)` at its own public collateral price (which pins `q`),
+pays at the execution price, and returns any price improvement through a
+shielded refund note. Publics (8): `[locked, collateral_price,
+execution_price, side, pay_asset, cm_note_out, cm_refund_out, bind]`.
 
 **`settle_large.circom`** (π_B, the surviving side) — additionally
 opens the COUNTERPARTY's on-chain collateral commitment with the
 revealed `(q_ctr, r_locked_ctr)`, on the OPPOSITE side
-(`needed(q_ctr, 1 − side)`), so the fill cannot be understated;
-range-proves `q ≥ q_ctr`; pays the fill as the payout note; and
+(`needed(q_ctr, ctr_collateral_price, 1 − side)`), so the fill cannot be
+understated; range-proves `q ≥ q_ctr`; pays at execution price, refunds
+price improvement, and
 re-commits the residual collateral under a fresh blinding (there is no
-residual quantity commitment). Publics (8): `[locked, locked_ctr,
-price, side, cm_locked_residual, pay_asset, cm_note_out, bind]`.
+residual quantity commitment). Publics (11): `[locked, locked_ctr,
+collateral_price, ctr_collateral_price, execution_price, side,
+cm_locked_residual, pay_asset, cm_note_out, cm_refund_out, bind]`.
 
 Asymmetry note: `settle_small` does not self-prove `q ≤ q_ctr`; the
 chain's recorded `cmp` gates which circuit each side may use (F3 in the
@@ -138,11 +140,11 @@ Both legs are verified together by the atomic `SettlePair` writing
 **`settle_cozk.circom`** — the single-prover twin of the collaborative
 comparison: opens both orders' collateral commitments through the
 side-dependent equation (A and B are on opposite sides) and outputs
-`cmp = sign(q_A − q_B)`. Publics (5): `[cmp, locked_a, locked_b,
-price, a_is_seller]` — `price` and `a_is_seller` are in the statement
+`cmp = sign(q_A − q_B)`. Publics (6): `[cmp, locked_a, locked_b,
+price_a, price_b, a_is_seller]` — both own prices and `a_is_seller` are in the statement
 because the collateral equation needs them to pin the compared
 quantities. Production uses the cozk2p PLONK prover for the same
-5-signal statement; this Groth16 twin serves fixtures, tests, and the
+6-signal statement; this Groth16 twin serves fixtures, tests, and the
 `SubmitCompareCoZk` variant.
 
 ## 5. Wallet-side proving
@@ -177,7 +179,7 @@ times are not re-measured yet. Record new numbers in
 |---|---|
 | Bridge inclusion/release proofs | **TODO** — `NoteDeposit` trusts an operator signature (dev: nothing); `NoteWithdraw`'s bridge-out amount is unbound off-chain |
 | Trusted setup | snarkjs single-party dev setup; the cozk2p SRS is a fixed-seed dev SRS. Both need ceremonies before real value |
-| Equal-price limitation | settle circuits equate the collateral price with the execution price; cross-price matches cannot settle. The rule is also LOAD-BEARING for soundness: without a quantity commitment, only the equal price pins the hidden `q` ([paper_deviations.md](paper_deviations.md) D6, D17) |
+| Market protection price | locked-only collateral cannot pin a price-free market buy quantity, so market orders carry a public protection price used only for collateral/slippage; market/market pairs do not match |
 | `settle_small` asymmetry | does not self-prove "I am smaller" (F3, open) |
 | Android | no on-device proving; order placement is disabled there |
 

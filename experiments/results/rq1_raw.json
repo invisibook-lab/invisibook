@@ -1,2240 +1,2240 @@
 {
   "baseline_single_prover": {
     "prove_ms": [
-      435.033277,
-      449.307148,
-      485.339994,
-      541.033663,
-      484.017832,
-      441.452905,
-      502.12554099999994,
-      504.143527,
-      757.882631,
-      568.242164,
-      553.132973,
-      613.270887,
-      507.29917700000004,
-      705.203505,
-      658.392486,
-      620.368755,
-      642.3603340000001,
-      497.676313,
-      430.778081,
-      544.6182429999999
+      295.569902,
+      303.646969,
+      307.88547500000004,
+      330.558409,
+      290.34191500000003,
+      333.257545,
+      356.44787,
+      297.133857,
+      311.975101,
+      337.28026300000005,
+      334.87145699999996,
+      298.30278999999996,
+      324.35004200000003,
+      310.644915,
+      291.154765,
+      325.454882,
+      306.67332000000005,
+      327.281694,
+      341.65610000000004,
+      561.934218
     ],
     "verify_ms": [
-      6.212703,
-      6.601008,
-      6.130272,
-      7.363766,
-      7.1001069999999995,
-      7.047611,
-      8.750778,
-      8.032098,
-      8.366489,
-      8.916152,
-      7.359911,
-      6.555504999999999,
-      6.974327,
-      7.128515999999999,
-      7.481108,
-      7.741064,
-      7.29295,
-      7.341175,
-      7.643508000000001,
-      8.79056
+      4.917395,
+      5.487647,
+      6.0865800000000005,
+      5.639315,
+      5.453625,
+      6.881479000000001,
+      5.958838999999999,
+      6.176298999999999,
+      5.378578999999999,
+      5.885233,
+      6.331672,
+      5.313669,
+      6.246423,
+      5.206269000000001,
+      6.224927,
+      4.37317,
+      4.494135,
+      5.424904000000001,
+      5.288163,
+      9.295748
     ]
   },
-  "bench_process_peak_rss_bytes": 4070707200,
+  "bench_process_peak_rss_bytes": 5261950976,
   "circuit_gates": 2048,
   "cozk2p_mock_inprocess": [
     {
-      "build_ms": 18.307043,
-      "leg_exchange_ms": 0.189466,
-      "onchain_wait_ms": 0.029296,
-      "open_ms": 2567.4148720000003,
-      "prove_ms": 1683.787329,
-      "session_overhead_ms": 26.395665000000434,
-      "total_ms": 4296.123671,
-      "verify_ms": 10.076697000000001
+      "build_ms": 16.684206,
+      "leg_exchange_ms": 0.174309,
+      "onchain_wait_ms": 0.020268,
+      "open_ms": 1776.474156,
+      "prove_ms": 1019.54869,
+      "session_overhead_ms": 22.69496200000001,
+      "total_ms": 2835.596591,
+      "verify_ms": 5.0899589999999995
     },
     {
-      "build_ms": 22.473292999999998,
-      "leg_exchange_ms": 0.240662,
-      "onchain_wait_ms": 0.030148,
-      "open_ms": 2767.397667,
-      "prove_ms": 1486.6086570000002,
-      "session_overhead_ms": 25.973318999999247,
-      "total_ms": 4302.723746,
-      "verify_ms": 8.147115
+      "build_ms": 12.973178,
+      "leg_exchange_ms": 0.135468,
+      "onchain_wait_ms": 0.023428,
+      "open_ms": 1839.036982,
+      "prove_ms": 1230.539566,
+      "session_overhead_ms": 17.46611599999997,
+      "total_ms": 3100.174738,
+      "verify_ms": 5.600334999999999
     },
     {
-      "build_ms": 16.561479000000002,
-      "leg_exchange_ms": 0.315604,
-      "onchain_wait_ms": 0.026601000000000003,
-      "open_ms": 2424.261584,
-      "prove_ms": 1518.072145,
-      "session_overhead_ms": 23.23107700000029,
-      "total_ms": 3982.46849,
-      "verify_ms": 7.23705
+      "build_ms": 22.512856000000003,
+      "leg_exchange_ms": 0.273602,
+      "onchain_wait_ms": 0.037687,
+      "open_ms": 3016.253179,
+      "prove_ms": 1422.103263,
+      "session_overhead_ms": 23.2387959999994,
+      "total_ms": 4484.4193829999995,
+      "verify_ms": 8.831049
     },
     {
-      "build_ms": 27.556502000000002,
-      "leg_exchange_ms": 0.204128,
-      "onchain_wait_ms": 0.026694,
-      "open_ms": 2834.369817,
-      "prove_ms": 1422.973033,
-      "session_overhead_ms": 33.42599299999937,
-      "total_ms": 4318.556167,
-      "verify_ms": 9.119827
+      "build_ms": 33.566112000000004,
+      "leg_exchange_ms": 0.46850400000000003,
+      "onchain_wait_ms": 0.040917999999999996,
+      "open_ms": 2732.4223070000003,
+      "prove_ms": 1241.561889,
+      "session_overhead_ms": 44.49781299999958,
+      "total_ms": 4052.557543,
+      "verify_ms": 14.890311
     },
     {
-      "build_ms": 20.131193,
-      "leg_exchange_ms": 0.325737,
-      "onchain_wait_ms": 0.041786000000000004,
-      "open_ms": 2955.474007,
-      "prove_ms": 1328.716871,
-      "session_overhead_ms": 25.507463000000264,
-      "total_ms": 4330.197057,
-      "verify_ms": 8.658609
+      "build_ms": 24.183626999999998,
+      "leg_exchange_ms": 0.41072400000000003,
+      "onchain_wait_ms": 0.058332999999999996,
+      "open_ms": 3370.0088790000004,
+      "prove_ms": 1425.599769,
+      "session_overhead_ms": 40.272225999999385,
+      "total_ms": 4860.533558,
+      "verify_ms": 11.133543
     },
     {
-      "build_ms": 18.593902,
-      "leg_exchange_ms": 0.317432,
-      "onchain_wait_ms": 0.02355,
-      "open_ms": 3020.592347,
-      "prove_ms": 1481.024793,
-      "session_overhead_ms": 24.77852000000092,
-      "total_ms": 4545.330544,
-      "verify_ms": 9.122823
+      "build_ms": 21.49578,
+      "leg_exchange_ms": 0.305834,
+      "onchain_wait_ms": 0.038197,
+      "open_ms": 3826.789534,
+      "prove_ms": 1259.5361409999998,
+      "session_overhead_ms": 31.803186000000185,
+      "total_ms": 5139.968672,
+      "verify_ms": 9.81546
     },
     {
-      "build_ms": 12.781226,
-      "leg_exchange_ms": 0.20491800000000002,
-      "onchain_wait_ms": 0.028999,
-      "open_ms": 3153.521557,
-      "prove_ms": 1131.23642,
-      "session_overhead_ms": 23.660868999999842,
-      "total_ms": 4321.433989,
-      "verify_ms": 9.499113999999999
+      "build_ms": 23.892923,
+      "leg_exchange_ms": 0.256979,
+      "onchain_wait_ms": 0.039118,
+      "open_ms": 3055.111834,
+      "prove_ms": 1363.3746709999998,
+      "session_overhead_ms": 32.49664300000032,
+      "total_ms": 4475.172168,
+      "verify_ms": 6.561641
     },
     {
-      "build_ms": 12.794502,
-      "leg_exchange_ms": 0.230178,
-      "onchain_wait_ms": 0.027511,
-      "open_ms": 3107.3394439999997,
-      "prove_ms": 1487.9354,
-      "session_overhead_ms": 21.24369400000026,
-      "total_ms": 4629.570729,
-      "verify_ms": 4.961919
+      "build_ms": 9.729753,
+      "leg_exchange_ms": 0.181678,
+      "onchain_wait_ms": 0.02491,
+      "open_ms": 2547.861034,
+      "prove_ms": 1599.8863970000002,
+      "session_overhead_ms": 17.4723280000003,
+      "total_ms": 4175.1561,
+      "verify_ms": 5.34648
     },
     {
-      "build_ms": 22.036186,
-      "leg_exchange_ms": 0.22525299999999998,
-      "onchain_wait_ms": 0.035156,
-      "open_ms": 2873.208036,
-      "prove_ms": 1305.947742,
-      "session_overhead_ms": 27.753083999999472,
-      "total_ms": 4229.205457,
-      "verify_ms": 9.067954
+      "build_ms": 12.015402,
+      "leg_exchange_ms": 0.570304,
+      "onchain_wait_ms": 0.042688000000000004,
+      "open_ms": 2625.859856,
+      "prove_ms": 1287.338244,
+      "session_overhead_ms": 28.673387000000126,
+      "total_ms": 3954.499881,
+      "verify_ms": 10.641876
     },
     {
-      "build_ms": 12.568843,
-      "leg_exchange_ms": 0.345148,
-      "onchain_wait_ms": 0.028186,
-      "open_ms": 2827.116873,
-      "prove_ms": 1298.6661159999999,
-      "session_overhead_ms": 24.151890000000435,
-      "total_ms": 4162.877056,
-      "verify_ms": 5.846475
+      "build_ms": 28.715088,
+      "leg_exchange_ms": 0.482012,
+      "onchain_wait_ms": 0.059598,
+      "open_ms": 3155.653261,
+      "prove_ms": 1928.975608,
+      "session_overhead_ms": 45.919219000000105,
+      "total_ms": 5159.804786,
+      "verify_ms": 10.80887
     },
     {
-      "build_ms": 13.462,
-      "leg_exchange_ms": 0.137212,
-      "onchain_wait_ms": 0.028065,
-      "open_ms": 3074.30567,
-      "prove_ms": 1345.53409,
-      "session_overhead_ms": 25.59516299999956,
-      "total_ms": 4459.0622,
-      "verify_ms": 11.15149
+      "build_ms": 23.294661,
+      "leg_exchange_ms": 0.145781,
+      "onchain_wait_ms": 0.024913,
+      "open_ms": 2737.1573630000003,
+      "prove_ms": 1339.668662,
+      "session_overhead_ms": 30.15984399999925,
+      "total_ms": 4130.4512239999995,
+      "verify_ms": 5.310378
     },
     {
-      "build_ms": 13.498992,
-      "leg_exchange_ms": 0.28641099999999997,
-      "onchain_wait_ms": 0.025194,
-      "open_ms": 2925.646763,
-      "prove_ms": 1521.086645,
-      "session_overhead_ms": 29.00642399999957,
-      "total_ms": 4489.550429,
-      "verify_ms": 6.488307
+      "build_ms": 11.401175,
+      "leg_exchange_ms": 0.343495,
+      "onchain_wait_ms": 0.064742,
+      "open_ms": 2391.4013029999996,
+      "prove_ms": 1060.9672480000002,
+      "session_overhead_ms": 22.167073000000173,
+      "total_ms": 3486.3450359999997,
+      "verify_ms": 7.730701000000001
     },
     {
-      "build_ms": 14.996858999999999,
-      "leg_exchange_ms": 0.195877,
-      "onchain_wait_ms": 0.028924,
-      "open_ms": 3066.345954,
-      "prove_ms": 1596.339991,
-      "session_overhead_ms": 23.102636000000373,
-      "total_ms": 4701.010241,
-      "verify_ms": 8.647644
+      "build_ms": 20.326254,
+      "leg_exchange_ms": 0.23127799999999998,
+      "onchain_wait_ms": 0.027239000000000003,
+      "open_ms": 2665.985428,
+      "prove_ms": 1289.2518960000002,
+      "session_overhead_ms": 25.17641699999943,
+      "total_ms": 4000.9985119999997,
+      "verify_ms": 6.595580999999999
     },
     {
-      "build_ms": 20.269879,
-      "leg_exchange_ms": 0.283054,
-      "onchain_wait_ms": 0.028554000000000003,
-      "open_ms": 3103.3104630000003,
-      "prove_ms": 1386.4385790000001,
-      "session_overhead_ms": 30.235238999999616,
-      "total_ms": 4540.565768,
-      "verify_ms": 8.83972
+      "build_ms": 10.499662,
+      "leg_exchange_ms": 0.34441099999999997,
+      "onchain_wait_ms": 0.036459,
+      "open_ms": 3164.453693,
+      "prove_ms": 1580.4496430000002,
+      "session_overhead_ms": 22.866234999999918,
+      "total_ms": 4778.650103,
+      "verify_ms": 9.692817
     },
     {
-      "build_ms": 11.868584,
-      "leg_exchange_ms": 0.228109,
-      "onchain_wait_ms": 0.040228999999999994,
-      "open_ms": 2635.513879,
-      "prove_ms": 1466.494752,
-      "session_overhead_ms": 20.59997299999972,
-      "total_ms": 4134.745526,
-      "verify_ms": 6.851055
+      "build_ms": 26.02452,
+      "leg_exchange_ms": 0.348765,
+      "onchain_wait_ms": 0.024957,
+      "open_ms": 2206.9385119999997,
+      "prove_ms": 1586.265431,
+      "session_overhead_ms": 32.0534870000004,
+      "total_ms": 3851.6556720000003,
+      "verify_ms": 4.781877000000001
     },
     {
-      "build_ms": 16.349729,
-      "leg_exchange_ms": 0.229864,
-      "onchain_wait_ms": 0.027895,
-      "open_ms": 2640.421278,
-      "prove_ms": 1602.7375319999999,
-      "session_overhead_ms": 19.168859000000417,
-      "total_ms": 4278.935157,
-      "verify_ms": 4.730775
+      "build_ms": 12.152476,
+      "leg_exchange_ms": 0.315735,
+      "onchain_wait_ms": 0.037200000000000004,
+      "open_ms": 2145.413844,
+      "prove_ms": 1235.423278,
+      "session_overhead_ms": 27.576353999999245,
+      "total_ms": 3420.918887,
+      "verify_ms": 13.429518999999999
     },
     {
-      "build_ms": 14.387379000000001,
-      "leg_exchange_ms": 0.276388,
-      "onchain_wait_ms": 0.036940999999999995,
-      "open_ms": 2884.277512,
-      "prove_ms": 1250.020966,
-      "session_overhead_ms": 32.592829999999665,
-      "total_ms": 4181.592016,
-      "verify_ms": 6.643789
+      "build_ms": 16.761115,
+      "leg_exchange_ms": 0.22057000000000002,
+      "onchain_wait_ms": 0.035187,
+      "open_ms": 2383.690298,
+      "prove_ms": 1577.068221,
+      "session_overhead_ms": 30.201084000000623,
+      "total_ms": 4007.9764750000004,
+      "verify_ms": 11.113261
     },
     {
-      "build_ms": 19.138474,
-      "leg_exchange_ms": 0.24665700000000002,
-      "onchain_wait_ms": 0.034186,
-      "open_ms": 2863.874397,
-      "prove_ms": 1321.86763,
-      "session_overhead_ms": 32.475309999999816,
-      "total_ms": 4237.636654,
-      "verify_ms": 8.381891000000001
+      "build_ms": 18.149051999999998,
+      "leg_exchange_ms": 0.16759000000000002,
+      "onchain_wait_ms": 0.029138,
+      "open_ms": 2236.5305000000003,
+      "prove_ms": 1955.1283339999998,
+      "session_overhead_ms": 22.395582000000452,
+      "total_ms": 4232.4001960000005,
+      "verify_ms": 4.50441
     },
     {
-      "build_ms": 12.614106,
-      "leg_exchange_ms": 0.24430300000000002,
-      "onchain_wait_ms": 0.027766000000000002,
-      "open_ms": 2719.3778330000005,
-      "prove_ms": 1240.92132,
-      "session_overhead_ms": 28.272952999999337,
-      "total_ms": 4001.4582809999997,
-      "verify_ms": 9.811092
+      "build_ms": 13.39961,
+      "leg_exchange_ms": 0.157781,
+      "onchain_wait_ms": 0.024613,
+      "open_ms": 2019.7672619999998,
+      "prove_ms": 1494.41637,
+      "session_overhead_ms": 20.224554000000285,
+      "total_ms": 3547.99019,
+      "verify_ms": 7.105012
     },
     {
-      "build_ms": 20.116856,
-      "leg_exchange_ms": 0.16403800000000002,
-      "onchain_wait_ms": 0.022161999999999998,
-      "open_ms": 2592.885281,
-      "prove_ms": 1559.533812,
-      "session_overhead_ms": 25.55208300000059,
-      "total_ms": 4198.274232,
-      "verify_ms": 8.179354
+      "build_ms": 12.566848,
+      "leg_exchange_ms": 0.46817099999999995,
+      "onchain_wait_ms": 0.039342999999999996,
+      "open_ms": 2921.728971,
+      "prove_ms": 1041.7219630000002,
+      "session_overhead_ms": 25.468952999999956,
+      "total_ms": 4001.994249,
+      "verify_ms": 11.38371
     }
   ],
   "cozk2p_quic_2process": [
     {
       "per_party": [
         {
-          "build_ms": 87.792734,
+          "build_ms": 135.181966,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.29988299999999996,
-          "leg_exchange_ms": 2.570937,
-          "open_ms": 3238.072968,
-          "peak_rss_bytes": 1681719296,
+          "compare_onchain_wait_ms": 0.208526,
+          "leg_exchange_ms": 1.093988,
+          "open_ms": 4056.712632,
+          "peak_rss_bytes": 1807265792,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1251.665258,
+          "prove_ms": 1928.556921,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              3.966406
+              3.455877
             ],
             [
               "2 share inputs + collateral binding",
-              92.347222
+              94.876818
             ],
             [
               "3 three-way compare",
-              29.218421000000003
+              25.139912
             ],
             [
               "4 signature ferry + exchange",
-              1.568214
+              1.481648
             ],
             [
               "5 collaborative prove + local verify",
-              4584.295582000001
+              6124.668708
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.370804
+              0.248801
             ],
             [
               "7 smaller-side reveal",
-              2.536029
+              3.787704
             ],
             [
               "8 payout-note keys + WAL",
-              46.756733
+              1.022855
             ]
           ],
-          "total_ms": 4862.530202,
-          "verify_ms": 6.564736
+          "total_ms": 6350.972326,
+          "verify_ms": 4.0378799999999995
         },
         {
-          "build_ms": 88.084326,
+          "build_ms": 135.478059,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.231507,
-          "leg_exchange_ms": 1.754858,
-          "open_ms": 3245.123106,
-          "peak_rss_bytes": 1695236096,
+          "compare_onchain_wait_ms": 0.191299,
+          "leg_exchange_ms": 0.800542,
+          "open_ms": 4132.111276,
+          "peak_rss_bytes": 1798803456,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1244.816048,
+          "prove_ms": 1853.322177,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.262711
+              0.5310239999999999
             ],
             [
               "2 share inputs + collateral binding",
-              93.16
+              95.57277
             ],
             [
               "3 three-way compare",
-              28.737075
+              24.496859
             ],
             [
               "4 signature ferry + exchange",
-              1.310066
+              1.35804
             ],
             [
               "5 collaborative prove + local verify",
-              4585.1100799999995
+              6127.442678
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.246437
+              0.222924
             ],
             [
               "7 smaller-side reveal",
-              1.907631
+              1.199549
             ],
             [
               "8 payout-note keys + WAL",
-              47.145403
+              1.037673
             ]
           ],
-          "total_ms": 4864.089584,
-          "verify_ms": 6.921243
+          "total_ms": 6350.477040000001,
+          "verify_ms": 6.382028
         }
       ],
-      "total_ms": 4940.182614
+      "total_ms": 6407.46733
     },
     {
       "per_party": [
         {
-          "build_ms": 98.885108,
+          "build_ms": 62.198454,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.207749,
-          "leg_exchange_ms": 1.959059,
-          "open_ms": 3145.182663,
-          "peak_rss_bytes": 1704407040,
+          "compare_onchain_wait_ms": 0.224229,
+          "leg_exchange_ms": 0.886048,
+          "open_ms": 2863.984969,
+          "peak_rss_bytes": 1817309184,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1341.475583,
+          "prove_ms": 1624.391691,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              3.21765
+              4.081881
             ],
             [
               "2 share inputs + collateral binding",
-              98.857876
+              88.919051
             ],
             [
               "3 three-way compare",
-              34.524192
+              16.011012
             ],
             [
               "4 signature ferry + exchange",
-              1.442426
+              0.850634
             ],
             [
               "5 collaborative prove + local verify",
-              4592.460407
+              4555.370371
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.345283
+              0.236242
             ],
             [
               "7 smaller-side reveal",
-              1.293633
+              1.197913
             ],
             [
               "8 payout-note keys + WAL",
-              46.342581
+              0.932327
             ]
           ],
-          "total_ms": 4872.174364,
-          "verify_ms": 6.727194
+          "total_ms": 4771.093753,
+          "verify_ms": 4.677713
         },
         {
-          "build_ms": 99.584837,
+          "build_ms": 62.079348,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.247862,
-          "leg_exchange_ms": 1.308574,
-          "open_ms": 3244.7223310000004,
-          "peak_rss_bytes": 1698791424,
+          "compare_onchain_wait_ms": 0.217074,
+          "leg_exchange_ms": 0.65983,
+          "open_ms": 2882.1851939999997,
+          "peak_rss_bytes": 1840775168,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1241.820903,
+          "prove_ms": 1606.310893,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.25068399999999996
+              0.588792
             ],
             [
               "2 share inputs + collateral binding",
-              100.168888
+              89.537346
             ],
             [
               "3 three-way compare",
-              33.558288
+              16.326871999999998
             ],
             [
               "4 signature ferry + exchange",
-              1.272429
+              0.601415
             ],
             [
               "5 collaborative prove + local verify",
-              4592.087932
+              4555.217602
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.28971399999999997
+              0.254541
             ],
             [
               "7 smaller-side reveal",
-              1.919997
+              1.255785
             ],
             [
               "8 payout-note keys + WAL",
-              46.495019
+              0.993075
             ]
           ],
-          "total_ms": 4873.864442,
-          "verify_ms": 5.761642
+          "total_ms": 4771.323464,
+          "verify_ms": 4.460225
         }
       ],
-      "total_ms": 4940.392171
+      "total_ms": 4836.381318
     },
     {
       "per_party": [
         {
-          "build_ms": 109.332239,
+          "build_ms": 123.010083,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.278007,
-          "leg_exchange_ms": 1.146736,
-          "open_ms": 3136.837494,
-          "peak_rss_bytes": 1688907776,
+          "compare_onchain_wait_ms": 0.188724,
+          "leg_exchange_ms": 1.105997,
+          "open_ms": 2826.912033,
+          "peak_rss_bytes": 1810485248,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1244.289027,
+          "prove_ms": 1724.730458,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              2.2604539999999997
+              3.9831
             ],
             [
               "2 share inputs + collateral binding",
-              95.743252
+              110.688197
             ],
             [
               "3 three-way compare",
-              35.276983
+              33.127943
             ],
             [
               "4 signature ferry + exchange",
-              1.112896
+              1.11125
             ],
             [
               "5 collaborative prove + local verify",
-              4513.971197
+              4681.483518
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.32121500000000003
+              0.225489
             ],
             [
               "7 smaller-side reveal",
-              2.29379
+              1.205418
             ],
             [
               "8 payout-note keys + WAL",
-              1.328241
+              0.871508
             ]
           ],
-          "total_ms": 4768.403042,
-          "verify_ms": 4.7071700000000005
+          "total_ms": 4999.504768999999,
+          "verify_ms": 6.6564179999999995
         },
         {
-          "build_ms": 109.418985,
+          "build_ms": 123.083899,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.209743,
-          "leg_exchange_ms": 1.122506,
-          "open_ms": 3086.3458929999997,
-          "peak_rss_bytes": 1707089920,
+          "compare_onchain_wait_ms": 0.277509,
+          "leg_exchange_ms": 0.838238,
+          "open_ms": 2813.438064,
+          "peak_rss_bytes": 1826242560,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1296.542262,
+          "prove_ms": 1737.876572,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.367169
+              0.5237780000000001
             ],
             [
               "2 share inputs + collateral binding",
-              95.875928
+              111.736809
             ],
             [
               "3 three-way compare",
-              35.149868
+              32.504303
             ],
             [
               "4 signature ferry + exchange",
-              1.260594
+              1.127772
             ],
             [
               "5 collaborative prove + local verify",
-              4514.5000580000005
+              4678.964051
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.250755
+              0.34094
             ],
             [
               "7 smaller-side reveal",
-              1.635372
+              3.55259
             ],
             [
               "8 payout-note keys + WAL",
-              1.4063750000000002
+              1.057087
             ]
           ],
-          "total_ms": 4769.053256,
-          "verify_ms": 5.007028999999999
+          "total_ms": 4998.859672,
+          "verify_ms": 4.382751
         }
       ],
-      "total_ms": 4837.901288
+      "total_ms": 5097.297222
     },
     {
       "per_party": [
         {
-          "build_ms": 93.126693,
+          "build_ms": 128.002722,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.273354,
-          "leg_exchange_ms": 1.406802,
-          "open_ms": 3053.741066,
-          "peak_rss_bytes": 1686155264,
+          "compare_onchain_wait_ms": 0.328482,
+          "leg_exchange_ms": 2.2529,
+          "open_ms": 3614.689848,
+          "peak_rss_bytes": 1799819264,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1288.458681,
+          "prove_ms": 1731.112349,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              2.607824
+              3.702558
             ],
             [
               "2 share inputs + collateral binding",
-              139.12401
+              78.370409
             ],
             [
               "3 three-way compare",
-              29.954868
+              25.777643
             ],
             [
               "4 signature ferry + exchange",
-              1.488888
+              1.198751
             ],
             [
               "5 collaborative prove + local verify",
-              4440.645603
+              5479.253672000001
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.331729
+              0.392445
             ],
             [
               "7 smaller-side reveal",
-              1.816104
+              5.158259
             ],
             [
               "8 payout-note keys + WAL",
-              1.499337
+              11.404521
             ]
           ],
-          "total_ms": 4720.132999,
-          "verify_ms": 5.133683
+          "total_ms": 5711.071669,
+          "verify_ms": 5.188566000000001
         },
         {
-          "build_ms": 93.782787,
+          "build_ms": 128.798215,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.335042,
-          "leg_exchange_ms": 1.070421,
-          "open_ms": 3077.9274600000003,
-          "peak_rss_bytes": 1688227840,
+          "compare_onchain_wait_ms": 0.31607,
+          "leg_exchange_ms": 1.274007,
+          "open_ms": 3588.875637,
+          "peak_rss_bytes": 1804476416,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1264.332582,
+          "prove_ms": 1756.54256,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.374387
+              0.5455049999999999
             ],
             [
               "2 share inputs + collateral binding",
-              139.599905
+              79.42603199999999
             ],
             [
               "3 three-way compare",
-              29.551639
+              24.699615
             ],
             [
               "4 signature ferry + exchange",
-              1.291187
+              1.4651
             ],
             [
               "5 collaborative prove + local verify",
-              4441.129755000001
+              5482.5304639999995
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.38568
+              0.368133
             ],
             [
               "7 smaller-side reveal",
-              1.473002
+              2.03522
             ],
             [
               "8 payout-note keys + WAL",
-              1.093959
+              11.690433
             ]
           ],
-          "total_ms": 4719.348277,
-          "verify_ms": 4.863688
+          "total_ms": 5709.384946,
+          "verify_ms": 8.050884
         }
       ],
-      "total_ms": 4787.710602
+      "total_ms": 5814.315721
     },
     {
       "per_party": [
         {
-          "build_ms": 90.841833,
+          "build_ms": 45.945353,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.340278,
-          "leg_exchange_ms": 1.620383,
-          "open_ms": 3270.402742,
-          "peak_rss_bytes": 1689362432,
+          "compare_onchain_wait_ms": 0.37447100000000005,
+          "leg_exchange_ms": 2.352036,
+          "open_ms": 3244.0826939999997,
+          "peak_rss_bytes": 1830252544,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1274.009236,
+          "prove_ms": 1208.43806,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              2.244477
+              3.504161
             ],
             [
               "2 share inputs + collateral binding",
-              83.377707
+              78.68439500000001
             ],
             [
               "3 three-way compare",
-              33.951309
+              24.636812000000003
             ],
             [
               "4 signature ferry + exchange",
-              0.994633
+              0.895932
             ],
             [
               "5 collaborative prove + local verify",
-              4640.0443510000005
+              4505.444529
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.382389
+              0.429991
             ],
             [
               "7 smaller-side reveal",
-              1.843738
+              3.265981
             ],
             [
               "8 payout-note keys + WAL",
-              6.750589000000001
+              1.3353270000000002
             ]
           ],
-          "total_ms": 4871.676725,
-          "verify_ms": 4.631006
+          "total_ms": 4720.399206,
+          "verify_ms": 6.703463
         },
         {
-          "build_ms": 90.965404,
+          "build_ms": 46.145133,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.306564,
-          "leg_exchange_ms": 1.129167,
-          "open_ms": 3288.777444,
-          "peak_rss_bytes": 1728045056,
+          "compare_onchain_wait_ms": 0.326328,
+          "leg_exchange_ms": 1.408009,
+          "open_ms": 3281.615257,
+          "peak_rss_bytes": 1805860864,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1254.569543,
+          "prove_ms": 1171.113578,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.279433
+              0.509433
             ],
             [
               "2 share inputs + collateral binding",
-              83.311044
+              79.573151
             ],
             [
               "3 three-way compare",
-              33.962348000000006
+              24.088325
             ],
             [
               "4 signature ferry + exchange",
-              1.212837
+              0.7138580000000001
             ],
             [
               "5 collaborative prove + local verify",
-              4640.337170999999
+              4506.886864
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.35064900000000004
+              0.395755
             ],
             [
               "7 smaller-side reveal",
-              1.5161319999999998
+              1.846674
             ],
             [
               "8 payout-note keys + WAL",
-              6.928296
+              1.5088160000000002
             ]
           ],
-          "total_ms": 4870.627255,
-          "verify_ms": 5.844561
+          "total_ms": 4718.542039,
+          "verify_ms": 7.828458
         }
       ],
-      "total_ms": 4937.898229
+      "total_ms": 4818.1824830000005
     },
     {
       "per_party": [
         {
-          "build_ms": 99.904238,
+          "build_ms": 88.244849,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.318595,
-          "leg_exchange_ms": 3.190791,
-          "open_ms": 3072.898324,
-          "peak_rss_bytes": 1706110976,
+          "compare_onchain_wait_ms": 0.368168,
+          "leg_exchange_ms": 1.988613,
+          "open_ms": 3442.202841,
+          "peak_rss_bytes": 1843351552,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1361.965187,
+          "prove_ms": 1127.001513,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              2.378505
+              3.222896
             ],
             [
               "2 share inputs + collateral binding",
-              82.098055
+              83.94927000000001
             ],
             [
               "3 three-way compare",
-              27.268896
+              33.032591
             ],
             [
               "4 signature ferry + exchange",
-              1.165397
+              1.495008
             ],
             [
               "5 collaborative prove + local verify",
-              4543.81267
+              4664.654037
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.369579
+              0.445126
             ],
             [
               "7 smaller-side reveal",
-              1.287449
+              2.672867
             ],
             [
               "8 payout-note keys + WAL",
-              46.156891
+              1.554456
             ]
           ],
-          "total_ms": 4859.729187,
-          "verify_ms": 8.863705
+          "total_ms": 4889.404598,
+          "verify_ms": 6.870551
         },
         {
-          "build_ms": 101.057391,
+          "build_ms": 88.89677999999999,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.262588,
-          "leg_exchange_ms": 2.0934410000000003,
-          "open_ms": 3079.3173450000004,
-          "peak_rss_bytes": 1683644416,
+          "compare_onchain_wait_ms": 0.33180200000000004,
+          "leg_exchange_ms": 1.597347,
+          "open_ms": 3434.847532,
+          "peak_rss_bytes": 1796493312,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1354.767396,
+          "prove_ms": 1134.325703,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.304595
+              0.483133
             ],
             [
               "2 share inputs + collateral binding",
-              82.38970499999999
+              84.18062699999999
             ],
             [
               "3 three-way compare",
-              27.512973
+              33.309189
             ],
             [
               "4 signature ferry + exchange",
-              0.473291
+              1.054804
             ],
             [
               "5 collaborative prove + local verify",
-              4541.932244
+              4665.461521
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.304515
+              0.360444
             ],
             [
               "7 smaller-side reveal",
-              3.429785
+              1.935771
             ],
             [
               "8 payout-note keys + WAL",
-              46.378315
+              1.608514
             ]
           ],
-          "total_ms": 4860.753385999999,
-          "verify_ms": 6.597711
+          "total_ms": 4887.1445189999995,
+          "verify_ms": 7.145664
         }
       ],
-      "total_ms": 4933.506074
+      "total_ms": 4994.828937
     },
     {
       "per_party": [
         {
-          "build_ms": 96.481403,
+          "build_ms": 83.493537,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.324599,
-          "leg_exchange_ms": 2.922068,
-          "open_ms": 3220.939263,
-          "peak_rss_bytes": 1702952960,
+          "compare_onchain_wait_ms": 0.249456,
+          "leg_exchange_ms": 1.359184,
+          "open_ms": 3010.777973,
+          "peak_rss_bytes": 1799041024,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1201.613267,
+          "prove_ms": 1822.591481,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              2.892296
+              4.291542
             ],
             [
               "2 share inputs + collateral binding",
-              89.471571
+              85.410996
             ],
             [
               "3 three-way compare",
-              24.933589
+              23.06378
             ],
             [
               "4 signature ferry + exchange",
-              0.983895
+              1.1891969999999998
             ],
             [
               "5 collaborative prove + local verify",
-              4525.349883999999
+              4920.908018
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.372331
+              0.325416
             ],
             [
               "7 smaller-side reveal",
-              4.659102
+              1.486118
             ],
             [
               "8 payout-note keys + WAL",
-              47.078545
+              11.337073
             ]
           ],
-          "total_ms": 4801.320527,
-          "verify_ms": 6.123801
+          "total_ms": 5164.169045000001,
+          "verify_ms": 3.814845
         },
         {
-          "build_ms": 96.634611,
+          "build_ms": 84.01128700000001,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.204865,
-          "leg_exchange_ms": 1.612416,
-          "open_ms": 3144.031004,
-          "peak_rss_bytes": 1702383616,
+          "compare_onchain_wait_ms": 0.176783,
+          "leg_exchange_ms": 0.948136,
+          "open_ms": 2961.056075,
+          "peak_rss_bytes": 1802784768,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1278.97741,
+          "prove_ms": 1871.949126,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.341807
+              0.468075
             ],
             [
               "2 share inputs + collateral binding",
-              89.67854799999999
+              85.876559
             ],
             [
               "3 three-way compare",
-              24.561211
+              22.776861
             ],
             [
               "4 signature ferry + exchange",
-              1.049285
+              1.258217
             ],
             [
               "5 collaborative prove + local verify",
-              4528.56984
+              4921.478775
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.264313
+              0.209333
             ],
             [
               "7 smaller-side reveal",
-              1.622775
+              1.177036
             ],
             [
               "8 payout-note keys + WAL",
-              47.448341
+              11.502578
             ]
           ],
-          "total_ms": 4800.435945,
-          "verify_ms": 8.756559000000001
+          "total_ms": 5202.251461000001,
+          "verify_ms": 4.216578999999999
         }
       ],
-      "total_ms": 4870.470443
+      "total_ms": 5278.140966999999
     },
     {
       "per_party": [
         {
-          "build_ms": 100.428143,
+          "build_ms": 74.71739500000001,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.17601699999999998,
-          "leg_exchange_ms": 1.739089,
-          "open_ms": 3148.501593,
-          "peak_rss_bytes": 1699880960,
+          "compare_onchain_wait_ms": 0.356821,
+          "leg_exchange_ms": 0.966954,
+          "open_ms": 2986.204604,
+          "peak_rss_bytes": 1825579008,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1366.638861,
+          "prove_ms": 1556.806111,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              47.573113
+              4.057613
             ],
             [
               "2 share inputs + collateral binding",
-              93.262767
+              52.40380699999999
             ],
             [
               "3 three-way compare",
-              36.557144
+              12.192765
             ],
             [
               "4 signature ferry + exchange",
-              1.680132
+              0.710097
             ],
             [
               "5 collaborative prove + local verify",
-              4621.870336999999
+              4622.661066
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.215332
+              0.402322
             ],
             [
               "7 smaller-side reveal",
-              1.869674
+              6.14802
             ],
             [
               "8 payout-note keys + WAL",
-              46.610891
+              1.392116
             ]
           ],
-          "total_ms": 4953.98639,
-          "verify_ms": 6.133279
+          "total_ms": 4792.207283,
+          "verify_ms": 4.780364
         },
         {
-          "build_ms": 101.152152,
+          "build_ms": 75.086083,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.417971,
-          "leg_exchange_ms": 1.356271,
-          "open_ms": 3175.488456,
-          "peak_rss_bytes": 1679290368,
+          "compare_onchain_wait_ms": 0.297142,
+          "leg_exchange_ms": 0.7627769999999999,
+          "open_ms": 2974.384902,
+          "peak_rss_bytes": 1822720000,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1339.15972,
+          "prove_ms": 1569.924713,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.231204
+              0.521823
             ],
             [
               "2 share inputs + collateral binding",
-              94.375451
+              53.013888
             ],
             [
               "3 three-way compare",
-              35.683693000000005
+              11.947447
             ],
             [
               "4 signature ferry + exchange",
-              1.793851
+              0.598046
             ],
             [
               "5 collaborative prove + local verify",
-              4621.9380949999995
+              4627.633909
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.466355
+              0.335542
             ],
             [
               "7 smaller-side reveal",
-              1.621059
+              1.397728
             ],
             [
               "8 payout-note keys + WAL",
-              46.540068
+              1.090837
             ]
           ],
-          "total_ms": 4952.877952,
-          "verify_ms": 5.93515
+          "total_ms": 4792.188104,
+          "verify_ms": 8.06281
         }
       ],
-      "total_ms": 5023.904763
+      "total_ms": 4850.5667920000005
     },
     {
       "per_party": [
         {
-          "build_ms": 85.293263,
+          "build_ms": 57.035498,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.236978,
-          "leg_exchange_ms": 1.078556,
-          "open_ms": 3077.310298,
-          "peak_rss_bytes": 1691287552,
+          "compare_onchain_wait_ms": 0.306547,
+          "leg_exchange_ms": 1.868323,
+          "open_ms": 3363.948442,
+          "peak_rss_bytes": 1848397824,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1254.8479289999998,
+          "prove_ms": 1481.593491,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              2.58924
+              4.222358
             ],
             [
               "2 share inputs + collateral binding",
-              84.159736
+              52.222893
             ],
             [
               "3 three-way compare",
-              30.228157
+              14.728907
             ],
             [
               "4 signature ferry + exchange",
-              1.200162
+              0.6211120000000001
             ],
             [
               "5 collaborative prove + local verify",
-              4423.667662
+              4908.80546
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.282501
+              0.366405
             ],
             [
               "7 smaller-side reveal",
-              1.738505
+              5.912127
             ],
             [
               "8 payout-note keys + WAL",
-              1.063313
+              11.166315
             ]
           ],
-          "total_ms": 4648.97858,
-          "verify_ms": 5.9750749999999995
+          "total_ms": 5097.376292,
+          "verify_ms": 5.99382
         },
         {
-          "build_ms": 85.825783,
+          "build_ms": 57.489053,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.210378,
-          "leg_exchange_ms": 1.097545,
-          "open_ms": 3015.872049,
-          "peak_rss_bytes": 1704882176,
+          "compare_onchain_wait_ms": 0.40522,
+          "leg_exchange_ms": 1.356321,
+          "open_ms": 3346.7734130000003,
+          "peak_rss_bytes": 1813295104,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1316.2969549999998,
+          "prove_ms": 1498.286061,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.301507
+              0.378013
             ],
             [
               "2 share inputs + collateral binding",
-              85.01852099999999
+              52.894003000000005
             ],
             [
               "3 three-way compare",
-              29.382928
+              14.335492
             ],
             [
               "4 signature ferry + exchange",
-              1.1757
+              0.569608
             ],
             [
               "5 collaborative prove + local verify",
-              4424.3619
+              4912.516527
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.266773
+              0.46611
             ],
             [
               "7 smaller-side reveal",
-              1.32336
+              1.951188
             ],
             [
               "8 payout-note keys + WAL",
-              0.976979
+              11.444806
             ]
           ],
-          "total_ms": 4649.75302,
-          "verify_ms": 6.173854
+          "total_ms": 5097.286623999999,
+          "verify_ms": 9.752969
         }
       ],
-      "total_ms": 4723.764134
+      "total_ms": 5191.957215
     },
     {
       "per_party": [
         {
-          "build_ms": 94.277821,
+          "build_ms": 122.099693,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.243935,
-          "leg_exchange_ms": 1.191457,
-          "open_ms": 3152.825623,
-          "peak_rss_bytes": 1698385920,
+          "compare_onchain_wait_ms": 0.210926,
+          "leg_exchange_ms": 1.337027,
+          "open_ms": 3662.232383,
+          "peak_rss_bytes": 1777426432,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1377.5416489999998,
+          "prove_ms": 1256.080953,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              2.774756
+              3.622365
             ],
             [
               "2 share inputs + collateral binding",
-              93.684927
+              98.348423
             ],
             [
               "3 three-way compare",
-              30.567529
+              26.934934
             ],
             [
               "4 signature ferry + exchange",
-              1.9814810000000005
+              1.452717
             ],
             [
               "5 collaborative prove + local verify",
-              4631.108838
+              5044.079143
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.29063100000000003
+              0.24838699999999997
             ],
             [
               "7 smaller-side reveal",
-              3.921227
+              4.861428999999999
             ],
             [
               "8 payout-note keys + WAL",
-              1.251078
+              11.000967
             ]
           ],
-          "total_ms": 4870.695879000001,
-          "verify_ms": 6.264028
+          "total_ms": 5294.126621,
+          "verify_ms": 3.474207
         },
         {
-          "build_ms": 95.176851,
+          "build_ms": 122.963594,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.227856,
-          "leg_exchange_ms": 1.2526309999999998,
-          "open_ms": 3191.468047,
-          "peak_rss_bytes": 1696694272,
+          "compare_onchain_wait_ms": 0.228684,
+          "leg_exchange_ms": 0.863532,
+          "open_ms": 3667.748106,
+          "peak_rss_bytes": 1786159104,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1337.219934,
+          "prove_ms": 1250.052875,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.290706
+              0.526226
             ],
             [
               "2 share inputs + collateral binding",
-              94.481414
+              99.109506
             ],
             [
               "3 three-way compare",
-              30.537222
+              26.639498
             ],
             [
               "4 signature ferry + exchange",
-              1.182307
+              1.177531
             ],
             [
               "5 collaborative prove + local verify",
-              4633.377881
+              5047.688227
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.267049
+              0.267448
             ],
             [
               "7 smaller-side reveal",
-              1.921648
+              1.2949890000000002
             ],
             [
               "8 payout-note keys + WAL",
-              1.245497
+              11.225294
             ]
           ],
-          "total_ms": 4869.528697,
-          "verify_ms": 9.295761
+          "total_ms": 5294.291935,
+          "verify_ms": 6.759996
         }
       ],
-      "total_ms": 4938.37021
+      "total_ms": 5356.068343000001
     },
     {
       "per_party": [
         {
-          "build_ms": 122.062774,
+          "build_ms": 122.363206,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.224099,
-          "leg_exchange_ms": 1.938394,
-          "open_ms": 3003.546648,
-          "peak_rss_bytes": 1687801856,
+          "compare_onchain_wait_ms": 0.158575,
+          "leg_exchange_ms": 1.264383,
+          "open_ms": 2637.278127,
+          "peak_rss_bytes": 1812496384,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1337.523644,
+          "prove_ms": 1905.898576,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              2.724418
+              3.111135
             ],
             [
               "2 share inputs + collateral binding",
-              97.186156
+              108.944419
             ],
             [
               "3 three-way compare",
-              31.023987
+              156.137392
             ],
             [
               "4 signature ferry + exchange",
-              1.495883
+              1.2360559999999998
             ],
             [
               "5 collaborative prove + local verify",
-              4470.7751260000005
+              4672.142454000001
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.271012
+              0.188852
             ],
             [
               "7 smaller-side reveal",
-              1.285567
+              1.063631
             ],
             [
               "8 payout-note keys + WAL",
-              46.884546
+              11.498163
             ]
           ],
-          "total_ms": 4756.963079,
-          "verify_ms": 7.439046
+          "total_ms": 5056.099564,
+          "verify_ms": 6.411408000000001
         },
         {
-          "build_ms": 122.387997,
+          "build_ms": 122.194093,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.241999,
-          "leg_exchange_ms": 1.325587,
-          "open_ms": 3021.713288,
-          "peak_rss_bytes": 1682374656,
+          "compare_onchain_wait_ms": 0.275957,
+          "leg_exchange_ms": 0.816713,
+          "open_ms": 2565.660365,
+          "peak_rss_bytes": 1818177536,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1316.7439359999998,
+          "prove_ms": 1978.251471,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.240156
+              0.340846
             ],
             [
               "2 share inputs + collateral binding",
-              98.324225
+              110.03471
             ],
             [
               "3 three-way compare",
-              29.860821
+              155.433685
             ],
             [
               "4 signature ferry + exchange",
-              1.398657
+              1.197608
             ],
             [
               "5 collaborative prove + local verify",
-              4468.30352
+              4670.546511
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.288092
+              0.324526
             ],
             [
               "7 smaller-side reveal",
-              4.05011
+              2.720937
             ],
             [
               "8 payout-note keys + WAL",
-              47.10185
+              11.659675
             ]
           ],
-          "total_ms": 4754.72883,
-          "verify_ms": 7.268264
+          "total_ms": 5055.473267,
+          "verify_ms": 4.290056000000001
         }
       ],
-      "total_ms": 4828.426882000001
+      "total_ms": 5113.261979
     },
     {
       "per_party": [
         {
-          "build_ms": 84.75638500000001,
+          "build_ms": 52.785568,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.382727,
-          "leg_exchange_ms": 2.211931,
-          "open_ms": 3130.704713,
-          "peak_rss_bytes": 1672622080,
+          "compare_onchain_wait_ms": 0.192064,
+          "leg_exchange_ms": 1.226182,
+          "open_ms": 3588.66829,
+          "peak_rss_bytes": 1806692352,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1256.367558,
+          "prove_ms": 1074.232206,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              2.83819
+              3.761437
             ],
             [
               "2 share inputs + collateral binding",
-              88.18176299999999
+              54.281252
             ],
             [
               "3 three-way compare",
-              26.348046
+              14.126307
             ],
             [
               "4 signature ferry + exchange",
-              1.2714530000000002
+              1.471348
             ],
             [
               "5 collaborative prove + local verify",
-              4479.137108
+              4721.379212999999
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.435447
+              0.224289
             ],
             [
               "7 smaller-side reveal",
-              2.359142
+              1.565374
             ],
             [
               "8 payout-note keys + WAL",
-              1.415674
+              11.038943000000002
             ]
           ],
-          "total_ms": 4695.425796,
-          "verify_ms": 7.0772960000000005
+          "total_ms": 4910.71489,
+          "verify_ms": 5.501922
         },
         {
-          "build_ms": 85.191945,
+          "build_ms": 53.166494,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.333048,
-          "leg_exchange_ms": 0.992486,
-          "open_ms": 3126.678538,
-          "peak_rss_bytes": 1686212608,
+          "compare_onchain_wait_ms": 0.167695,
+          "leg_exchange_ms": 0.980638,
+          "open_ms": 3614.662991,
+          "peak_rss_bytes": 1814855680,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1262.33946,
+          "prove_ms": 1048.193106,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.323245
+              0.497265
             ],
             [
               "2 share inputs + collateral binding",
-              88.653942
+              54.990415
             ],
             [
               "3 three-way compare",
-              26.554544
+              14.313737
             ],
             [
               "4 signature ferry + exchange",
-              0.6276320000000001
+              0.999201
             ],
             [
               "5 collaborative prove + local verify",
-              4479.792265
+              4721.900191
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.422385
+              0.206727
             ],
             [
               "7 smaller-side reveal",
-              1.615633
+              1.096043
             ],
             [
               "8 payout-note keys + WAL",
-              2.548081
+              11.265833
             ]
           ],
-          "total_ms": 4695.5540200000005,
-          "verify_ms": 5.360519
+          "total_ms": 4911.277396,
+          "verify_ms": 5.767637
         }
       ],
-      "total_ms": 4768.5497589999995
+      "total_ms": 4968.225614
     },
     {
       "per_party": [
         {
-          "build_ms": 71.948033,
+          "build_ms": 85.468612,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.319523,
-          "leg_exchange_ms": 1.96471,
-          "open_ms": 2991.897924,
-          "peak_rss_bytes": 1697382400,
+          "compare_onchain_wait_ms": 0.343422,
+          "leg_exchange_ms": 1.542748,
+          "open_ms": 3339.28832,
+          "peak_rss_bytes": 1819566080,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1338.553227,
+          "prove_ms": 1621.924572,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              2.3733920000000004
+              3.762117
             ],
             [
               "2 share inputs + collateral binding",
-              88.422365
+              51.142903
             ],
             [
               "3 three-way compare",
-              27.444577
+              13.651996
             ],
             [
               "4 signature ferry + exchange",
-              1.3458089999999998
+              0.766489
             ],
             [
               "5 collaborative prove + local verify",
-              4409.856675
+              5057.658781
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.380862
+              0.402699
             ],
             [
               "7 smaller-side reveal",
-              1.6279
+              1.893643
             ],
             [
               "8 payout-note keys + WAL",
-              46.742018
+              1.638836
             ]
           ],
-          "total_ms": 4680.22796,
-          "verify_ms": 7.233848
+          "total_ms": 5233.946134,
+          "verify_ms": 10.780083
         },
         {
-          "build_ms": 72.778566,
+          "build_ms": 85.270631,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.450479,
-          "leg_exchange_ms": 1.332054,
-          "open_ms": 3039.1182790000003,
-          "peak_rss_bytes": 1705455616,
+          "compare_onchain_wait_ms": 0.342119,
+          "leg_exchange_ms": 1.320484,
+          "open_ms": 3312.758562,
+          "peak_rss_bytes": 1820065792,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1288.264851,
+          "prove_ms": 1648.7878469999998,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.27620500000000003
+              0.458591
             ],
             [
               "2 share inputs + collateral binding",
-              88.59643200000001
+              52.234497
             ],
             [
               "3 three-way compare",
-              28.230496
+              13.194713
             ],
             [
               "4 signature ferry + exchange",
-              0.392506
+              0.790617
             ],
             [
               "5 collaborative prove + local verify",
-              4405.813045000001
+              5054.23456
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.4963860000000001
+              0.419963
             ],
             [
               "7 smaller-side reveal",
-              5.6464419999999995
+              5.177415
             ],
             [
               "8 payout-note keys + WAL",
-              47.170882
+              1.521674
             ]
           ],
-          "total_ms": 4678.801667,
-          "verify_ms": 5.454968
+          "total_ms": 5234.246611,
+          "verify_ms": 7.187003
         }
       ],
-      "total_ms": 4750.01085
+      "total_ms": 5327.607408000001
     },
     {
       "per_party": [
         {
-          "build_ms": 85.77816800000001,
+          "build_ms": 87.085948,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.25519600000000003,
-          "leg_exchange_ms": 1.730108,
-          "open_ms": 3127.840039,
-          "peak_rss_bytes": 1701806080,
+          "compare_onchain_wait_ms": 0.205036,
+          "leg_exchange_ms": 1.547006,
+          "open_ms": 2449.7365050000003,
+          "peak_rss_bytes": 1813241856,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1335.0824779999998,
+          "prove_ms": 1744.882859,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              2.5900369999999997
+              4.006797000000001
             ],
             [
               "2 share inputs + collateral binding",
-              97.34856
+              108.001451
             ],
             [
               "3 three-way compare",
-              27.843995
+              28.507699
             ],
             [
               "4 signature ferry + exchange",
-              1.213659
+              1.170603
             ],
             [
               "5 collaborative prove + local verify",
-              4554.961322
+              4286.021065
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.304634
+              0.250478
             ],
             [
               "7 smaller-side reveal",
-              1.670988
+              1.61064
             ],
             [
               "8 payout-note keys + WAL",
-              46.028782
+              12.351304
             ]
           ],
-          "total_ms": 4867.551589,
-          "verify_ms": 6.083392
+          "total_ms": 4537.867715,
+          "verify_ms": 4.130819
         },
         {
-          "build_ms": 86.195661,
+          "build_ms": 87.772205,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.222932,
-          "leg_exchange_ms": 1.266274,
-          "open_ms": 3174.425057,
-          "peak_rss_bytes": 1697136640,
+          "compare_onchain_wait_ms": 0.314541,
+          "leg_exchange_ms": 1.1792,
+          "open_ms": 2439.8832540000003,
+          "peak_rss_bytes": 1808797696,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1288.05287,
+          "prove_ms": 1754.393495,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.403963
+              0.508846
             ],
             [
               "2 share inputs + collateral binding",
-              97.963304
+              108.729286
             ],
             [
               "3 three-way compare",
-              27.299047
+              28.603428
             ],
             [
               "4 signature ferry + exchange",
-              1.306669
+              0.715784
             ],
             [
               "5 collaborative prove + local verify",
-              4555.357499999999
+              4286.40206
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.270491
+              0.340444
             ],
             [
               "7 smaller-side reveal",
-              1.5484749999999998
+              1.2979999999999998
             ],
             [
               "8 payout-note keys + WAL",
-              46.038268
+              12.507062
             ]
           ],
-          "total_ms": 4867.001964,
-          "verify_ms": 6.4403999999999995
+          "total_ms": 4539.065026,
+          "verify_ms": 4.1678440000000005
         }
       ],
-      "total_ms": 4939.249721
+      "total_ms": 4602.760192
     },
     {
       "per_party": [
         {
-          "build_ms": 94.408764,
+          "build_ms": 63.422939,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.20426,
-          "leg_exchange_ms": 2.302589,
-          "open_ms": 2972.33366,
-          "peak_rss_bytes": 1719087104,
+          "compare_onchain_wait_ms": 0.282651,
+          "leg_exchange_ms": 1.804552,
+          "open_ms": 3238.176568,
+          "peak_rss_bytes": 1799708672,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1289.1737409999998,
+          "prove_ms": 1590.0413179999998,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              3.246557
+              2.934964
             ],
             [
               "2 share inputs + collateral binding",
-              113.086196
+              51.155092
             ],
             [
               "3 three-way compare",
-              34.223356
+              16.539057999999997
             ],
             [
               "4 signature ferry + exchange",
-              1.274812
+              0.9704
             ],
             [
               "5 collaborative prove + local verify",
-              4361.9241139999995
+              4898.678254
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.26632799999999995
+              0.335246
             ],
             [
               "7 smaller-side reveal",
-              1.592861
+              1.918198
             ],
             [
               "8 payout-note keys + WAL",
-              45.737162999999995
+              1.29362
             ]
           ],
-          "total_ms": 4669.902095,
-          "verify_ms": 5.851300999999999
+          "total_ms": 5074.409704,
+          "verify_ms": 6.815464
         },
         {
-          "build_ms": 95.183101,
+          "build_ms": 64.148518,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.311669,
-          "leg_exchange_ms": 1.359882,
-          "open_ms": 3045.4605699999997,
-          "peak_rss_bytes": 1674207232,
+          "compare_onchain_wait_ms": 0.303359,
+          "leg_exchange_ms": 1.3814369999999998,
+          "open_ms": 3087.300737,
+          "peak_rss_bytes": 1798332416,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1215.63698,
+          "prove_ms": 1739.957853,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.339548
+              0.427943
             ],
             [
               "2 share inputs + collateral binding",
-              113.377687
+              51.731045
             ],
             [
               "3 three-way compare",
-              34.413527
+              16.444754
             ],
             [
               "4 signature ferry + exchange",
-              1.030633
+              0.929783
             ],
             [
               "5 collaborative prove + local verify",
-              4361.6094729999995
+              4898.195100999999
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.357414
+              0.363145
             ],
             [
               "7 smaller-side reveal",
-              2.062533
+              2.21634
             ],
             [
               "8 payout-note keys + WAL",
-              46.095345
+              1.423045
             ]
           ],
-          "total_ms": 4668.315481000001,
-          "verify_ms": 5.130403
+          "total_ms": 5073.633497000001,
+          "verify_ms": 6.5023219999999995
         }
       ],
-      "total_ms": 4737.081429
+      "total_ms": 5165.3695419999995
     },
     {
       "per_party": [
         {
-          "build_ms": 126.94982899999998,
+          "build_ms": 116.610594,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.272369,
-          "leg_exchange_ms": 2.401397,
-          "open_ms": 3118.840214,
-          "peak_rss_bytes": 1660395520,
+          "compare_onchain_wait_ms": 0.313913,
+          "leg_exchange_ms": 1.79948,
+          "open_ms": 3325.3706420000003,
+          "peak_rss_bytes": 1804759040,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1327.201218,
+          "prove_ms": 1852.158828,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              2.612616
+              3.789374
             ],
             [
               "2 share inputs + collateral binding",
-              87.821653
+              97.932359
             ],
             [
               "3 three-way compare",
-              36.270383
+              26.723863
             ],
             [
               "4 signature ferry + exchange",
-              48.019166
+              1.935586
             ],
             [
               "5 collaborative prove + local verify",
-              4580.704328999999
+              5300.716098
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.319013
+              0.376327
             ],
             [
               "7 smaller-side reveal",
-              1.568706
+              2.759128
             ],
             [
               "8 payout-note keys + WAL",
-              47.203412
+              1.50384
             ]
           ],
-          "total_ms": 4919.653373,
-          "verify_ms": 7.514556000000001
+          "total_ms": 5544.738085,
+          "verify_ms": 6.3178849999999995
         },
         {
-          "build_ms": 127.769378,
+          "build_ms": 116.290172,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.25301799999999997,
-          "leg_exchange_ms": 1.575722,
-          "open_ms": 3094.349825,
-          "peak_rss_bytes": 1687711744,
+          "compare_onchain_wait_ms": 0.245231,
+          "leg_exchange_ms": 1.3516750000000002,
+          "open_ms": 3475.94277,
+          "peak_rss_bytes": 1816489984,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1351.645757,
+          "prove_ms": 1699.9490179999998,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.282157
+              0.513999
             ],
             [
               "2 share inputs + collateral binding",
-              88.537171
+              98.891867
             ],
             [
               "3 three-way compare",
-              35.544047
+              26.255185
             ],
             [
               "4 signature ferry + exchange",
-              47.919151
+              2.0182300000000004
             ],
             [
               "5 collaborative prove + local verify",
-              4579.899406
+              5301.187058
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.29527299999999995
+              0.301071
             ],
             [
               "7 smaller-side reveal",
-              2.468526
+              2.100074
             ],
             [
               "8 payout-note keys + WAL",
-              47.648251
+              1.655712
             ]
           ],
-          "total_ms": 4917.943326,
-          "verify_ms": 5.864109999999999
+          "total_ms": 5545.271814999999,
+          "verify_ms": 8.750818
         }
       ],
-      "total_ms": 4990.664662
+      "total_ms": 5646.488338
     },
     {
       "per_party": [
         {
-          "build_ms": 124.945307,
+          "build_ms": 114.805153,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.244351,
-          "leg_exchange_ms": 1.746459,
-          "open_ms": 2976.733981,
-          "peak_rss_bytes": 1673707520,
+          "compare_onchain_wait_ms": 0.296929,
+          "leg_exchange_ms": 1.582776,
+          "open_ms": 2240.088542,
+          "peak_rss_bytes": 1802354688,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1409.453305,
+          "prove_ms": 1204.400505,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              3.3987890000000003
+              3.4973349999999996
             ],
             [
               "2 share inputs + collateral binding",
-              87.24341600000001
+              82.572929
             ],
             [
               "3 three-way compare",
-              29.939701
+              27.213145
             ],
             [
               "4 signature ferry + exchange",
-              1.568861
+              1.347346
             ],
             [
               "5 collaborative prove + local verify",
-              4519.78895
+              3568.4597550000003
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.297347
+              0.34148799999999996
             ],
             [
               "7 smaller-side reveal",
-              1.5743319999999998
+              1.693266
             ],
             [
               "8 payout-note keys + WAL",
-              45.879201
+              1.323242
             ]
           ],
-          "total_ms": 4793.512076,
-          "verify_ms": 4.440974000000001
+          "total_ms": 3789.224949,
+          "verify_ms": 8.91227
         },
         {
-          "build_ms": 125.873391,
+          "build_ms": 115.258508,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.280172,
-          "leg_exchange_ms": 1.174072,
-          "open_ms": 3025.825974,
-          "peak_rss_bytes": 1666707456,
+          "compare_onchain_wait_ms": 0.325745,
+          "leg_exchange_ms": 1.234516,
+          "open_ms": 2169.060538,
+          "peak_rss_bytes": 1817014272,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1359.79654,
+          "prove_ms": 1275.594483,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.33504900000000004
+              0.481343
             ],
             [
               "2 share inputs + collateral binding",
-              87.38246099999999
+              83.27397
             ],
             [
               "3 three-way compare",
-              30.127286
+              27.247674999999997
             ],
             [
               "4 signature ferry + exchange",
-              1.184543
+              0.8934770000000001
             ],
             [
               "5 collaborative prove + local verify",
-              4518.872307
+              3566.287734
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.337142
+              0.38137
             ],
             [
               "7 smaller-side reveal",
-              2.732879
+              3.756352
             ],
             [
               "8 payout-note keys + WAL",
-              46.09224
+              1.345427
             ]
           ],
-          "total_ms": 4794.09364,
-          "verify_ms": 7.171163
+          "total_ms": 3789.195803,
+          "verify_ms": 6.132377
         }
       ],
-      "total_ms": 4871.9775
+      "total_ms": 3887.149842
     },
     {
       "per_party": [
         {
-          "build_ms": 104.107591,
+          "build_ms": 88.049835,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.400033,
-          "leg_exchange_ms": 1.832904,
-          "open_ms": 3202.031551,
-          "peak_rss_bytes": 1670987776,
+          "compare_onchain_wait_ms": 0.27891,
+          "leg_exchange_ms": 1.805182,
+          "open_ms": 3325.0275020000004,
+          "peak_rss_bytes": 1817284608,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1367.974132,
+          "prove_ms": 1801.0032680000002,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              4.8061750000000005
+              3.257476
             ],
             [
               "2 share inputs + collateral binding",
-              83.51707599999999
+              98.216145
             ],
             [
               "3 three-way compare",
-              24.551717
+              23.582571
             ],
             [
               "4 signature ferry + exchange",
-              1.72138
+              1.272952
             ],
             [
               "5 collaborative prove + local verify",
-              4678.6655709999995
+              5220.419094000001
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.437399
+              0.350933
             ],
             [
               "7 smaller-side reveal",
-              1.476762
+              1.614673
             ],
             [
               "8 payout-note keys + WAL",
-              46.916604
+              11.901117
             ]
           ],
-          "total_ms": 4970.299648,
-          "verify_ms": 4.402545
+          "total_ms": 5536.811632,
+          "verify_ms": 6.054321
         },
         {
-          "build_ms": 104.317492,
+          "build_ms": 88.004654,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.23848,
-          "leg_exchange_ms": 1.376802,
-          "open_ms": 3178.5252800000003,
-          "peak_rss_bytes": 1698525184,
+          "compare_onchain_wait_ms": 0.423397,
+          "leg_exchange_ms": 1.490522,
+          "open_ms": 3300.963601,
+          "peak_rss_bytes": 1807712256,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1391.706086,
+          "prove_ms": 1825.789999,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.314786
+              0.482293
             ],
             [
               "2 share inputs + collateral binding",
-              83.88949199999999
+              98.568452
             ],
             [
               "3 three-way compare",
-              24.977165
+              24.0703
             ],
             [
               "4 signature ferry + exchange",
-              0.88689
+              0.698306
             ],
             [
               "5 collaborative prove + local verify",
-              4679.151496
+              5220.160841
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.283788
+              0.485949
             ],
             [
               "7 smaller-side reveal",
-              1.775958
+              1.848562
             ],
             [
               "8 payout-note keys + WAL",
-              46.792572
+              12.086862
             ]
           ],
-          "total_ms": 4970.320727,
-          "verify_ms": 4.406788
+          "total_ms": 5537.110390999999,
+          "verify_ms": 5.169423
         }
       ],
-      "total_ms": 5040.611912
+      "total_ms": 5641.7152909999995
     },
     {
       "per_party": [
         {
-          "build_ms": 88.53886,
+          "build_ms": 97.141144,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.279223,
-          "leg_exchange_ms": 1.477081,
-          "open_ms": 3163.829134,
-          "peak_rss_bytes": 1670406144,
+          "compare_onchain_wait_ms": 0.23108,
+          "leg_exchange_ms": 1.199877,
+          "open_ms": 3661.895213,
+          "peak_rss_bytes": 1819688960,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1273.969608,
+          "prove_ms": 2088.3047220000003,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              2.663524
+              4.867973
             ],
             [
               "2 share inputs + collateral binding",
-              77.78081
+              109.780514
             ],
             [
               "3 three-way compare",
-              31.315312
+              28.220326
             ],
             [
               "4 signature ferry + exchange",
-              1.342279
+              1.268865
             ],
             [
               "5 collaborative prove + local verify",
-              4531.646727
+              5853.324804
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.32509200000000005
+              0.27749799999999997
             ],
             [
               "7 smaller-side reveal",
-              2.458325
+              1.74288
             ],
             [
               "8 payout-note keys + WAL",
-              1.2872599999999998
+              2.322226
             ]
           ],
-          "total_ms": 4749.970789,
-          "verify_ms": 5.1225760000000005
+          "total_ms": 6104.414074,
+          "verify_ms": 5.775306
         },
         {
-          "build_ms": 88.612793,
+          "build_ms": 97.90176,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.240007,
-          "leg_exchange_ms": 1.07016,
-          "open_ms": 3113.912842,
-          "peak_rss_bytes": 1694232576,
+          "compare_onchain_wait_ms": 0.251849,
+          "leg_exchange_ms": 0.874482,
+          "open_ms": 3587.7234470000003,
+          "peak_rss_bytes": 1800609792,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1324.2608300000002,
+          "prove_ms": 2162.232623,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.458397
+              0.459551
             ],
             [
               "2 share inputs + collateral binding",
-              78.397856
+              110.965257
             ],
             [
               "3 three-way compare",
-              30.597277
+              27.601955
             ],
             [
               "4 signature ferry + exchange",
-              1.380743
+              1.066237
             ],
             [
               "5 collaborative prove + local verify",
-              4533.10787
+              5854.156769
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.291285
+              0.267266
             ],
             [
               "7 smaller-side reveal",
-              1.1990880000000002
+              1.218277
             ],
             [
               "8 payout-note keys + WAL",
-              1.16533
+              2.400034
             ]
           ],
-          "total_ms": 4749.57192,
-          "verify_ms": 6.152467
+          "total_ms": 6104.2194150000005,
+          "verify_ms": 6.1447769999999995
         }
       ],
-      "total_ms": 4822.706361
+      "total_ms": 6170.462453
     },
     {
       "per_party": [
         {
-          "build_ms": 86.724228,
+          "build_ms": 46.99418,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.32037,
-          "leg_exchange_ms": 1.487517,
-          "open_ms": 3175.866674,
-          "peak_rss_bytes": 1683042304,
+          "compare_onchain_wait_ms": 0.34002499999999997,
+          "leg_exchange_ms": 2.010602,
+          "open_ms": 3459.823773,
+          "peak_rss_bytes": 1802252288,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1436.261297,
+          "prove_ms": 1044.385582,
           "role": "trader-a",
           "steps": [
             [
               "1 preamble fingerprint",
-              2.34603
+              3.37852
             ],
             [
               "2 share inputs + collateral binding",
-              78.44586600000001
+              64.979147
             ],
             [
               "3 three-way compare",
-              35.825978
+              14.088636
             ],
             [
               "4 signature ferry + exchange",
-              1.514361
+              0.713559
             ],
             [
               "5 collaborative prove + local verify",
-              4704.7996410000005
+              4559.331392
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.374184
+              0.399697
             ],
             [
               "7 smaller-side reveal",
-              3.5622990000000003
+              1.716608
             ],
             [
               "8 payout-note keys + WAL",
-              46.587568000000005
+              11.999194
             ]
           ],
-          "total_ms": 4965.750694,
-          "verify_ms": 5.669833
+          "total_ms": 4758.043014,
+          "verify_ms": 7.907311
         },
         {
-          "build_ms": 87.626177,
+          "build_ms": 46.935794,
           "cmp": 1,
-          "compare_onchain_wait_ms": 0.211006,
-          "leg_exchange_ms": 1.343006,
-          "open_ms": 3243.100433,
-          "peak_rss_bytes": 1680486400,
+          "compare_onchain_wait_ms": 0.353064,
+          "leg_exchange_ms": 1.5037239999999998,
+          "open_ms": 3400.523503,
+          "peak_rss_bytes": 1799741440,
           "proof_size_bytes_compressed": 769,
-          "prove_ms": 1369.051337,
+          "prove_ms": 1104.522114,
           "role": "trader-b",
           "steps": [
             [
               "1 preamble fingerprint",
-              0.331605
+              0.35019100000000003
             ],
             [
               "2 share inputs + collateral binding",
-              78.621201
+              65.555817
             ],
             [
               "3 three-way compare",
-              35.550525
+              14.224395
             ],
             [
               "4 signature ferry + exchange",
-              1.303698
+              0.37372
             ],
             [
               "5 collaborative prove + local verify",
-              4707.345015999999
+              4558.8635110000005
             ],
             [
               "6 on-chain compare anchor (host wait)",
-              0.252546
+              0.414909
             ],
             [
               "7 smaller-side reveal",
-              1.563686
+              1.89467
             ],
             [
               "8 payout-note keys + WAL",
-              46.283328999999995
+              12.39815
             ]
           ],
-          "total_ms": 4967.91802,
-          "verify_ms": 6.564223999999999
+          "total_ms": 4757.723619,
+          "verify_ms": 6.6858580000000005
         }
       ],
-      "total_ms": 5043.404078
+      "total_ms": 4873.690918
     }
   ],
   "proof_size_bytes": {
     "compressed": 769,
     "uncompressed": 1185
   },
-  "public_signals": 5,
+  "public_signals": 6,
   "vk_size_bytes_compressed": 938
 }

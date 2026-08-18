@@ -103,7 +103,8 @@ pub struct SettleCmpWitness {
     pub r_a: [u8; 32],
     pub b: u64,
     pub r_b: [u8; 32],
-    pub price: u64,
+    pub price_a: u64,
+    pub price_b: u64,
     pub a_is_seller: bool,
 }
 
@@ -120,7 +121,7 @@ impl SettleCmpWitness {
     /// A's collateral commitment `P2(needed(a, s_a), r_a)`.
     pub fn locked_a(&self) -> Fr {
         poseidon_commit(
-            needed_collateral(self.a, self.price, self.a_is_seller),
+            needed_collateral(self.a, self.price_a, self.a_is_seller),
             &self.r_a,
         )
     }
@@ -128,14 +129,14 @@ impl SettleCmpWitness {
     /// B's collateral commitment — B is on the OPPOSITE side.
     pub fn locked_b(&self) -> Fr {
         poseidon_commit(
-            needed_collateral(self.b, self.price, !self.a_is_seller),
+            needed_collateral(self.b, self.price_b, !self.a_is_seller),
             &self.r_b,
         )
     }
 }
 
 /// Output of [`prove_settle_cmp`]. `public_json` is
-/// `[cmp, locked_a, locked_b, price, a_is_seller]` in decimal.
+/// `[cmp, locked_a, locked_b, price_a, price_b, a_is_seller]` in decimal.
 pub struct SettleCmpProof {
     pub cmp: i8,
     pub locked_a_hex: String,
@@ -158,7 +159,8 @@ pub fn prove_settle_cmp(
         "cmp": fr_to_decimal_string(&settle_cmp_fr(cmp)),
         "locked_a": fr_to_decimal_string(&locked_a),
         "locked_b": fr_to_decimal_string(&locked_b),
-        "price": w.price.to_string(),
+        "price_a": w.price_a.to_string(),
+        "price_b": w.price_b.to_string(),
         "a_is_seller": if w.a_is_seller { "1" } else { "0" },
         "q_a": w.a.to_string(),
         "r_a": fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&w.r_a)),

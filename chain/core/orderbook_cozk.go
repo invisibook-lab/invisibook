@@ -72,22 +72,27 @@ func compareMessage(prefix string, req *CompareRequest) []byte {
 // CoZkCompareMessage is the signed message for SubmitCompareCoZk. Must stay
 // in lockstep with the Rust client.
 func CoZkCompareMessage(req *CompareRequest) []byte {
-	return compareMessage("invisibook-cozk-compare-v2", req)
+	return compareMessage("invisibook-cozk-compare-v3", req)
 }
 
 // CoZk2pCompareMessage is the signed message for SubmitCompareCoZk2p.
 func CoZk2pCompareMessage(req *CompareRequest) []byte {
-	return compareMessage("invisibook-cozk2p-compare-v2", req)
+	return compareMessage("invisibook-cozk2p-compare-v3", req)
 }
 
-// makerTakerOrder orders a matched pair deterministically: the maker is the
-// order with the lower block height; on a tie, the lexicographically smaller
-// order ID. Both orders must be non-nil.
+// makerTakerOrder orders a matched pair deterministically by transaction
+// time: block height, intra-block index, then order id.
 func makerTakerOrder(x, y *Order) (*Order, *Order) {
 	if x.BlockHeight < y.BlockHeight {
 		return x, y
 	}
 	if y.BlockHeight < x.BlockHeight {
+		return y, x
+	}
+	if x.IntraBlockIndex < y.IntraBlockIndex {
+		return x, y
+	}
+	if y.IntraBlockIndex < x.IntraBlockIndex {
 		return y, x
 	}
 	if x.ID <= y.ID {
@@ -96,21 +101,20 @@ func makerTakerOrder(x, y *Order) (*Order, *Order) {
 	return y, x
 }
 
-// executionPrice returns the price a matched pair settles at: the maker's
-// price (earlier block height); on the same height, the lower of the two
-// (favorable to the buyer). Both orders must have a non-nil price.
+// executionPrice returns the immutable execution price persisted when the
+// pair matched. The fallback is retained for legacy equal-price rows.
 func executionPrice(x, y *Order) uint64 {
-	if x.BlockHeight < y.BlockHeight {
-		return x.Price.Uint64()
+	if x.ExecutionPrice != nil && y.ExecutionPrice != nil && x.ExecutionPrice.Cmp(y.ExecutionPrice) == 0 {
+		return x.ExecutionPrice.Uint64()
 	}
-	if y.BlockHeight < x.BlockHeight {
-		return y.Price.Uint64()
+	maker, taker := makerTakerOrder(x, y)
+	if maker.Price != nil {
+		return maker.Price.Uint64()
 	}
-	p, q := x.Price.Uint64(), y.Price.Uint64()
-	if p < q {
-		return p
+	if taker.Price != nil {
+		return taker.Price.Uint64()
 	}
-	return q
+	return 0
 }
 
 // cmpToFrDecimal encodes the three-way comparison result as the decimal
@@ -159,10 +163,10 @@ func sideSignal(t TradeType) string {
 	return "0"
 }
 
-// buildCompareSignals lays out settle_cozk.circom's 5 public signals
-// (locked-only model): [cmp, locked_a, locked_b, price, a_is_seller].
-// The locked commitments come from the on-chain order rows; price is the
-// pair's execution price; a_is_seller reflects order A's side.
+// buildCompareSignals lays out settle_cozk.circom's 6 public signals:
+// [cmp, locked_a, locked_b, collateral_price_a, collateral_price_b,
+// a_is_seller]. Each public order price opens its own collateral; execution
+// price is deliberately not part of the quantity comparison.
 func buildCompareSignals(req *CompareRequest, orderA, orderB *Order) ([]string, error) {
 	cmpDec, err := cmpToFrDecimal(req.Cmp)
 	if err != nil {
@@ -176,8 +180,8 @@ func buildCompareSignals(req *CompareRequest, orderA, orderB *Order) ([]string, 
 	if err != nil {
 		return nil, fmt.Errorf("invalid order B collateral commitment: %w", err)
 	}
-	price := executionPrice(orderA, orderB)
-	return []string{cmpDec, lockedADec, lockedBDec, fmt.Sprintf("%d", price),
+	priceA, priceB := collateralPrice(orderA), collateralPrice(orderB)
+	return []string{cmpDec, lockedADec, lockedBDec, priceA.String(), priceB.String(),
 		sideSignal(orderA.Type)}, nil
 }
 
@@ -212,7 +216,8 @@ func verifyComparePairSignatures(req *CompareRequest, orderA, orderB *Order, msg
 
 // loadMatchedPair loads the pair (A, B) and enforces every precondition of
 // the compare phase: both orders exist, are Matched with each other on
-// opposite sides, order A is the maker, prices are in range and equal.
+// opposite sides, order A is the maker, and the persisted execution price is
+// a valid crossing price.
 // Returns the orders plus the execution price.
 func (ot *OrderBook) loadMatchedPair(orderAID, orderBID OrderID) (*Order, *Order, uint64, error) {
 	orderA, err := ot.GetOrder(orderAID)
@@ -242,20 +247,19 @@ func (ot *OrderBook) loadMatchedPair(orderAID, orderBID OrderID) (*Order, *Order
 		return nil, nil, 0, fmt.Errorf("order_a %s must be the maker of the pair", orderAID)
 	}
 
-	// Defense in depth against silent truncation in executionPrice: SendOrder
-	// rejects out-of-range prices at ingress, but rows written before that
-	// check existed would still reach the circuits as a different number.
+	// Defense in depth against malformed legacy rows and silent truncation.
 	for _, ord := range []*Order{orderA, orderB} {
-		if err := validateOrderPrice(ord.Price); err != nil {
+		if err := validateOrderTerms(ord.Kind, ord.Price, ord.ProtectionPrice); err != nil {
 			return nil, nil, 0, fmt.Errorf("order %s: %w", ord.ID, err)
 		}
 	}
-
-	// Equal-price requirement: collateral was locked at the order's own
-	// price, and the settle circuits equate it with the execution price
-	// with strict equality (no price-improvement change output).
-	if orderA.Price == nil || orderB.Price == nil || orderA.Price.Cmp(orderB.Price) != 0 {
-		return nil, nil, 0, fmt.Errorf("co-zk settlement requires equal order prices")
+	if !ordersCross(orderA, orderB) {
+		return nil, nil, 0, fmt.Errorf("matched orders do not cross")
+	}
+	if orderA.ExecutionPrice == nil || orderB.ExecutionPrice == nil ||
+		orderA.ExecutionPrice.Cmp(orderB.ExecutionPrice) != 0 ||
+		!orderA.ExecutionPrice.IsUint64() || orderA.ExecutionPrice.Sign() <= 0 {
+		return nil, nil, 0, fmt.Errorf("matched pair has no valid common execution price")
 	}
 
 	return orderA, orderB, executionPrice(orderA, orderB), nil
@@ -287,7 +291,7 @@ func (ot *OrderBook) applyCompareResult(ctx *context.WriteContext, req *CompareR
 }
 
 // SubmitCompareCoZk records a comparison proven with the jointly generated
-// Groth16 π_cmp (settle_cozk circuit, 5 publics).
+// Groth16 π_cmp (settle_cozk circuit, 6 publics).
 func (ot *OrderBook) SubmitCompareCoZk(ctx *context.WriteContext) error {
 	ctx.SetLei(100)
 
@@ -319,27 +323,31 @@ func (ot *OrderBook) SubmitCompareCoZk(ctx *context.WriteContext) error {
 // ────────────────────── Settle submissions (π_A / π_B) ──────────────────────
 
 // SettleSmallRequest is the fully filled side's own settlement update: its
-// entire collateral transfers to the counterparty as the pool note
-// `CmNoteOut` (whose opening the counterparty chose and already persisted).
+// collateral is split between the counterparty's pool note `CmNoteOut`
+// (whose opening the counterparty chose and already persisted) and the
+// owner's price-improvement `CmRefundOut`.
 // Also used by BOTH sides when cmp == 0.
 type SettleSmallRequest struct {
 	OrderID      OrderID `json:"order_id"       validate:"required"`
 	MatchOrderID OrderID `json:"match_order_id" validate:"required"`
 	CmNoteOut    string  `json:"cm_note_out"    validate:"required,len=64"`
+	CmRefundOut  string  `json:"cm_refund_out"  validate:"required,len=64"`
 	// Owner's ed25519 signature over settleSmallSigMessage (the order's
 	// pubkey authenticates its settlement update — paper §V-B).
 	Signature string `json:"signature" validate:"required,len=128"`
 	ZkProof   string `json:"zk_proof"  validate:"required"`
 }
 
-// SettleLargeRequest is the partially filled side's own update: pays the
-// fill as `CmNoteOut` and relists its residual collateral under the fresh
-// commitment `CmLockedResidual` (locked-only model: no quantity residual).
+// SettleLargeRequest is the partially filled side's own update: pays the fill
+// as `CmNoteOut`, returns price improvement as `CmRefundOut`, and relists its
+// residual collateral under the fresh commitment `CmLockedResidual`
+// (locked-only model: no quantity residual).
 type SettleLargeRequest struct {
 	OrderID          OrderID `json:"order_id"           validate:"required"`
 	MatchOrderID     OrderID `json:"match_order_id"     validate:"required"`
 	CmLockedResidual string  `json:"cm_locked_residual" validate:"required,len=64"`
 	CmNoteOut        string  `json:"cm_note_out"        validate:"required,len=64"`
+	CmRefundOut      string  `json:"cm_refund_out"      validate:"required,len=64"`
 	Signature        string  `json:"signature"          validate:"required,len=128"`
 	ZkProof          string  `json:"zk_proof"           validate:"required"`
 }
@@ -364,15 +372,15 @@ func settleSigMessage(domain string, fields ...string) []byte {
 // SettleSmallSigMessage is the owner-signed message for SettleSmall.
 // Lockstep with the Rust client.
 func SettleSmallSigMessage(req *SettleSmallRequest) []byte {
-	return settleSigMessage("invisibook-settle-small-v1",
-		string(req.OrderID), string(req.MatchOrderID), req.CmNoteOut)
+	return settleSigMessage("invisibook-settle-small-v2",
+		string(req.OrderID), string(req.MatchOrderID), req.CmNoteOut, req.CmRefundOut)
 }
 
 // SettleLargeSigMessage is the owner-signed message for SettleLarge.
 func SettleLargeSigMessage(req *SettleLargeRequest) []byte {
-	return settleSigMessage("invisibook-settle-large-v1",
+	return settleSigMessage("invisibook-settle-large-v2",
 		string(req.OrderID), string(req.MatchOrderID),
-		req.CmLockedResidual, req.CmNoteOut)
+		req.CmLockedResidual, req.CmNoteOut, req.CmRefundOut)
 }
 
 // settleSmallBind computes the bind public input welding π_A to this exact
@@ -386,6 +394,7 @@ func settleSmallBind(chainID uint64, req *SettleSmallRequest) *big.Int {
 		[]byte(req.OrderID),
 		[]byte(req.MatchOrderID),
 		[]byte(req.CmNoteOut),
+		[]byte(req.CmRefundOut),
 	)
 }
 
@@ -401,6 +410,7 @@ func settleLargeBind(chainID uint64, req *SettleLargeRequest) *big.Int {
 		[]byte(req.MatchOrderID),
 		[]byte(req.CmLockedResidual),
 		[]byte(req.CmNoteOut),
+		[]byte(req.CmRefundOut),
 	)
 }
 
@@ -424,15 +434,9 @@ func (ot *OrderBook) loadSettlingOrder(orderID, matchID OrderID) (*Order, *Order
 		return nil, nil, 0, fmt.Errorf("orders %s and %s are not matched with each other", mine.ID, match.ID)
 	}
 
-	// Equal-price requirement, re-checked where it is CONSUMED (the matcher
-	// and loadMatchedPair enforce it too). In the locked-only model the
-	// collateral commitment `P2(needed(q, side), r)` pins the hidden
-	// quantity ONLY at the price the collateral was locked at, and
-	// executionPrice below feeds the settle circuits — so unequal prices
-	// would break soundness, not just economics (docs/paper_deviations.md
-	// D17).
-	if mine.Price == nil || match.Price == nil || mine.Price.Cmp(match.Price) != 0 {
-		return nil, nil, 0, fmt.Errorf("co-zk settlement requires equal order prices")
+	if !ordersCross(mine, match) || mine.ExecutionPrice == nil || match.ExecutionPrice == nil ||
+		mine.ExecutionPrice.Cmp(match.ExecutionPrice) != 0 {
+		return nil, nil, 0, fmt.Errorf("pair has invalid crossing/execution-price state")
 	}
 
 	res, mineIsA, err := ot.GetCompareResult(orderID, matchID)
@@ -449,13 +453,14 @@ func (ot *OrderBook) loadSettlingOrder(orderID, matchID OrderID) (*Order, *Order
 // settlePublicPrefix builds the leading publics shared by both settle
 // circuits: my single locked collateral commitment, price, side, all as
 // decimal strings (locked-only model — no quantity commitment, no pad).
-func (ot *OrderBook) settlePublicPrefix(mine, match *Order) (locked string, price uint64, side string, err error) {
+func (ot *OrderBook) settlePublicPrefix(mine, match *Order) (locked string, ownPrice, execPrice uint64, side string, err error) {
 	locked, err = HexToDecimal(mine.LockedCommitment)
 	if err != nil {
-		return "", 0, "", fmt.Errorf("invalid locked commitment: %w", err)
+		return "", 0, 0, "", fmt.Errorf("invalid locked commitment: %w", err)
 	}
-	price = executionPrice(mine, match)
-	return locked, price, sideSignal(mine.Type), nil
+	ownPrice = collateralPrice(mine).Uint64()
+	execPrice = executionPrice(mine, match)
+	return locked, ownPrice, execPrice, sideSignal(mine.Type), nil
 }
 
 // verifySmallLeg checks the fully filled side's owner signature and π_A
@@ -463,11 +468,12 @@ func (ot *OrderBook) settlePublicPrefix(mine, match *Order) (locked string, pric
 // transferring all of it). Pure verification — no state change; returns the
 // payout note commitment to mint to the counterparty. Shared by SettleSmall
 // and SettlePair. `mine` and `match` must be a matched Settling pair.
-func (ot *OrderBook) verifySmallLeg(mine, match *Order, cmNoteOut, sig, proof string) (*big.Int, error) {
+func (ot *OrderBook) verifySmallLeg(mine, match *Order, cmNoteOut, cmRefundOut, sig, proof string) ([]*big.Int, error) {
 	req := &SettleSmallRequest{
 		OrderID:      mine.ID,
 		MatchOrderID: match.ID,
 		CmNoteOut:    cmNoteOut,
+		CmRefundOut:  cmRefundOut,
 		Signature:    sig,
 		ZkProof:      proof,
 	}
@@ -475,7 +481,7 @@ func (ot *OrderBook) verifySmallLeg(mine, match *Order, cmNoteOut, sig, proof st
 		return nil, fmt.Errorf("owner signature: %w", err)
 	}
 	// Publics: [locked, price, side, pay_asset, cm_note_out, bind].
-	locked, price, side, err := ot.settlePublicPrefix(mine, match)
+	locked, ownPrice, execPrice, side, err := ot.settlePublicPrefix(mine, match)
 	if err != nil {
 		return nil, err
 	}
@@ -487,13 +493,25 @@ func (ot *OrderBook) verifySmallLeg(mine, match *Order, cmNoteOut, sig, proof st
 	if err != nil {
 		return nil, fmt.Errorf("invalid cm_note_out: %w", err)
 	}
+	refundDec, err := HexToDecimal(cmRefundOut)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cm_refund_out: %w", err)
+	}
 	bind := settleSmallBind(ot.chainID, req)
-	signals := []string{locked, fmt.Sprintf("%d", price), side,
-		payAsset.String(), noteDec, bind.String()}
+	signals := []string{locked, fmt.Sprintf("%d", ownPrice), fmt.Sprintf("%d", execPrice), side,
+		payAsset.String(), noteDec, refundDec, bind.String()}
 	if err := VerifyGroth16(ot.settleSmallVK, proof, signals); err != nil {
 		return nil, fmt.Errorf("settle_small proof verification failed: %w", err)
 	}
-	return ParseFrHex(cmNoteOut)
+	note, err := ParseFrHex(cmNoteOut)
+	if err != nil {
+		return nil, err
+	}
+	refund, err := ParseFrHex(cmRefundOut)
+	if err != nil {
+		return nil, err
+	}
+	return []*big.Int{note, refund}, nil
 }
 
 // verifyLargeLeg checks the partially filled side's owner signature and π_B
@@ -503,13 +521,14 @@ func (ot *OrderBook) verifySmallLeg(mine, match *Order, cmNoteOut, sig, proof st
 // note commitment to mint to the counterparty. Shared by SettleLarge and
 // SettlePair.
 func (ot *OrderBook) verifyLargeLeg(
-	mine, match *Order, cmLockedResidual, cmNoteOut, sig, proof string,
-) (*big.Int, error) {
+	mine, match *Order, cmLockedResidual, cmNoteOut, cmRefundOut, sig, proof string,
+) ([]*big.Int, error) {
 	req := &SettleLargeRequest{
 		OrderID:          mine.ID,
 		MatchOrderID:     match.ID,
 		CmLockedResidual: cmLockedResidual,
 		CmNoteOut:        cmNoteOut,
+		CmRefundOut:      cmRefundOut,
 		Signature:        sig,
 		ZkProof:          proof,
 	}
@@ -518,7 +537,7 @@ func (ot *OrderBook) verifyLargeLeg(
 	}
 	// Publics: [locked, locked_ctr, price, side, cm_locked_residual,
 	// pay_asset, cm_note_out, bind].
-	locked, price, side, err := ot.settlePublicPrefix(mine, match)
+	locked, ownPrice, execPrice, side, err := ot.settlePublicPrefix(mine, match)
 	if err != nil {
 		return nil, err
 	}
@@ -545,13 +564,26 @@ func (ot *OrderBook) verifyLargeLeg(
 	if err != nil {
 		return nil, err
 	}
+	refundDec, err := toDec(cmRefundOut, "cm_refund_out")
+	if err != nil {
+		return nil, err
+	}
 	bind := settleLargeBind(ot.chainID, req)
-	signals := []string{locked, lockedCtr, fmt.Sprintf("%d", price), side,
-		resLockedDec, payAsset.String(), noteDec, bind.String()}
+	signals := []string{locked, lockedCtr, fmt.Sprintf("%d", ownPrice),
+		collateralPrice(match).String(), fmt.Sprintf("%d", execPrice), side,
+		resLockedDec, payAsset.String(), noteDec, refundDec, bind.String()}
 	if err := VerifyGroth16(ot.settleLargeVK, proof, signals); err != nil {
 		return nil, fmt.Errorf("settle_large proof verification failed: %w", err)
 	}
-	return ParseFrHex(cmNoteOut)
+	note, err := ParseFrHex(cmNoteOut)
+	if err != nil {
+		return nil, err
+	}
+	refund, err := ParseFrHex(cmRefundOut)
+	if err != nil {
+		return nil, err
+	}
+	return []*big.Int{note, refund}, nil
 }
 
 // ────────────────────── Writing: SettlePair (atomic) ──────────────────────
@@ -563,6 +595,7 @@ func (ot *OrderBook) verifyLargeLeg(
 // reuses SettleSmall/SettleLarge's per-leg messages.
 type SettlePairLeg struct {
 	CmNoteOut        string `json:"cm_note_out" validate:"required,len=64"`
+	CmRefundOut      string `json:"cm_refund_out" validate:"required,len=64"`
 	Signature        string `json:"signature"   validate:"required,len=128"`
 	ZkProof          string `json:"zk_proof"    validate:"required"`
 	CmLockedResidual string `json:"cm_locked_residual,omitempty"`
@@ -584,15 +617,17 @@ type SettlePairRequest struct {
 // SettlePairEvent reports where each side's incoming payout note landed:
 // A's incoming note is the one B minted, and vice versa.
 type SettlePairEvent struct {
-	EventType  string  `json:"event_type"` // "settle_pair"
-	OrderA     OrderID `json:"order_a"`
-	OrderB     OrderID `json:"order_b"`
-	ALeafIndex uint64  `json:"a_leaf_index"` // A's incoming note (B minted it)
-	BLeafIndex uint64  `json:"b_leaf_index"` // B's incoming note (A minted it)
-	RelistedA  *Order  `json:"relisted_a,omitempty"`
-	RelistedB  *Order  `json:"relisted_b,omitempty"`
-	RematchedA *Order  `json:"rematched_a,omitempty"`
-	RematchedB *Order  `json:"rematched_b,omitempty"`
+	EventType        string  `json:"event_type"` // "settle_pair"
+	OrderA           OrderID `json:"order_a"`
+	OrderB           OrderID `json:"order_b"`
+	ALeafIndex       uint64  `json:"a_leaf_index"` // A's incoming note (B minted it)
+	BLeafIndex       uint64  `json:"b_leaf_index"` // B's incoming note (A minted it)
+	ARefundLeafIndex uint64  `json:"a_refund_leaf_index"`
+	BRefundLeafIndex uint64  `json:"b_refund_leaf_index"`
+	RelistedA        *Order  `json:"relisted_a,omitempty"`
+	RelistedB        *Order  `json:"relisted_b,omitempty"`
+	RematchedA       *Order  `json:"rematched_a,omitempty"`
+	RematchedB       *Order  `json:"rematched_b,omitempty"`
 }
 
 // loadSettlingPair loads a matched Settling pair (A canonical) and its
@@ -614,19 +649,19 @@ func (ot *OrderBook) loadSettlingPair(aID, bID OrderID) (*Order, *Order, int, er
 // verifyPairLeg verifies one leg with the right circuit for its role and
 // returns the payout note commitment to mint. `isLarge` selects π_B (the
 // residual collateral commitment required) vs π_A (it must be empty).
-func (ot *OrderBook) verifyPairLeg(mine, match *Order, isLarge bool, leg SettlePairLeg) (*big.Int, error) {
+func (ot *OrderBook) verifyPairLeg(mine, match *Order, isLarge bool, leg SettlePairLeg) ([]*big.Int, error) {
 	if isLarge {
 		if len(leg.CmLockedResidual) != 64 {
 			return nil, fmt.Errorf("larger leg %s needs the residual collateral commitment", mine.ID)
 		}
 		return ot.verifyLargeLeg(
-			mine, match, leg.CmLockedResidual, leg.CmNoteOut, leg.Signature, leg.ZkProof)
+			mine, match, leg.CmLockedResidual, leg.CmNoteOut, leg.CmRefundOut, leg.Signature, leg.ZkProof)
 	}
 	// A fully filled leg transfers its whole collateral — no residual.
 	if leg.CmLockedResidual != "" {
 		return nil, fmt.Errorf("fully filled leg %s must not carry a residual commitment", mine.ID)
 	}
-	return ot.verifySmallLeg(mine, match, leg.CmNoteOut, leg.Signature, leg.ZkProof)
+	return ot.verifySmallLeg(mine, match, leg.CmNoteOut, leg.CmRefundOut, leg.Signature, leg.ZkProof)
 }
 
 // settlePairFailpoint, when non-nil, runs between the payout mint and the
@@ -712,6 +747,8 @@ func (ot *OrderBook) executeSettlePair(req *SettlePairRequest, height uint64) (*
 		OrderBID:       string(orderB.ID),
 		CmNoteA:        req.A.CmNoteOut,
 		CmNoteB:        req.B.CmNoteOut,
+		CmRefundA:      req.A.CmRefundOut,
+		CmRefundB:      req.B.CmRefundOut,
 		ALarge:         aIsLarge,
 		BLarge:         bIsLarge,
 		CmLockedResidA: req.A.CmLockedResidual,
@@ -726,7 +763,7 @@ func (ot *OrderBook) executeSettlePair(req *SettlePairRequest, height uint64) (*
 	// Mint BOTH payout notes AT MOST ONCE (accounts.db transaction).
 	// cmNoteA is what A mints to B (B's incoming note) and vice versa.
 	indices, already, err := ot.Account.MintSettlementNotes(
-		id, req.A.CmNoteOut, req.B.CmNoteOut, height,
+		id, req.A.CmNoteOut, req.B.CmNoteOut, req.A.CmRefundOut, req.B.CmRefundOut, height,
 		fmt.Sprintf("settle-pair:%s", req.OrderAID[:8]))
 	if err != nil {
 		return nil, fmt.Errorf("minting payout notes: %w", err)
@@ -748,11 +785,13 @@ func (ot *OrderBook) executeSettlePair(req *SettlePairRequest, height uint64) (*
 	}
 
 	evt := &SettlePairEvent{
-		EventType:  "settle_pair",
-		OrderA:     orderA.ID,
-		OrderB:     orderB.ID,
-		ALeafIndex: indices[1], // A's incoming note = the one B minted
-		BLeafIndex: indices[0], // B's incoming note = the one A minted
+		EventType:        "settle_pair",
+		OrderA:           orderA.ID,
+		OrderB:           orderB.ID,
+		ALeafIndex:       indices[1], // A's incoming note = the one B minted
+		BLeafIndex:       indices[0], // B's incoming note = the one A minted
+		ARefundLeafIndex: indices[2],
+		BRefundLeafIndex: indices[3],
 	}
 	ot.postSettlementCleanup(journal, evt)
 	return evt, nil
@@ -773,11 +812,12 @@ func (ot *OrderBook) finishSettlementOrders(j *SettlementJournalScheme) error {
 					Updates(map[string]any{
 						"locked_commitment": cmLockedRes,
 						"match_order":       "",
+						"execution_price":   "",
 						"status":            int(Pending),
 					}).Error
 			}
 			return tx.Model(&OrderScheme{}).Where("id = ?", orderID).
-				Update("status", int(Done)).Error
+				Updates(map[string]any{"status": int(Done), "match_order": "", "execution_price": ""}).Error
 		}
 		if err := applyLeg(j.OrderAID, j.ALarge, j.CmLockedResidA); err != nil {
 			return fmt.Errorf("side A order update: %w", err)

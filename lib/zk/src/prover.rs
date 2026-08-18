@@ -77,7 +77,7 @@ mod tests {
     #[test]
     fn settle_cmp_proof_round_trips_through_rapidsnark() {
         // A sells 80, B buys 60 at price 3 → cmp = 1.
-        // Publics: [cmp, locked_a, locked_b, price, a_is_seller].
+        // Publics: [cmp, locked_a, locked_b, price_a, price_b, a_is_seller].
         let setup = dev_setup_snarkjs("settle_cozk").expect("snarkjs setup");
         let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir).expect("circuit handle");
         let witness = SettleCmpWitness {
@@ -85,7 +85,8 @@ mod tests {
             r_a: [0xA1u8; 32],
             b: 60,
             r_b: [0xB1u8; 32],
-            price: 3,
+            price_a: 3,
+            price_b: 4,
             a_is_seller: true,
         };
         let sp =
@@ -93,7 +94,7 @@ mod tests {
 
         assert_eq!(sp.proof_json["protocol"], "groth16");
         let public = sp.public_json.as_array().expect("public is array");
-        assert_eq!(public.len(), 5);
+        assert_eq!(public.len(), 6);
         assert_eq!(sp.cmp, 1);
         // A (seller) locks q = 80; B (buyer) locks q·price = 180.
         assert_eq!(
@@ -102,7 +103,7 @@ mod tests {
         );
         assert_eq!(
             sp.locked_b_hex,
-            fr_to_hex(&poseidon_commit(180, &[0xB1u8; 32]))
+            fr_to_hex(&poseidon_commit(240, &[0xB1u8; 32]))
         );
     }
 }

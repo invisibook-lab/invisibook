@@ -73,9 +73,13 @@ fn render_rows(
                     OrderStatus::Frozen => "status-frozen",
                     OrderStatus::Settling => "status-settling",
                 };
-                let price_str = match order.price {
-                    Some(p) => p.to_string(),
-                    None => "-".into(),
+                let price_str = match order.kind {
+                    OrderKind::Limit => order.price.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+                    OrderKind::Market => match (order.trade_type, order.protection_price) {
+                        (TradeType::Buy, Some(p)) => format!("MKT ≤ {p}"),
+                        (TradeType::Sell, Some(p)) => format!("MKT ≥ {p}"),
+                        (_, None) => "MKT".into(),
+                    },
                 };
                 let row_class = if is_selected { "order-row selected" } else { "order-row" };
 
@@ -111,6 +115,10 @@ fn render_rows(
                 let pair_str = order.subject.to_string();
                 let status_str = order.status.to_string();
                 let price_str2 = price_str.clone();
+                let execution_str = order
+                    .execution_price
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".into());
 
                 rsx! {
                     div {
@@ -146,6 +154,9 @@ fn render_rows(
 
                             span { class: "detail-label", "Price" }
                             span { class: "detail-value", "{price_str2}" }
+
+                            span { class: "detail-label", "Execution" }
+                            span { class: "detail-value", "{execution_str}" }
 
                             span { class: "detail-label", "Locked" }
                             span { class: "detail-value", "{full_amount}" }

@@ -1,6 +1,7 @@
 # Chain Design
 
-> **Status:** Current (2026-08-17, locked-only model). For every place
+> **Status:** Current (2026-08-18, crossing prices + native fees +
+> pre-open checkpoints). For every place
 > this design differs from the paper, see
 > [paper_deviations.md](paper_deviations.md).
 
@@ -39,23 +40,24 @@ Design invariants:
    notes: only commitments and nullifiers appear on chain.
 2. **Full collateral at admission.** `SendOrder` verifies the
    `send_order` proof, which shows the spent notes cover
-   `collateral + fee + change`. The book never holds an
+   collateral-asset conservation and native-`invis` fee conservation
+   independently. The book never holds an
    uncollateralized order.
-3. **Deterministic order ids.** `order_id = SHA-256(nf_0 ‖ nf_1)` over
-   the two input nullifiers; the chain recomputes and rejects mismatches.
-4. **Matching is public, on-chain, and EQUAL-PRICE only.** Prices are
-   plaintext, so `matchOrder` runs a deterministic rule with no
-   cryptography: it pairs only orders with exactly equal prices (the
-   settle circuits require the execution price to equal the collateral
-   price, and a Matched pair has no cancel path), then block height →
-   fee → intra-block index. Crossing but unequal orders stay Pending.
+3. **Deterministic order ids.** `order_id = SHA-256(coll_nf_0 ‖ coll_nf_1
+   ‖ fee_nf_0 ‖ fee_nf_1)`; the chain recomputes and rejects mismatches.
+4. **Matching is public, on-chain, and crossing-price.** `matchOrder`
+   applies market flag → best price → block height → fee → intra-block
+   index → id, persists one common execution price, and never pairs two
+   market orders because neither supplies an execution price.
    Matching is strictly pairwise; all quantity work is deferred to
    settlement.
-5. **Anchored disclosure (F1).** The smaller trader's quantity is
-   revealed to the counterparty only after the pair is `Settling` on
-   chain — the compare writing is the anchor.
+5. **Anchored disclosure (F1).** The smaller trader's encrypted opening is
+   released only after the pair is `Settling` and both owners have uploaded
+   the exact match round's pre-open checkpoint. A missing uploader can be
+   frozen after the deadline while the compliant order is requeued.
 6. **Atomic settlement (F2).** The main settle path is one `SettlePair`
-   writing: both legs verify and both payout notes mint together, or
+   writing: both legs verify and both payout plus both hiding refund
+   commitments mint together, or
    nothing changes.
 
 ## 2. Main Components
@@ -78,7 +80,8 @@ Design invariants:
 │ │  PoBuy   │  │ SettleSmall/Large│  │ NoteWithdraw       │             │
 │ │  stubs)  │  │ SettlePair       │  │ GetNotes/PoolInfo  │             │
 │ └──────────┘  │ ClaimFees        │  │ GetNullifiers      │             │
-│               │ RegisterSettleAddr│ │ GetNoteByCm        │             │
+│               │ Checkpoint/Abort  │ │ GetNoteByCm        │             │
+│               │ RegisterSettleAddr│ │                    │             │
 │               │ QueryOrders/Fees │  │ ApplyPoolMutation  │             │
 │               └──────┬───────────┘  └─────────┬──────────┘             │
 │                      │ GORM                   │ GORM                   │
@@ -117,24 +120,26 @@ out, mint change).
 ### 2.2 `core/orderbook` — orders, matching, settlement
 
 **`SendOrder`** ([orderbook.go](../chain/core/orderbook.go)) — spends
-two pool note slots by nullifier (anchor must be known, nullifiers
-unspent), verifies the `send_order` proof against the rebuilt publics
-`[anchor, nf_0, nf_1, lock_asset, locked_commitment, fee, cm_change,
-price, side, bind]`, checks the owner's ed25519 signature over the
-whole request, mints the change note, accrues the plaintext fee to the
+two collateral slots plus two native-fee slots (anchor known, nullifiers
+unspent), verifies the 14-public `send_order` proof, checks the owner's
+ed25519 signature over the whole request, mints both change commitments,
+and accrues the plaintext native fee to the
 block producer, stores the order (its single `LockedCommitment`), and
 runs `matchOrder`.
 
-**Matching** — equal price required, then block height, then fee, then
-intra-block index ([paper_deviations.md](paper_deviations.md) D6). A
+**Matching** — crossing predicate, then market flag, best price, block
+height, fee, intra-block index, and id. The resting limit price is the
+execution price; if the resting order is market, the incoming limit is.
+A
 match links exactly two orders and sets both to `Matched`. Matched pairs
 are locked (no cancel path).
 
 **`SubmitCompareCoZk2p`** ([orderbook_cozk.go](../chain/core/orderbook_cozk.go),
 [orderbook_cozk2p.go](../chain/core/orderbook_cozk2p.go)) — records the
 2-party comparison: verifies both traders' ed25519 signatures over the
-canonical compare message and the collaborative PLONK π_cmp (5 publics:
-`cmp`, the two collateral commitments, `price`, `a_is_seller`; verifier
+canonical compare message and the collaborative PLONK π_cmp (6 publics:
+`cmp`, the two collateral commitments, both own public prices,
+`a_is_seller`; verifier
 linked via cgo behind the `cozk2p` build tag), stores `cmp`, and moves
 both orders to `Settling`.
 `SubmitCompareCoZk` is the Groth16 single-prover variant of the same
@@ -146,7 +151,8 @@ leg alone can never pay out — [paper_deviations.md](paper_deviations.md)
 D3). It verifies BOTH legs before touching state: each leg's owner
 signature plus its `settle_small` (π_A) or `settle_large` (π_B) proof,
 with publics rebuilt from the order rows (the single `LockedCommitment`,
-price, side, pay asset, outputs, bind; π_B additionally opens the
+own and execution prices, side, pay asset, payout/refund outputs, bind;
+π_B additionally opens the
 counterparty's `LockedCommitment`). The pipeline is journaled for
 crash consistency across the two
 databases: a settlement-journal row (orders.db) records the intent, the
@@ -164,9 +170,13 @@ immediate re-match attempted.
 mints its accrued plaintext fees as a pool note with a `claim_fees`
 proof.
 
-**`RegisterSettleAddr` / `QuerySettleAddr`** — plaintext QUIC
-rendezvous for the settlement session (dev only; production requires an
-anonymous overlay, see [paper_deviations.md](paper_deviations.md) D9).
+**`RegisterSettleAddr` / `QuerySettleAddr`** — owner-signed QUIC address,
+match round, and X25519 key rendezvous. Addresses remain public (dev only),
+while the smaller opening is ChaCha20-Poly1305 encrypted end-to-end.
+
+**`SubmitSettleCheckpoint` / `AbortSettleRound`** — durable pre-open
+barrier and 10-block attribution deadline. A sole uploader is requeued;
+the missing uploader is frozen.
 
 **Readings:** `QueryOrders` (filtered, paginated), `QueryFees`.
 

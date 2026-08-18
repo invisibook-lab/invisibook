@@ -4,6 +4,7 @@ use std::fmt;
 
 pub type OrderID = String;
 pub type TokenID = String;
+pub const NATIVE_TOKEN: &str = "invis";
 
 // ────────────────────── TradeType ──────────────────────
 
@@ -11,6 +12,21 @@ pub type TokenID = String;
 pub enum TradeType {
     Buy,
     Sell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OrderKind {
+    Limit,
+    Market,
+}
+
+impl fmt::Display for OrderKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OrderKind::Limit => write!(f, "LIMIT"),
+            OrderKind::Market => write!(f, "MARKET"),
+        }
+    }
 }
 
 impl fmt::Display for TradeType {
@@ -69,9 +85,13 @@ impl fmt::Display for TradePair {
 #[derive(Debug, Clone)]
 pub struct Order {
     pub id: OrderID,
+    pub kind: OrderKind,
     pub trade_type: TradeType,
     pub subject: TradePair,
     pub price: Option<u64>,
+    pub protection_price: Option<u64>,
+    pub execution_price: Option<u64>,
+    pub match_round: u64,
     pub pubkey: String, // owner's ed25519 pubkey (64-char hex)
     pub locked_commitment: String,
     pub fee: u64,

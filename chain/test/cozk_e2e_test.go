@@ -144,10 +144,12 @@ func runCompareSettleLifecycle(
 		OrderID:      buyOrderID,
 		MatchOrderID: sellOrderID,
 		CmNoteOut:    hexCommit(0xC1),
+		CmRefundOut:  hexCommit(0xD1),
 	}
 	bobLeg := core.SettlePairLeg{
-		CmNoteOut: smallSig.CmNoteOut,
-		ZkProof:   "test-proof-skip",
+		CmNoteOut:   smallSig.CmNoteOut,
+		CmRefundOut: smallSig.CmRefundOut,
+		ZkProof:     "test-proof-skip",
 		Signature: hex.EncodeToString(
 			ed25519.Sign(bobPriv, core.SettleSmallSigMessage(smallSig))),
 	}
@@ -156,9 +158,11 @@ func runCompareSettleLifecycle(
 		MatchOrderID:     buyOrderID,
 		CmLockedResidual: hexCommit(0xA2),
 		CmNoteOut:        hexCommit(0xC2),
+		CmRefundOut:      hexCommit(0xD2),
 	}
 	aliceLeg := core.SettlePairLeg{
 		CmNoteOut:        largeSig.CmNoteOut,
+		CmRefundOut:      largeSig.CmRefundOut,
 		CmLockedResidual: largeSig.CmLockedResidual,
 		ZkProof:          "test-proof-skip",
 		Signature: hex.EncodeToString(
@@ -172,6 +176,7 @@ func runCompareSettleLifecycle(
 		OrderID:      buyOrderID,
 		MatchOrderID: sellOrderID,
 		CmNoteOut:    smallSig.CmNoteOut,
+		CmRefundOut:  smallSig.CmRefundOut,
 		Signature:    bobLeg.Signature,
 		ZkProof:      "test-proof-skip",
 	}
@@ -181,6 +186,7 @@ func runCompareSettleLifecycle(
 		MatchOrderID:     buyOrderID,
 		CmLockedResidual: largeSig.CmLockedResidual,
 		CmNoteOut:        largeSig.CmNoteOut,
+		CmRefundOut:      largeSig.CmRefundOut,
 		Signature:        aliceLeg.Signature,
 		ZkProof:          "test-proof-skip",
 	}
@@ -266,10 +272,10 @@ func runCompareSettleLifecycle(
 			sellAfter.LockedCommitment, largeSig.CmLockedResidual)
 	}
 
-	// BOTH payout notes landed in the SAME step (+2 leaves).
+	// Both payouts and both refund notes landed in the same step (+4 leaves).
 	afterPair := getPoolInfo(t)
-	if afterPair.LeafCount != poolBefore.LeafCount+2 {
-		t.Fatalf("SettlePair must append exactly two pool notes, %d → %d",
+	if afterPair.LeafCount != poolBefore.LeafCount+4 {
+		t.Fatalf("SettlePair must append exactly four pool notes, %d → %d",
 			poolBefore.LeafCount, afterPair.LeafCount)
 	}
 	if getNoteByCm(t, bobLeg.CmNoteOut) < 0 || getNoteByCm(t, aliceLeg.CmNoteOut) < 0 {

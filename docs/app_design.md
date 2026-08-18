@@ -70,19 +70,22 @@ chain via `GetNoteByCm` / `GetNullifiers`).
 [trade_form.rs](../app/ui/src/components/trade_form.rs). On submit:
 
 1. Compute the collateral: `q` token1 for a sell, `q·price` token2 for
-   a buy, plus the plaintext fee.
-2. Select at most two unspent notes covering it
-   (`NoteStore::select_unspent` — the circuits have a fixed 2-slot
-   shape; a missing slot becomes an Orchard-style dummy).
+   a buy. A market order uses its public protection price for this
+   calculation. The plaintext fee is denominated separately in `invis`.
+2. Select at most two collateral-asset notes and at most two native-`invis`
+   fee notes (`NoteStore::select_unspent`; each bank has a fixed 2-slot
+   shape and a missing slot becomes an Orchard-style dummy). If collateral
+   is `invis`, one combined input bank covers both lock and fee.
 3. Sync the pool tree (`ChainClient::fetch_note_tree`) for the anchor
    and Merkle paths; the client re-checks the root against the chain
    head.
 4. `prepare_order` (pure CPU, also used verbatim by the e2e test):
-   derive the nullifiers → `order_id = SHA-256(nf_0 ‖ nf_1)` → draw
-   fresh blindings and a fresh change-note key → compute the `bind` →
+   derive the nullifiers → `order_id = SHA-256(coll_nf_0 ‖ coll_nf_1 ‖
+   fee_nf_0 ‖ fee_nf_1)` → draw fresh blindings and two change-note keys →
+   compute the `bind` →
    prove `send_order` with rapidsnark.
 5. Persist FIRST: inputs → `PENDING_SPEND` (with their nullifiers and a
-   `pending_order` marker), the change note → `PENDING_MINT`, the order
+   `pending_order` marker), non-zero collateral/native changes → `PENDING_MINT`, the order
    opening into `orders.json`.
 6. Submit `SendOrder`. The submission outcome is CLASSIFIED
    (`SubmitError`): a definite node rejection rolls the records back;
@@ -103,18 +106,22 @@ id at a time.
 
 ```
 run_settle
-  ├─ role assignment: maker = trader-a (lower block height, tie → id)
-  ├─ equal-price check (cross-price pairs are rejected — paper D6)
-  ├─ SessionInput: chain publics (LockedCommitment ×2, price, side)
+  ├─ role assignment: maker = trader-a (height, intra-block index, id)
+  ├─ crossing/common-execution-price validation
+  ├─ SessionInput: chain publics (LockedCommitment ×2, both own prices,
+  │    execution price, side)
   │    + MY OrderOpening (q, r_locked)
-  ├─ rendezvous: RegisterSettleAddr / QuerySettleAddr (QUIC addrs, dev)
+  ├─ rendezvous: signed RegisterSettleAddr / QuerySettleAddr
+  │    (QUIC address + per-round X25519 key, dev metadata exposure)
   └─ settle2p_session subprocess over stdio:
        "need_sig"       → sign the canonical compare message
        "compare_ready"  → cross-check the proven statement + both sigs,
                           submit SubmitCompareCoZk2p, block until BOTH
-                          orders are Settling, reply compare_confirmed
-                          ── the F1 gate: no reveal before this anchor
-       (subprocess: smaller side reveals; payout-note keys exchanged;
+                          orders are Settling; upload a signed pre-open
+                          checkpoint and wait for the peer; then reply
+                          compare_confirmed ── the F1 gate
+       (subprocess: smaller side sends an X25519/ChaCha20-Poly1305
+        encrypted reveal; payout-note keys exchanged;
         witness.json WAL written before secrets leave the process)
        "result_ready"   → read result.json, prove MY settle circuit
                           (settle_small if fully filled, else
@@ -122,7 +129,8 @@ run_settle
        "pair_ready"     → both legs, exchanged in-fabric; either party
                           submits the ATOMIC SettlePair (F2)
   ├─ confirm on chain: my order Done, or relisted under the residual cm
-  └─ persist: recv note → notes.json (PENDING_MINT); remainder →
+  └─ persist: recv note and any price-improvement refund → notes.json
+       (PENDING_MINT); remainder →
        orders.json (residual opening) or opening removed when Done
 ```
 
@@ -169,16 +177,17 @@ per-step wall-clock table; numbers in
 
 1. Both wallets prove `send_order` (~220 ms each) and submit; the chain
    matches the pair.
-2. Both apps auto-settle: QUIC rendezvous, MPC compare (π_cmp ~4 s
+2. Both apps auto-settle: signed QUIC/X25519 rendezvous, MPC compare (π_cmp ~4 s
    wall-clock), `compare_ready` → either app lands
-   `SubmitCompareCoZk2p`; both wait for `Settling` (~2 blocks) and
-   confirm.
-3. The subprocess reveals Bob's (smaller) opening to Alice only now;
+   `SubmitCompareCoZk2p`; both wait for `Settling`, upload the pre-open
+   checkpoint, and confirm only after both checkpoints exist.
+3. The subprocess sends Bob's (smaller) opening encrypted to Alice only now;
    payout-note keys are exchanged; each app proves its own settle
    circuit (~0.1 s) and the legs cross in-fabric.
 4. Either app submits `SettlePair`: Bob's order → `Done`, Alice's order
-   relists in place with the residual collateral commitment, exactly
-   two payout notes mint. Each wallet persists its incoming note and
+   relists in place with the residual collateral commitment; two payout
+   notes and two hiding refund commitments mint. Each wallet persists its
+   incoming note, any non-zero refund, and
    Alice's wallet replaces her order opening with the residual one.
 
 ## 4. Reference

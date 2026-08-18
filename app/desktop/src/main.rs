@@ -384,8 +384,24 @@ fn App() -> Element {
                                         nf: String::new(),
                                         pending_order: String::new(),
                                     });
-                                    let _ = nstore.save();
                                 }
+                                if let Some(refund) = &outcome.refund {
+                                    if nstore.find(&refund.cm).is_none() {
+                                        nstore.upsert(NoteRecord {
+                                            cm: refund.cm.clone(),
+                                            token: refund.token.clone(),
+                                            amount: refund.amount,
+                                            r: refund.r_hex.clone(),
+                                            key_index: 0,
+                                            sk: refund.sk_hex.clone(),
+                                            leaf_index: 0,
+                                            status: NOTE_PENDING_MINT,
+                                            nf: String::new(),
+                                            pending_order: String::new(),
+                                        });
+                                    }
+                                }
+                                let _ = nstore.save();
                             }
                             // Order ledger: a survivor's opening becomes the
                             // residual one; a filled order's opening is done.
@@ -420,7 +436,7 @@ fn App() -> Element {
                         Err(settle::SettleError::CrossPrice(_)) => {
                             unsettleable_ids.write().insert(order_id.clone());
                             message.set(Some((
-                                format!("⚠ {short}: cross-price match not yet supported"),
+                                format!("⚠ {short}: invalid matched price state"),
                                 true,
                             )));
                         }
@@ -609,8 +625,13 @@ fn App() -> Element {
                         let mut nstore = note_store.write();
                         if nstore.find(&rec.note.cm).is_none() {
                             nstore.upsert(rec.note.clone());
-                            let _ = nstore.save();
                         }
+                        if let Some(refund) = &rec.refund_note {
+                            if nstore.find(&refund.cm).is_none() {
+                                nstore.upsert(refund.clone());
+                            }
+                        }
+                        let _ = nstore.save();
                     }
                     {
                         let mut ostore = order_store.write();
