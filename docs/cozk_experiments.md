@@ -259,44 +259,47 @@ idle), same chain (3 s blocks), both flavors verified on chain. One run
 of each twin, back to back, on the LOCKED-ONLY model (2026-08-18,
 branch `cozk-merged-settle`):
 
-| step (ms) | split alice | split bob | merged alice | merged bob |
+| phase (ms) | split alice | split bob | merged alice | merged bob |
 |---|---|---|---|---|
-| MPC circuit build | 122 | 122 | 479 | 479 |
-| collaborative prove | 1 540 | 1 504 | 5 232 | 5 336 |
-| proof open (drains the dataflow + MAC-checked reveal) | 3 562 | 3 597 | 16 391 | 16 288 |
-| on-chain anchor wait (host, not crypto) | 8 017 | 8 014 | 6 016 | 6 013 |
-| settle-leg exchange | 2 | 128 | — | — |
-| session subprocess total | 13 842 | 13 842 | 29 029 | 29 037 |
-| run_settle total (concurrent) | 25 959 | 25 959 | 35 358 | 35 358 |
+| MPC circuit build | 53 | 53 | 223 | 224 |
+| collaborative prove | 977 | 989 | 4 357 | 4 447 |
+| proof open (drain + MAC-checked reveal) | 2 678 | 2 671 | 16 033 | 15 944 |
+| on-chain anchor wait (host, not crypto) | 6 011 | 6 008 | 6 009 | 6 008 |
+| settle-leg exchange | 1 | 142 | — | — |
+| session subprocess total | 10 206 | 10 207 | 27 015 | 27 015 |
+| run_settle total (concurrent) | 22 353 | 22 353 | 33 268 | 33 268 |
 
-Where that wall clock goes, by category (`run_settle`, both parties
-concurrent):
+Per protocol step, matching the numbered walkthroughs in
+[settlement_protocol.md](settlement_protocol.md) §2.2 (split) and §3.2
+(merged), trader A's column:
+
+| split step | ms | | merged step | ms |
+|---|---|---|---|---|
+| 1 preamble fingerprint | 2 | | 1 preamble fingerprint | 2 |
+| 2 share inputs + collateral binding | 59 | | 2 share inputs + collateral binding | 66 |
+| 3 three-way compare | 20 | | 3 three-way compare | 16 |
+| 4 signature ferry + exchange | 1 | | 4 output commitments in MPC + opens | 200 |
+| 5 collaborative prove + verify | 3 716 | | 5 signature ferry + exchange | 1 |
+| 6 on-chain compare anchor (host) | 6 011 | | 6 collaborative prove + verify + WAL v1 | 20 618 |
+| 7 smaller-side reveal | 5 | | 7 on-chain settlement anchor (host) | 6 010 |
+| 8 payout-note keys + WAL | 1 | | 8 post-finality fill reveal + WAL v2 | 2 |
+| **session total** | **10 206** | | **session total** | **27 015** |
+| 9 + 9' own settle leg + leg exchange | 1 / 142 | | — | — |
+| R + 10 rendezvous, submit, confirm | 12 147 | | R rendezvous + final confirm | 6 253 |
+| **run_settle total** | **22 353** | | **run_settle total** | **33 268** |
+
+Rolled up by category:
 
 | category | split | merged |
 |---|---|---|
-| collaborative MPC / PLONK | 5.2 s (**20 %**) | 22.1 s (**63 %**) |
-| chain block waits | 20.1 s (**78 %**) | 12.3 s (**35 %**) |
-| — on-chain anchor confirmation | 8.0 s | 6.0 s |
-| — rendezvous + submit + final confirm | 12.1 s | 6.3 s |
-| protocol overhead + local Groth16 legs | 0.6 s (2.3 %) | 0.9 s (2.6 %) |
-| **settlement total** | **26.0 s** | **35.4 s** |
-| full trade, incl. order placement and matching | 40.6 s | 50.0 s |
-
-Inside the cryptographic slice (the fabric evaluates lazily, so `build`
-and `prove` mostly enqueue the dataflow graph and `open` drains it —
-every Beaver round plus the MAC-checked reveal lands there):
-
-| MPC phase | split | merged |
-|---|---|---|
-| circuit build | 0.12 s | 0.48 s |
-| collaborative prove | 1.54 s | 5.23 s |
-| proof open (drain + reveal) | 3.56 s | 16.39 s |
-| padded gate count | 2 048 | 8 192 |
-| **cost per gate** | **2.55 ms** | **2.70 ms** |
+| collaborative MPC / PLONK | 3.7 s (**17 %**) | 20.6 s (**62 %**) |
+| chain block waits | 18.2 s (**81 %**) | 12.3 s (**37 %**) |
+| everything else (preamble, binding, compare, sig ferry, reveal, WAL, local Groth16 legs) | 0.2 s (1 %) | 0.3 s (1 %) |
+| **settlement total** | **22.4 s** | **33.3 s** |
 
 Reading of the numbers:
 
-- **Cryptographic wall clock: ~5.2 s split vs ~22.1 s merged (~4.2x).**
+- **Cryptographic wall clock: ~3.7 s split vs ~20.6 s merged (~5.6x).**
   4x the gates cost about 4x here, but the split of that cost is
   uneven: the open phase drains the lazy dataflow, so it carries most
   Beaver-triple network rounds and stays ~3x the prove phase in both
@@ -321,11 +324,19 @@ Reading of the numbers:
   opening to the fill value alone.
 - Peak RSS per merged party: ~5 GB (vs ~1.7 GB split) — the MPC witness
   and the SRS-sized FFTs dominate, and both halve with the domain.
-- **Cost per gate is now flat across the two circuits** (2.55 vs
-  2.70 ms). Against the 16 384-gate statement it read 1.78 vs
-  4.14 ms/gate, so the superlinearity in the old numbers came from the
-  larger domain (~10 GB peak RSS), not from collaborative proving
-  itself.
+- **Cost per gate: 1.81 ms (split, 2 048 gates) vs 2.52 ms (merged,
+  8 192).** Against the 16 384-gate statement it read 1.78 vs
+  4.14 ms/gate, so most of the old superlinearity came from the larger
+  domain's memory pressure (~10 GB peak RSS), not from collaborative
+  proving itself. Split's absolute crypto figure moves ~40 % between
+  runs (3.7-5.2 s across two runs) because it is small; merged's moves
+  ~7 %.
+- **Computing a hash over shares costs ~100x less than proving it.**
+  Merged step 4 runs 10 Poseidon hashes over SPDZ shares in 200 ms;
+  merged step 6 proves a relation whose 12 Poseidon gadgets are ~5 650
+  of its 6 259 gates and costs 20 618 ms. This single ratio explains the
+  whole A/B: the split flow keeps hashing out of the collaborative
+  circuit.
 
 CAVEAT: one run per flavor on a dev SRS with mock Beaver triples. The
 `on-chain anchor wait` rows differ (8 s split vs 6 s merged) only

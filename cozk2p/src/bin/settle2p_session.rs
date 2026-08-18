@@ -292,6 +292,9 @@ async fn main() -> Result<()> {
         // the F1 on-chain compare confirmation and the settle-leg round.
         "compare_onchain_wait_ms": result.onchain_wait_ms,
         "leg_exchange_ms": leg_exchange_ms,
+        // Per-protocol-step wall clock (docs/settlement_protocol.md §2.2),
+        // in protocol order.
+        "steps": result.steps.steps,
         "total_ms": total_ms,
         "peak_rss_bytes": peak_rss_bytes(),
         "proof_size_bytes_compressed": result.proof_hex.len() / 2,
@@ -404,6 +407,9 @@ async fn run_merged(
         // tables read both modes uniformly.
         "compare_onchain_wait_ms": result.onchain_wait_ms,
         "leg_exchange_ms": 0.0,
+        // Per-protocol-step wall clock (docs/settlement_protocol.md §3.2),
+        // in protocol order.
+        "steps": result.steps.steps,
         "total_ms": total_ms,
         "peak_rss_bytes": peak_rss_bytes(),
         "proof_size_bytes_compressed": result.proof_hex.len() / 2,
