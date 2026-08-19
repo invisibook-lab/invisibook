@@ -28,17 +28,20 @@ type cozk2pE2eFixture struct {
 	PriceB     uint64 `json:"price_b"`
 	AIsSeller  bool   `json:"a_is_seller"`
 	ProofHex   string `json:"proof_hex"`
+	ShareAHex  string `json:"proof_share_a_hex"`
+	ShareBHex  string `json:"proof_share_b_hex"`
 	VKPath     string `json:"vk_path"`
 }
 
 // TestCoZk2pSettleRealProofOnChain is the full-depth e2e of the 2-party
 // path: a REAL collaboratively generated PLONK π_cmp travels through
-// SubmitCompareCoZk2p on a REAL running chain whose PLONK verification is
+// two owner-authenticated proof shares on a REAL running chain whose PLONK verification is
 // ON (config generated from the fixture: the genesis order commitments are
-// exactly the ones the two SPDZ parties proved against). A tampered proof
-// must leave state untouched; the genuine proof must record the comparison,
-// after which the settle writings (proof-skipped in this config) complete
-// the lifecycle.
+// exactly the ones the two SPDZ parties proved against). The two genuine
+// native shares must record the comparison, after which the settle writings
+// (proof-skipped in this config) complete the lifecycle. Tamper rejection is
+// exercised directly at the tagged Go/FFI boundary so its failed transaction
+// does not consume this protocol's fixed ten-block submission window.
 //
 // Requires `./invisibook` built with `-tags cozk2p` and the fixture from
 // `dump_settle2p_fixture` (see `make test-e2e-cozk2p`).
@@ -62,6 +65,9 @@ func TestCoZk2pSettleRealProofOnChain(t *testing.T) {
 	}
 	if fx.PriceA == 0 || fx.PriceB == 0 {
 		t.Fatal("fixture has no collateral prices — regenerate it for the crossing-price model")
+	}
+	if fx.ShareAHex == "" || fx.ShareBHex == "" {
+		t.Skip("fixture predates native proof shares — regenerate it with proof_share_a_hex and proof_share_b_hex")
 	}
 
 	alicePriv, alicePubkey := deriveKeypair(t, aliceDerivedSeedHex)
@@ -126,43 +132,26 @@ require_proofs = false
 		t.Fatalf("expected sell order Matched(1), got %d", st)
 	}
 
-	// --- Compare request straight from the fixture ---
-	req := &core.CompareRequest{
-		OrderAID: sellOrderID,
-		OrderBID: buyOrderID,
-		Cmp:      fx.Cmp,
-		ZkProof:  fx.ProofHex,
-	}
-
-	// Negative: one flipped proof byte must fail PLONK verification
-	// on-chain and leave the pair Matched.
-	badReq := *req
-	badReq.ZkProof = bumpHexByte(fx.ProofHex)
-	msg := core.CoZk2pCompareMessage(&badReq)
-	badReq.SigA = hex.EncodeToString(ed25519.Sign(alicePriv, msg))
-	badReq.SigB = hex.EncodeToString(ed25519.Sign(bobPriv, msg))
-	if err := wrCall("orderbook", "SubmitCompareCoZk2p", &badReq); err != nil {
-		t.Fatalf("submitting tampered-proof compare failed at HTTP level: %v", err)
+	registerPairAddresses(t, alicePriv, bobPriv, sellOrderID, buyOrderID, 1)
+	deadline := queryCompareShareDeadline(t, sellOrderID, buyOrderID, sellOrderID, 1)
+	aReq := compareShareRequest(alicePriv, sellOrderID, buyOrderID, sellOrderID, 1, fx.Cmp, deadline, fx.ShareAHex)
+	if err := wrCall("orderbook", "SubmitCompareCoZk2pShare", aReq); err != nil {
+		t.Fatalf("A comparison share: %v", err)
 	}
 	waitBlock()
-	if st := queryOrders(t, sellOrderID)[0].Status; st != 1 {
-		t.Fatalf("tampered proof must be rejected: sell order moved to %d", st)
-	}
 
-	// Happy path: the genuine collaborative proof records the comparison.
-	msg = core.CoZk2pCompareMessage(req)
-	req.SigA = hex.EncodeToString(ed25519.Sign(alicePriv, msg))
-	req.SigB = hex.EncodeToString(ed25519.Sign(bobPriv, msg))
-	if err := wrCall("orderbook", "SubmitCompareCoZk2p", req); err != nil {
-		t.Fatalf("SubmitCompareCoZk2p failed: %v", err)
+	// Happy path: B's genuine native share completes the collaborative proof.
+	bReq := compareShareRequest(bobPriv, sellOrderID, buyOrderID, buyOrderID, 1, fx.Cmp, deadline, fx.ShareBHex)
+	if err := wrCall("orderbook", "SubmitCompareCoZk2pShare", bReq); err != nil {
+		t.Fatalf("B comparison share failed: %v", err)
 	}
 	waitBlock()
 	if st := queryOrders(t, sellOrderID)[0].Status; st != 5 { // Settling
 		t.Fatalf("expected sell order Settling(5) after real-proof compare, got %d — was ./invisibook built with -tags cozk2p?", st)
 	}
 
-	// --- Complete the lifecycle with the ATOMIC SettlePair (proof-skipped
-	// in this config; the mechanics are what's under test here) ---
+	// --- Complete the lifecycle with one owner-bound submission per leg
+	// (proof-skipped in this config; the mechanics are what's under test). ---
 	smallSig := &core.SettleSmallRequest{
 		OrderID:      buyOrderID,
 		MatchOrderID: sellOrderID,
@@ -191,14 +180,14 @@ require_proofs = false
 		Signature: hex.EncodeToString(
 			ed25519.Sign(alicePriv, core.SettleLargeSigMessage(largeSig))),
 	}
-	pairReq := &core.SettlePairRequest{
-		OrderAID: sellOrderID,
-		OrderBID: buyOrderID,
-		A:        aLeg,
-		B:        bLeg,
+	if err := wrCall("orderbook", "SubmitSettleLeg",
+		ownerLegRequest(alicePriv, sellOrderID, buyOrderID, sellOrderID, 1, aLeg)); err != nil {
+		t.Fatalf("SubmitSettleLeg (A): %v", err)
 	}
-	if err := wrCall("orderbook", "SettlePair", pairReq); err != nil {
-		t.Fatalf("SettlePair failed: %v", err)
+	waitBlock()
+	if err := wrCall("orderbook", "SubmitSettleLeg",
+		ownerLegRequest(bobPriv, sellOrderID, buyOrderID, buyOrderID, 1, bLeg)); err != nil {
+		t.Fatalf("SubmitSettleLeg (B): %v", err)
 	}
 	waitBlock()
 	if st := queryOrders(t, buyOrderID)[0].Status; st != 2 { // Done
@@ -212,16 +201,4 @@ require_proofs = false
 	}
 
 	t.Log("=== 2-party real-proof comparison + settlement lifecycle verified on-chain ===")
-}
-
-// bumpHexByte flips the last hex nibble of `s`, keeping it valid hex.
-func bumpHexByte(s string) string {
-	if s == "" {
-		return "0"
-	}
-	next := byte('0')
-	if s[len(s)-1] == '0' {
-		next = '1'
-	}
-	return s[:len(s)-1] + string(next)
 }

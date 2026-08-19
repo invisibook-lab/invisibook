@@ -6,49 +6,62 @@
 
 | step | trader A | trader B |
 |---|---:|---:|
-| order proof (Groth16) | 300 | 287 |
-| order submission until it lands | 4 008 | 6 010 |
-| matching | 4 005 | 4 005 |
+| order proof (Groth16) | 325 | 308 |
+| order submission until it lands | 4 007 | 6 010 |
+| **order phase: proof start → confirmed** | **4 334** | **6 318** |
+| matching | 4 006 | 4 006 |
 | 1 preamble fingerprint | 2 | 0 |
-| 2 share inputs + collateral binding | 40 | 40 |
-| 3 three-way compare | 14 | 14 |
+| 2 share inputs + collateral binding | 54 | 54 |
+| 3 three-way compare | 19 | 19 |
 | 4 signature ferry + exchange | 1 | 1 |
-| 5 collaborative prove + local verify | 4 487 | 4 488 |
-| 6 on-chain compare anchor (host wait) | 12 017 | 12 020 |
-| 7 smaller-side reveal | 2 | 1 |
-| 8 payout-note keys + WAL | 1 | 1 |
-| session subprocess, total | 16 917 | 16 917 |
-| settlement driver, both traders | 29 009 | 29 009 |
-| **full trade** | **43 630** | |
+| 5 collaborative prove + native share export | 3 948 | 3 931 |
+| 6 on-chain compare anchor (host wait) | 6 010 | 6 011 |
+| 7 payout-note keys + pre-reveal WAL | 1 | 1 |
+| 8 smaller-side reveal | 0 | 0 |
+| 9 outputs + complete WAL | 0 | 0 |
+| session subprocess, total | 10 366 | 10 364 |
+| settlement driver, both traders | 20 498 | 20 498 |
+| **full trade** | **35 187** | |
 
-## Where the time goes
+## Paper phase boundaries (ms, median)
 
-| category | ms |
-|---|---:|
-| collaborative cryptography | 4 899 |
-| single-prover order proofs | 587 |
-| chain waits (blocks and polling) | 26 040 |
-| settlement submission, own leg and confirmation | 12 092 |
+The settlement rows use the critical-path trader selected separately in each run. Rendezvous, comparison, and final settlement are non-overlapping.
+
+| phase | median (ms) | p95 (ms) |
+|---|---:|---:|
+| order, maker | 4 334 | 5 924 |
+| order, taker | 6 318 | 6 334 |
+| rendezvous (reported separately) | 4 020 | 5 624 |
+| comparison: MPC start → both proof shares verified | 10 082 | 10 268 |
+| final settlement: comparison confirmed → settlement confirmed | 6 309 | 6 380 |
+| **complete trade** | **35 187** | **37 146** |
+
+## Cryptographic work (ms)
+
+| operation | trader A | trader B |
+|---|---:|---:|
+| order Groth16 generation | 325 | 308 |
+| settlement Groth16 generation | 121 | 111 |
+| collaborative comparison proof core (slower trader) | 3 947 | — |
 
 ## What the chain does
 
 | proof | verifications | median (ms) | p95 (ms) |
 |---|---:|---:|---:|
-| send_order | 10 | 5.16 | 5.68 |
-| settle_cozk2p | 5 | 12.21 | 17.06 |
-| settle_large | 5 | 4.92 | 5.25 |
-| settle_small | 5 | 4.53 | 4.73 |
+| send_order | 10 | 5.35 | 8.39 |
+| settle_cozk2p | 5 | 12.46 | 14.93 |
+| settle_large | 10 | 4.99 | 5.15 |
+| settle_small | 10 | 4.84 | 5.99 |
 
 | writing | submissions | payload each (B) | payload total (B) |
 |---|---:|---:|---:|
 | RegisterSettleAddr | 10 | 434 | 4340 |
-| SendOrder | 10 | 1796 | 17962 |
-| SettlePair | 10 | 2385 | 23844 |
-| SubmitCompareCoZk2p | 10 | 1999 | 19990 |
-| SubmitSettleCheckpoint | 10 | 322 | 3220 |
+| SendOrder | 10 | 1797 | 17969 |
+| SubmitCompareCoZk2pShare | 10 | 2008 | 20080 |
+| SubmitSettleLeg | 10 | 1544 | 15451 |
 
-On-chain payload of one trade: 9488 B. Both traders submit the comparison and the settlement for liveness, so the node receives 13871 B and rejects the second copy of each.
+On-chain payload of one trade: 11567 B. This includes one identity-bound comparison share and one owner-bound settlement leg from each trader; all four submissions are required and accepted. Each settlement leg is verified when submitted and re-verified before the pair executes atomically.
 
-Peak memory per trader: 1.70 GiB (A), 1.69 GiB (B).
+Peak memory per trader: 1.68 GiB (A), 1.68 GiB (B).
 
 Machine: 12th Gen Intel(R) Core(TM) i9-12900HX, 24 logical CPUs, 29.4 GiB, Ubuntu 22.04.5 LTS.

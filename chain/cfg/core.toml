@@ -13,7 +13,7 @@ require_proofs = true
 # Verification keys for the OrderBook tripod's circuits.
 # settle_cozk is the joint settlement circuit whose single Groth16 proof is
 # generated collaboratively by both traders (SubmitCompareCoZk writing).
-# settle_cozk2p is the 2-party PLONK variant (SubmitCompareCoZk2p writing);
+# settle_cozk2p is the 2-party PLONK variant (two SubmitCompareCoZk2pShare writings);
 # its verification additionally needs a chain built with `-tags cozk2p`.
 settle_cozk_vk_path        = "vk/settle_cozk_vk.json"
 settle_small_vk_path       = "vk/settle_small_vk.json"

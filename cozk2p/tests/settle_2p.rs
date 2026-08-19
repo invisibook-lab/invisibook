@@ -8,8 +8,9 @@ use std::mem::swap;
 
 use ark_mpc::{PARTY0, test_helpers::execute_mock_mpc};
 use cozk2p::{
-    SidePrivate, compute_public, dev_keys, prove_collaborative, prove_single, sample_trade,
-    verify_settle,
+    SidePrivate, combine_compare_proof_shares, compute_public, deserialize_compare_proof_share,
+    dev_keys, prove_collaborative, prove_collaborative_share_timed, prove_single, sample_trade,
+    serialize_compare_proof_share, verify_settle,
 };
 use mpc_relation::traits::Circuit;
 
@@ -120,6 +121,52 @@ async fn collaborative_prove_and_verify() {
         format!("{proof1:?}"),
         "both parties must reveal the same proof"
     );
+}
+
+/// Native-output mode leaves the two final KZG points additively shared. Each
+/// role emits a canonical, identity-bound payload; only their on-chain group
+/// sum is a standard verifiable proof.
+#[tokio::test(flavor = "multi_thread")]
+async fn collaborative_native_shares_reconstruct_and_verify() {
+    let (a, b, price_a, price_b, a_is_seller) = sample_trade();
+    let public = compute_public(&a, &b, price_a, price_b, a_is_seller).unwrap();
+    let (pk, vk) = dev_keys(&keys_dir()).unwrap();
+
+    let (share0, share1) = execute_mock_mpc(|fabric| {
+        let (a, b, public, pk) = (a.clone(), b.clone(), public.clone(), pk.clone());
+        async move {
+            let party = fabric.party_id();
+            let my_side: SidePrivate = if party == PARTY0 { a } else { b };
+            prove_collaborative_share_timed(fabric.clone(), party, &my_side, &public, &pk)
+                .await
+                .expect("native collaborative proving must succeed")
+                .0
+        }
+    })
+    .await;
+
+    assert_eq!(share0.party_id, 0);
+    assert_eq!(share1.party_id, 1);
+    let encoded0 = serialize_compare_proof_share(&share0).unwrap();
+    let encoded1 = serialize_compare_proof_share(&share1).unwrap();
+    assert_eq!(
+        encoded0.len(),
+        771,
+        "v1 wire is 2 header bytes + 769-byte proof"
+    );
+    assert_eq!(
+        encoded1.len(),
+        771,
+        "v1 wire is 2 header bytes + 769-byte proof"
+    );
+    assert_ne!(encoded0, encoded1);
+    let mut with_trailing_byte = encoded0.clone();
+    with_trailing_byte.push(0);
+    assert!(deserialize_compare_proof_share(&with_trailing_byte).is_err());
+    let decoded0 = deserialize_compare_proof_share(&encoded0).unwrap();
+    let decoded1 = deserialize_compare_proof_share(&encoded1).unwrap();
+    let proof = combine_compare_proof_shares(&decoded0, &decoded1).unwrap();
+    verify_settle(&vk, &public, &proof).expect("reconstructed native proof must verify");
 }
 
 /// The witness-validity gate: if a party inputs shares that make the joint

@@ -1,7 +1,7 @@
 //! End-to-end tests of the full settlement session (`session::run_session`):
-//! two traders over a mock MPC fabric run comparison, reveal, output
-//! exchange, signature ferry, collaborative prove, and local verify —
-//! producing identical, independently verifiable results. Locked-only
+//! two traders over a mock MPC fabric run comparison, pre-reveal payout-key
+//! exchange, reveal, signature ferry, and collaborative proving — producing
+//! role-specific native shares that reconstruct and verify on chain. Locked-only
 //! model: each order's single on-chain commitment is
 //! `P2(needed(q, side), r_locked)`.
 
@@ -10,10 +10,9 @@ use std::{fs, path::PathBuf};
 use anyhow::Result;
 use ark_bn254::Fr;
 use ark_ff::PrimeField;
-use ark_mpc::{PARTY0, algebra::Scalar, test_helpers::execute_mock_mpc};
-use ark_serialize::CanonicalDeserialize;
+use ark_mpc::{PARTY0, test_helpers::execute_mock_mpc};
 use cozk2p::{
-    dev_keys,
+    combine_compare_proof_shares, decode_compare_proof_share_hex, dev_keys,
     poseidon::{commit, fr_to_hex},
     session::{
         CompareReady, MyPrivate, NeedSig, SessionConfig, SessionInput, SettleLeg, SigIo,
@@ -21,7 +20,6 @@ use cozk2p::{
     },
     verify_settle,
 };
-use mpc_plonk::proof_system::structs::Proof;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 /// Fixed dummy signatures: content is opaque to the session (the app layer
@@ -177,7 +175,8 @@ async fn session_happy_path() {
     let (result_a, need_a, legs_a) = res_a;
     let (result_b, need_b, legs_b) = res_b;
 
-    // Identical public statement, proof, and signatures on both sides.
+    // Identical public statement and signatures, but role-specific native
+    // proof shares.
     assert_eq!(result_a.cmp, 1);
     assert_eq!(result_b.cmp, 1);
     assert_eq!(result_a.public.price_a, 3);
@@ -187,7 +186,7 @@ async fn session_happy_path() {
         serde_json::to_string(&result_a.public).unwrap(),
         serde_json::to_string(&result_b.public).unwrap()
     );
-    assert_eq!(result_a.proof_hex, result_b.proof_hex);
+    assert_ne!(result_a.proof_share_hex, result_b.proof_share_hex);
     assert_eq!(result_a.sig_a, SIG_A);
     assert_eq!(result_a.sig_b, SIG_B);
     assert_eq!(result_b.sig_a, SIG_A);
@@ -197,9 +196,11 @@ async fn session_happy_path() {
     assert_eq!(need_a.expect("A must have been asked to sign").cmp, 1);
     assert_eq!(need_b.expect("B must have been asked to sign").cmp, 1);
 
-    // The proof round-trips through the on-chain wire format and verifies.
-    let proof_bytes = hex::decode(&result_a.proof_hex).unwrap();
-    let proof = Proof::deserialize_compressed(proof_bytes.as_slice()).unwrap();
+    // The two canonical native shares reconstruct the standard proof that the
+    // chain verifies before allowing the reveal.
+    let share_a = decode_compare_proof_share_hex(&result_a.proof_share_hex).unwrap();
+    let share_b = decode_compare_proof_share_hex(&result_b.proof_share_hex).unwrap();
+    let proof = combine_compare_proof_shares(&share_a, &share_b).unwrap();
     verify_settle(&vk, &result_a.public, &proof).expect("proof must verify");
 
     // Plaintext outcomes per the sample trade: A (larger) receives 180
@@ -314,6 +315,14 @@ async fn session_happy_path() {
     // final result — and carries NO residual-quantity commitment fields
     // (locked-only model).
     for (dir, result) in [(&dir_a, &result_a), (&dir_b, &result_b)] {
+        let payout: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("payout_keys.json")).unwrap())
+                .unwrap();
+        assert_eq!(payout["my_recv_npk"], result.my.recv_npk);
+        assert_eq!(payout["r_recv"], result.my.r_recv);
+        assert_eq!(payout["ctr_recv_npk"], result.my.ctr_recv_npk);
+        assert_eq!(payout["ctr_r_recv"], result.my.ctr_r_recv);
+
         let witness: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("witness.json")).unwrap()).unwrap();
         assert_eq!(witness["cmp"], 1);
@@ -327,6 +336,22 @@ async fn session_happy_path() {
             "no residual quantity commitment may exist in the WAL"
         );
         assert!(my.contains_key("ctr_r_locked"));
+
+        let labels: Vec<_> = result
+            .steps
+            .steps
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect();
+        let keys = labels
+            .iter()
+            .position(|label| label.contains("payout-note keys"))
+            .unwrap();
+        let reveal = labels
+            .iter()
+            .position(|label| label.contains("smaller-side reveal"))
+            .unwrap();
+        assert!(keys < reveal, "payout keys must be durable before reveal");
     }
 
     let _ = fs::remove_dir_all(&dir_a);
@@ -396,9 +421,12 @@ async fn compare_abort_precedes_any_reveal() {
             "unexpected error: {msg}"
         );
     }
-    // No WAL: the reveal (and everything after it) never ran.
+    // No WAL: neither payout-key publication nor reveal ran.
     assert!(
-        !dir_a.join("witness.json").exists() && !dir_b.join("witness.json").exists(),
+        !dir_a.join("witness.json").exists()
+            && !dir_b.join("witness.json").exists()
+            && !dir_a.join("payout_keys.json").exists()
+            && !dir_b.join("payout_keys.json").exists(),
         "an aborted compare must leave no witness WAL"
     );
     let _ = fs::remove_dir_all(&dir_a);
@@ -457,27 +485,13 @@ async fn session_aborts_on_divergent_statement() {
     let _ = fs::remove_dir_all(&dir_b);
 }
 
-/// The reveal-consistency mechanism: a plaintext reveal that disagrees with
-/// the MPC-shared value opens non-zero and is detected by both parties.
-#[tokio::test(flavor = "multi_thread")]
-async fn lying_reveal_opens_nonzero() {
-    let (r0, r1) = execute_mock_mpc(|fabric| async move {
-        let party = fabric.party_id();
-        // A's MPC-verified amount is 60...
-        let v = fabric.share_scalar(Scalar::from(60u64), PARTY0);
-        // ...but A reveals 61 in plaintext.
-        let lie = if party == PARTY0 {
-            Scalar::from(61u64)
-        } else {
-            Scalar::from(0u64)
-        };
-        let revealed: Scalar<_> = fabric.share_plaintext(lie, PARTY0).await;
-        let diff = &v - &revealed;
-        diff.open_authenticated()
-            .await
-            .expect("MAC check itself passes; the VALUE is what lies")
-    })
-    .await;
-    assert_ne!(r0, Scalar::from(0u64), "the lie must be visible to party 0");
-    assert_ne!(r1, Scalar::from(0u64), "the lie must be visible to party 1");
+/// Post-reveal verification is deliberately local (no peer-dependent MPC
+/// round): changing the revealed quantity fails to open the proof-bound
+/// collateral commitment.
+#[test]
+fn lying_reveal_fails_local_commitment_check() {
+    let r = [0xB3u8; 32];
+    let locked = commit(60 * 4, &r);
+    assert_eq!(commit(60 * 4, &r), locked);
+    assert_ne!(commit(61 * 4, &r), locked);
 }

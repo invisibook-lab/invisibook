@@ -4,11 +4,15 @@
 //!
 //! The MPC's ONLY job is the comparison (π_cmp). Settlement outputs and
 //! residual re-commitments are each party's OWN work, proven later with the
-//! single-prover settle_small / settle_large circuits. After both durable
-//! pre-open checkpoints exist, the smaller side discloses its opening to its
-//! counterparty over the per-round encrypted channel, so each party then
-//! holds its complete witness alone without exposing the opening to the
-//! network transport.
+//! single-prover settle_small / settle_large circuits. After both owners'
+//! proof shares reconstruct and verify π_cmp on chain, both sides exchange
+//! and durably record their payout-note keys. Only then does the smaller side
+//! disclose its opening over the per-round encrypted channel. Once that
+//! plaintext is delivered, each party can finish its witness and proof
+//! locally: there is no remaining peer or MPC dependency. The payout-key WAL
+//! is currently a compliant-client invariant only: its pairs are not
+//! owner-signed/on-chain and the later settle circuits do not publicly bind
+//! the peer's pre-reveal choice.
 //!
 //! Protocol (both parties run the identical program; sender-selection is by
 //! party id, and every fabric operation is enqueued in canonical A-then-B
@@ -22,19 +26,22 @@
 //!    Locked-only model: the collateral commitment is the order's ONLY
 //!    commitment — there is no separate quantity commitment.
 //! 3. Three-way compare, opening only `cmp`.
-//! 4. Exchange owner signatures, collaboratively prove π_cmp, and verify the
-//!    opened proof locally.
-//! 5. Block until the comparison and both signed pre-open checkpoints for
-//!    this match round are durable on chain.
-//! 6. The smaller party sends its quantity and collateral blinding under
-//!    X25519/ChaCha20-Poly1305. Both parties then open `share − revealed`
-//!    and require zero, so a lying reveal aborts instantly.
-//! 7. Each side derives its incoming payout note's opening (its own fresh
-//!    blinding, its app-provided npk) and PERSISTS it (witness.json WAL)
-//!    BEFORE the (npk, r) pair is handed to the payer — the payer can only
-//!    mint what my disk already remembers.
-//! 8. The two (npk, r) pairs are exchanged; the WAL is updated with the
-//!    counterparty's pair (my settle proof needs it).
+//! 4. Exchange owner signatures and collaboratively prove π_cmp. Fiat--Shamir
+//!    public components are retained as the common canonical template; the
+//!    final two KZG points are not opened between the peers.
+//! 5. Each owner submits its identity/deadline-bound native final-point share
+//!    and blocks until the chain reconstructs and verifies π_cmp for this
+//!    match round. Verification also creates the settlement-leg round and
+//!    its absolute ten-block deadline.
+//! 6. Each side derives its incoming payout-note opening, persists its own
+//!    `(npk, r)` before publishing it, exchanges both pairs, and persists the
+//!    peer pair too. Both `payout_keys.json` WALs are complete before reveal.
+//! 7. The smaller party sends its quantity and collateral blinding under
+//!    X25519/ChaCha20-Poly1305. The receiver validates the plaintext locally
+//!    against the comparison-proof-bound on-chain commitment. No MPC round or
+//!    peer exchange follows successful disclosure.
+//! 8. Each side derives the remaining output/residual data locally, completes
+//!    `witness.json`, and hands its own witness to the host for proving.
 
 use std::{fs, path::Path};
 
@@ -59,7 +66,8 @@ use crate::{
     mpc_compare::compare_three_way,
     mpc_poseidon::poseidon_hash,
     poseidon::{asset_fr, commit, fr_to_hex, hash2, note_commit},
-    prove::{ProveTimings, prove_collaborative_timed, verify_settle},
+    proof_share::encode_compare_proof_share_hex,
+    prove::{ProveTimings, prove_collaborative_share_timed},
     relation::{SettlePublic, SidePrivate, needed_collateral},
     stats::{StepTimer, StepTimings},
 };
@@ -166,9 +174,8 @@ pub struct MyOutcome {
     pub new_locked_commitment: String,
 }
 
-/// Crash-recovery record. First written BEFORE this side's (npk, r) pair
-/// leaves the process (my own secrets), rewritten complete after the
-/// exchange (the counterparty's pair, which my settle proof needs).
+/// Complete post-reveal crash-recovery record used to generate this owner's
+/// settlement proof.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionWitness {
     pub order_a_id: String,
@@ -180,14 +187,30 @@ pub struct SessionWitness {
     pub my: MyOutcome,
 }
 
+/// Minimal write-ahead record for the pre-reveal payout-key exchange. Both
+/// owners persist their own key before publishing it and persist the peer's
+/// key before the smaller opening is sent. Consequently, once a reveal can
+/// occur, either honest host already has the payout material its settlement
+/// proof needs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PayoutKeyWitness {
+    order_a_id: String,
+    order_b_id: String,
+    my_order_id: String,
+    my_recv_npk: String,
+    r_recv: String,
+    ctr_recv_npk: String,
+    ctr_r_recv: String,
+}
+
 /// The session's final product: everything the app needs to submit the
 /// comparison, prove its own settle circuit, and persist.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionResult {
     pub cmp: i8,
     pub public: SettlePublic,
-    /// Hex of the ark-compressed PLONK π_cmp (the on-chain wire format).
-    pub proof_hex: String,
+    /// Hex of this owner's canonical native collaborative-proof share.
+    pub proof_share_hex: String,
     /// Both traders' 128-char hex ed25519 signatures over the canonical
     /// compare message (opaque to this crate; the app verifies them).
     pub sig_a: String,
@@ -199,8 +222,8 @@ pub struct SessionResult {
     /// report it separately from the MPC/prove phases).
     #[serde(default)]
     pub onchain_wait_ms: f64,
-    /// Wall-clock of the local verification each trader runs on the opened
-    /// proof before releasing it (part of the prove step, reported apart).
+    /// Retained in the stats schema for backwards compatibility. Native proof
+    /// shares are first reconstructed and verified on chain, so this is zero.
     #[serde(default)]
     pub verify_ms: f64,
     /// Wall-clock of every protocol step, labelled to match
@@ -217,15 +240,14 @@ pub struct NeedSig {
 }
 
 /// The compare artifacts handed to the host BEFORE any reveal, so the host
-/// can land the comparison on chain first. Carries everything a
-/// `SubmitCompare` writing needs: the proven `cmp`, π_cmp, and both
-/// signatures.
+/// can land its owner-bound native proof share on chain first. Carries the
+/// proven `cmp`, this party's share payload, and both comparison signatures.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompareReady {
     pub cmp: i8,
     pub public: SettlePublic,
-    /// Hex of the ark-compressed PLONK π_cmp.
-    pub proof_hex: String,
+    /// Hex of this owner's canonical native collaborative-proof share.
+    pub proof_share_hex: String,
     pub sig_a: String,
     pub sig_b: String,
 }
@@ -240,8 +262,9 @@ pub struct CompareReady {
 /// ready but BEFORE the smaller side reveals its opening. The host MUST
 /// submit the comparison on chain and block until both orders are confirmed
 /// `Settling`; only then does it return `Ok`. Returning `Err` aborts the
-/// session before any secret leaves the process — no reveal, no on-chain
-/// trace, nothing to misattribute. This is the ordering that keeps a
+/// session before any secret leaves the process. A submitted comparison
+/// share may remain as an audit trace, but there is no quantity reveal to
+/// misattribute. This is the ordering that keeps a
 /// malicious larger side from extracting the smaller's quantity by aborting
 /// after the reveal (the reveal now never precedes the on-chain anchor).
 pub trait SigIo: Send {
@@ -558,7 +581,7 @@ where
 
     step.lap("4 signature ferry + exchange");
 
-    // ── Collaborative prove of π_cmp + verify-before-release ──
+    // ── Collaborative prove of π_cmp, retaining this party's final shares ──
     emit("prove", "collaboratively proving the comparison");
     let public = SettlePublic {
         cmp,
@@ -572,28 +595,21 @@ where
         order_amount: input.my.order_amount,
         r_locked: hex32(&input.my.r_locked, "r_locked")?,
     };
-    let (proof, timings) =
-        prove_collaborative_timed(fabric.clone(), my_party, &side, &public, config.pk).await?;
+    let (proof_share, timings) =
+        prove_collaborative_share_timed(fabric.clone(), my_party, &side, &public, config.pk)
+            .await?;
+    let proof_share_hex = encode_compare_proof_share_hex(&proof_share)?;
+    let verify_ms = 0.0;
+    step.lap("5 collaborative prove + native share export");
 
-    emit("verify", "verifying the proof locally before release");
-    let verify_start = std::time::Instant::now();
-    verify_settle(config.vk, &public, &proof)?;
-    let verify_ms = verify_start.elapsed().as_secs_f64() * 1e3;
-    let mut proof_bytes = Vec::new();
-    ark_serialize::CanonicalSerialize::serialize_compressed(&proof, &mut proof_bytes)
-        .context("serializing proof")?;
-    let proof_hex = hex::encode(proof_bytes);
-    step.lap("5 collaborative prove + local verify");
-
-    // ── F1 gate: the reveal must NOT precede the compare landing ON-CHAIN.
-    //    The host submits SubmitCompare (π_cmp + both signatures) and BLOCKS
-    //    until both orders are confirmed Settling; only then may the smaller
-    //    side reveal. Nothing secret has left this process yet, so aborting
-    //    here leaks nothing and leaves no trace to misattribute. ──
+    // ── Pre-reveal gate: each host submits its own proof share and
+    //    BLOCKS until both owner shares reconstruct and verify on chain;
+    //    only then may the smaller side reveal. Nothing secret has left this
+    //    process yet, so a timeout releases both orders without punishment. ──
     let ready = CompareReady {
         cmp,
         public: public.clone(),
-        proof_hex: proof_hex.clone(),
+        proof_share_hex: proof_share_hex.clone(),
         sig_a: sig_a.clone(),
         sig_b: sig_b.clone(),
     };
@@ -605,6 +621,72 @@ where
     tokio::task::block_in_place(|| sig_io.confirm_compare_onchain(&ready))?;
     let onchain_wait_ms = onchain_start.elapsed().as_secs_f64() * 1e3;
     step.lap("6 on-chain compare anchor (host wait)");
+
+    // ── Pre-reveal payout-key exchange ──
+    // Generate and WAL my incoming note key before publishing it, then WAL
+    // the peer's pair before any quantity opening can leave the smaller side.
+    // After this barrier there is no peer-dependent setup left that could
+    // prevent an honest owner from constructing its settlement proof.
+    emit("outputs", "exchanging payout-note keys before reveal");
+    let mut rng = OsRng;
+    // Blindings are sampled as field elements and stored in canonical
+    // 32-byte BE form because the exchange transports Fr values.
+    let mut draw = || {
+        let mut b = [0u8; 32];
+        rng.fill_bytes(&mut b);
+        let mut canonical = [0u8; 32];
+        let be = Scalar::<G1Projective>::new(blinding_fr(&b)).to_bytes_be();
+        canonical.copy_from_slice(&be);
+        canonical
+    };
+    let r_recv = draw();
+    let recv_npk_fr = commitment_fr(&input.my_recv_npk, "my_recv_npk")?;
+    let write_payout_wal = |ctr_recv_npk: &str, ctr_r_recv: &str| -> Result<()> {
+        let witness = PayoutKeyWitness {
+            order_a_id: input.order_a_id.clone(),
+            order_b_id: input.order_b_id.clone(),
+            my_order_id: input.my_order_id.clone(),
+            my_recv_npk: input.my_recv_npk.clone(),
+            r_recv: hex::encode(r_recv),
+            ctr_recv_npk: ctr_recv_npk.to_owned(),
+            ctr_r_recv: ctr_r_recv.to_owned(),
+        };
+        fs::create_dir_all(config.out_dir).context("creating session out dir")?;
+        fs::write(
+            config.out_dir.join("payout_keys.json"),
+            serde_json::to_string_pretty(&witness)?,
+        )
+        .context("writing payout_keys.json")
+    };
+    write_payout_wal("", "")?;
+
+    let my_pair: Vec<Scalar<G1Projective>> =
+        vec![Scalar::new(recv_npk_fr), Scalar::new(blinding_fr(&r_recv))];
+    let dummy_pair: Vec<Scalar<G1Projective>> = vec![zero; 2];
+    let pick_pair = |owner_is_a: bool| {
+        if owner_is_a == i_am_a {
+            my_pair.clone()
+        } else {
+            dummy_pair.clone()
+        }
+    };
+    let pair_a: Vec<Scalar<G1Projective>> = fabric.share_plaintext(pick_pair(true), PARTY0).await;
+    let pair_b: Vec<Scalar<G1Projective>> = fabric.share_plaintext(pick_pair(false), PARTY1).await;
+    ensure!(
+        pair_a.len() == 2 && pair_b.len() == 2,
+        "malformed payout-note payload from peer"
+    );
+    let mine_echo = if i_am_a { &pair_a } else { &pair_b };
+    ensure!(
+        mine_echo == &my_pair,
+        "own payout-note pair did not round-trip through the fabric"
+    );
+    let ctr_pair = if i_am_a { &pair_b } else { &pair_a };
+    let scalar_hex = |s: &Scalar<G1Projective>| hex::encode(s.to_bytes_be());
+    let ctr_recv_npk = scalar_hex(&ctr_pair[0]);
+    let ctr_r_recv = scalar_hex(&ctr_pair[1]);
+    write_payout_wal(&ctr_recv_npk, &ctr_r_recv)?;
+    step.lap("7 payout-note keys + pre-reveal WAL");
 
     // ── The smaller party reveals its opening (compare is now ON-CHAIN;
     //    the larger side's π_B must open the smaller's commitment) ──
@@ -654,14 +736,6 @@ where
             Scalar::<G1Projective>::from_be_bytes_mod_order(&plaintext[..32]),
             Scalar::<G1Projective>::from_be_bytes_mod_order(&plaintext[32..]),
         ];
-        // Bind the plaintext reveal to the MPC-verified shares: a lying
-        // reveal aborts here, not as a rejected settle proof later.
-        let (v_smaller, r_smaller) = if cmp == 1 { (&q_b, &r_b) } else { (&q_a, &r_a) };
-        let v_diff = v_smaller - revealed[0];
-        let r_diff = r_smaller - revealed[1];
-        open_expect_zero(&v_diff, "reveal amount consistency").await?;
-        open_expect_zero(&r_diff, "reveal blinding consistency").await?;
-
         if reveal_mine {
             (input.my.order_amount, 0u64, String::new())
         } else {
@@ -670,31 +744,30 @@ where
             let be = revealed[1].to_bytes_be();
             ensure!(be.len() == 32, "unexpected scalar encoding length");
             r.copy_from_slice(&be);
+            // No MPC round is allowed after disclosure: validate the reveal
+            // locally against the already proof-bound on-chain collateral
+            // commitment. A malicious receiver can now disconnect without
+            // preventing the honest smaller owner from completing locally.
+            let (price, is_seller, locked) = if cmp == 1 {
+                (input.price_b, !input.a_is_seller, public.locked_b)
+            } else {
+                (input.price_a, input.a_is_seller, public.locked_a)
+            };
+            let revealed_locked = needed_collateral(q_ctr, price, is_seller)?;
+            ensure!(
+                commit(revealed_locked, &r) == locked,
+                "smaller-side reveal does not open its on-chain collateral commitment"
+            );
             (q_ctr, q_ctr, hex::encode(r))
         }
     };
 
-    step.lap("7 smaller-side reveal");
+    step.lap("8 smaller-side reveal");
 
     // ── Derive my incoming payout note's opening + my residuals ──
     emit("outputs", "deriving payout-note openings");
-    let mut rng = OsRng;
-    // Blindings are drawn AS field elements (raw bytes reduced immediately,
-    // stored in canonical 32-byte BE form): the exchange transports Fr
-    // values, so a non-canonical raw encoding would come back different on
-    // the other side.
-    let mut draw = || {
-        let mut b = [0u8; 32];
-        rng.fill_bytes(&mut b);
-        let mut canonical = [0u8; 32];
-        let be = Scalar::<G1Projective>::new(blinding_fr(&b)).to_bytes_be();
-        canonical.copy_from_slice(&be);
-        canonical
-    };
     // My payout: what the counterparty pays me, in my recv token.
     let recv_amount = scale_leg(fill, i_am_seller, input.execution_price, "receive")?;
-    let r_recv = draw();
-    let recv_npk_fr = commitment_fr(&input.my_recv_npk, "my_recv_npk")?;
     let recv_asset = asset_fr(&input.my_recv_token)?;
     let recv_commitment = fr_to_hex(&note_commit(recv_npk_fr, recv_asset, recv_amount, &r_recv));
 
@@ -738,7 +811,7 @@ where
         &r_refund,
     ));
 
-    let mut my_outcome = MyOutcome {
+    let my_outcome = MyOutcome {
         is_a: i_am_a,
         i_am_smaller,
         cmp,
@@ -753,8 +826,8 @@ where
         refund_npk: input.my_refund_npk.clone(),
         r_refund: hex::encode(r_refund),
         refund_commitment,
-        ctr_recv_npk: String::new(),
-        ctr_r_recv: String::new(),
+        ctr_recv_npk,
+        ctr_r_recv,
         ctr_order_amount,
         ctr_r_locked,
         new_order_amount,
@@ -763,8 +836,9 @@ where
         new_locked_commitment,
     };
 
-    // ── WAL v1: MY money-critical secrets on disk BEFORE my (npk, r)
-    //    reaches the payer (they can only mint what my disk remembers) ──
+    // ── Complete post-reveal WAL. The payout keys were already persisted
+    //    before disclosure; this adds fill, refund, residual and (for the
+    //    larger side) the counterparty's revealed opening. ──
     let write_wal = |outcome: &MyOutcome| -> Result<()> {
         let witness = SessionWitness {
             order_a_id: input.order_a_id.clone(),
@@ -780,43 +854,12 @@ where
         fs::write(&path, serde_json::to_string_pretty(&witness)?).context("writing witness.json")
     };
     write_wal(&my_outcome)?;
-
-    // ── Exchange (npk, r) so each payer can mint the other's note ──
-    emit("outputs", "exchanging payout-note keys");
-    let my_pair: Vec<Scalar<G1Projective>> =
-        vec![Scalar::new(recv_npk_fr), Scalar::new(blinding_fr(&r_recv))];
-    let dummy_pair: Vec<Scalar<G1Projective>> = vec![zero; 2];
-    let pick_pair = |owner_is_a: bool| {
-        if owner_is_a == i_am_a {
-            my_pair.clone()
-        } else {
-            dummy_pair.clone()
-        }
-    };
-    let pair_a: Vec<Scalar<G1Projective>> = fabric.share_plaintext(pick_pair(true), PARTY0).await;
-    let pair_b: Vec<Scalar<G1Projective>> = fabric.share_plaintext(pick_pair(false), PARTY1).await;
-    ensure!(
-        pair_a.len() == 2 && pair_b.len() == 2,
-        "malformed payout-note payload from peer"
-    );
-    let mine_echo = if i_am_a { &pair_a } else { &pair_b };
-    ensure!(
-        mine_echo == &my_pair,
-        "own payout-note pair did not round-trip through the fabric"
-    );
-    let ctr_pair = if i_am_a { &pair_b } else { &pair_a };
-    let scalar_hex = |s: &Scalar<G1Projective>| hex::encode(s.to_bytes_be());
-    my_outcome.ctr_recv_npk = scalar_hex(&ctr_pair[0]);
-    my_outcome.ctr_r_recv = scalar_hex(&ctr_pair[1]);
-
-    // ── WAL v2: complete (my settle proof needs the counterparty's pair) ──
-    write_wal(&my_outcome)?;
-    step.lap("8 payout-note keys + WAL");
+    step.lap("9 outputs + complete WAL");
 
     Ok(SessionResult {
         cmp,
         public,
-        proof_hex,
+        proof_share_hex,
         sig_a,
         sig_b,
         my: my_outcome,
@@ -829,10 +872,8 @@ where
 
 // ────────────────────── Settle-leg exchange (SettlePair) ──────────────────────
 
-/// One side's settle artifacts for the atomic `SettlePair` writing, as the
-/// host app assembles them AFTER the session (its own single-prover settle
-/// proof + owner signature). Residual fields are empty for a fully filled
-/// leg. Mirrors the chain's `SettlePairLeg` JSON.
+/// One side's settle artifacts. Production submits this owner-bound leg
+/// directly; the exchange helper below remains for benchmark compatibility.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettleLeg {
     /// True when this leg belongs to order A (the maker side).
@@ -938,8 +979,8 @@ async fn exchange_bytes(
     Ok((bytes_a, bytes_b))
 }
 
-/// Exchange the two settle legs over the still-open session fabric so
-/// EITHER party can submit the atomic `SettlePair`. `my_leg.is_a` must
+/// Legacy benchmark helper that exchanges the two settle legs over the
+/// fabric. Production no longer exchanges peer proofs. `my_leg.is_a` must
 /// match this party's role (PARTY0 = A). Returns (leg_a, leg_b).
 pub async fn exchange_settle_legs(
     fabric: &MpcFabric<G1Projective>,

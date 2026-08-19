@@ -27,7 +27,7 @@ func loadCoZk2pVK(t *testing.T, fx cozk2pFixture) *PlonkVK {
 }
 
 // rebuildComparePublic assembles the comparison statement from the fixture
-// the same way SubmitCompareCoZk2p does from a request + order rows.
+// the same way proof-share assembly does from a request + order rows.
 func rebuildComparePublic(fx cozk2pFixture) settle2pPublic {
 	return settle2pPublic{
 		Cmp:       fx.Cmp,
@@ -45,6 +45,34 @@ func TestVerifyPlonkAcceptsCollaborativeCompareProof(t *testing.T) {
 	public := marshalPublic(t, rebuildComparePublic(fx))
 	if err := VerifyPlonkSettle2p(vk, fx.ProofHex, public); err != nil {
 		t.Fatalf("verify on a valid collaborative compare proof must succeed, got: %v", err)
+	}
+}
+
+func TestVerifyPlonkAcceptsNativeCollaborativeCompareShares(t *testing.T) {
+	fx := loadCoZk2pFixture(t)
+	if fx.ShareAHex == "" || fx.ShareBHex == "" {
+		t.Skip("fixture predates native proof shares; regenerate it")
+	}
+	vk := loadCoZk2pVK(t, fx)
+	public := marshalPublic(t, rebuildComparePublic(fx))
+	if err := VerifyPlonkSettle2pShares(vk, fx.ShareAHex, fx.ShareBHex, public); err != nil {
+		t.Fatalf("verify on valid native collaborative shares must succeed, got: %v", err)
+	}
+}
+
+func TestVerifyPlonkRejectsTamperedNativeCollaborativeCompareShare(t *testing.T) {
+	fx := loadCoZk2pFixture(t)
+	if fx.ShareAHex == "" || fx.ShareBHex == "" {
+		t.Skip("fixture predates native proof shares; regenerate it")
+	}
+	vk := loadCoZk2pVK(t, fx)
+	public := marshalPublic(t, rebuildComparePublic(fx))
+	tamperedB := fx.ShareBHex[:len(fx.ShareBHex)-1] + "0"
+	if fx.ShareBHex[len(fx.ShareBHex)-1] == '0' {
+		tamperedB = fx.ShareBHex[:len(fx.ShareBHex)-1] + "1"
+	}
+	if err := VerifyPlonkSettle2pShares(vk, fx.ShareAHex, tamperedB, public); err == nil {
+		t.Fatal("verify must reject a tampered native collaborative share")
 	}
 }
 

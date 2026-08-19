@@ -19,33 +19,14 @@ func hexCommit(seed byte) string {
 	return "00" + strings.Repeat(hex.EncodeToString([]byte{seed}), 31)
 }
 
-// TestCoZkSettleLifecycle drives the paper's settlement state machine end
-// to end in test mode (VK paths empty → proof checks skipped; signatures
-// are still enforced): match → SubmitCompareCoZk → SettleSmall (taker,
-// fully filled, payout note minted) → SettleLarge (maker relisted with its
-// remainder, fill note minted).
-func TestCoZkSettleLifecycle(t *testing.T) {
-	runCompareSettleLifecycle(t, "SubmitCompareCoZk", core.CoZkCompareMessage, core.CoZk2pCompareMessage)
-}
-
-// TestCoZk2pSettleLifecycle drives the same state machine through the
-// 2-party compare writing (PLONK VK path empty in test mode → proof
-// verification skipped; signatures still enforced over the domain-separated
-// 2p message).
+// TestCoZk2pSettleLifecycle drives the current state machine through two
+// owner-bound comparison shares and two owner-bound settlement legs. Proof
+// verification is skipped in this test config; signatures remain enforced.
 func TestCoZk2pSettleLifecycle(t *testing.T) {
-	runCompareSettleLifecycle(t, "SubmitCompareCoZk2p", core.CoZk2pCompareMessage, core.CoZkCompareMessage)
+	runCompareSettleLifecycle(t)
 }
 
-// runCompareSettleLifecycle is the shared lifecycle driver. `writing` names
-// the compare writing to submit; `signMsg` builds its canonical message;
-// `crossMsg` the OTHER variant's — a request signed with it must be
-// rejected, pinning signature domain separation end to end.
-func runCompareSettleLifecycle(
-	t *testing.T,
-	writing string,
-	signMsg func(*core.CompareRequest) []byte,
-	crossMsg func(*core.CompareRequest) []byte,
-) {
+func runCompareSettleLifecycle(t *testing.T) {
 	alicePriv, alicePubkey := deriveKeypair(t, aliceDerivedSeedHex)
 	bobPriv, bobPubkey := deriveKeypair(t, bobDerivedSeedHex)
 
@@ -90,44 +71,32 @@ func runCompareSettleLifecycle(
 
 	poolBefore := getPoolInfo(t)
 
-	// --- Compare submission: cmp = 1 (alice's sell is larger) ---
-	req := &core.CompareRequest{
-		OrderAID: sellOrderID,
-		OrderBID: buyOrderID,
-		Cmp:      1,
-		ZkProof:  "test-proof-skip",
-	}
-	msg := signMsg(req)
-	req.SigA = hex.EncodeToString(ed25519.Sign(alicePriv, msg))
-	req.SigB = hex.EncodeToString(ed25519.Sign(bobPriv, msg))
-
-	// Negative: a tampered signature must not change any state.
-	badReq := *req
-	badReq.SigB = hex.EncodeToString(ed25519.Sign(alicePriv, msg)) // wrong key
-	if err := wrCall("orderbook", writing, &badReq); err != nil {
-		t.Fatalf("submitting bad-signature compare failed at HTTP level: %v", err)
+	// --- Comparison shares: cmp = 1 (alice's sell is larger). ---
+	writing := "SubmitCompareCoZk2pShare"
+	registerPairAddresses(t, alicePriv, bobPriv, sellOrderID, buyOrderID, 1)
+	aShare := []byte("native-share-a")
+	bShare := []byte("native-share-b")
+	deadline := queryCompareShareDeadline(t, sellOrderID, buyOrderID, sellOrderID, 1)
+	aReq := compareShareRequest(alicePriv, sellOrderID, buyOrderID, sellOrderID, 1, 1, deadline, hex.EncodeToString(aShare))
+	if err := wrCall("orderbook", writing, aReq); err != nil {
+		t.Fatalf("A compare share: %v", err)
 	}
 	waitBlock()
 	if st := queryOrders(t, sellOrderID)[0].Status; st != 1 {
-		t.Fatalf("bad signature must be rejected: sell order moved to %d", st)
+		t.Fatalf("one comparison share must leave the pair Matched, got %d", st)
 	}
-
-	// Negative: signatures over the OTHER variant's message must be rejected.
-	crossReq := *req
-	wrongMsg := crossMsg(req)
-	crossReq.SigA = hex.EncodeToString(ed25519.Sign(alicePriv, wrongMsg))
-	crossReq.SigB = hex.EncodeToString(ed25519.Sign(bobPriv, wrongMsg))
-	if err := wrCall("orderbook", writing, &crossReq); err != nil {
-		t.Fatalf("submitting cross-domain compare failed at HTTP level: %v", err)
+	badB := compareShareRequest(bobPriv, sellOrderID, buyOrderID, buyOrderID, 1, 1, deadline, hex.EncodeToString(bShare))
+	badB.Signature = hex.EncodeToString(ed25519.Sign(alicePriv, core.CompareShareSigningMessage(badB)))
+	if err := wrCall("orderbook", writing, badB); err != nil {
+		t.Fatalf("bad B compare share HTTP submission: %v", err)
 	}
 	waitBlock()
 	if st := queryOrders(t, sellOrderID)[0].Status; st != 1 {
-		t.Fatalf("cross-domain signature must be rejected: sell order moved to %d", st)
+		t.Fatalf("impersonated comparison share must be rejected, got %d", st)
 	}
-
-	// Happy path: both orders move to Settling.
-	if err := wrCall("orderbook", writing, req); err != nil {
-		t.Fatalf("%s failed: %v", writing, err)
+	bReq := compareShareRequest(bobPriv, sellOrderID, buyOrderID, buyOrderID, 1, 1, deadline, hex.EncodeToString(bShare))
+	if err := wrCall("orderbook", writing, bReq); err != nil {
+		t.Fatalf("B compare share: %v", err)
 	}
 	waitBlock()
 	if st := queryOrders(t, sellOrderID)[0].Status; st != 5 {
@@ -203,56 +172,49 @@ func runCompareSettleLifecycle(
 			poolBefore.LeafCount, got.LeafCount)
 	}
 
-	// P1-2 regression: one signed counterparty leg + a garbage own leg must
-	// abort the WHOLE pair — no payout for anyone.
+	// A forged owner leg must not be stored or mint anything.
 	forged := *largeSig
 	forged.CmNoteOut = hexCommit(0xC7) // attacker redirects the payout
 	forgedLeg := aliceLeg
 	forgedLeg.CmNoteOut = forged.CmNoteOut
 	// The attacker cannot produce alice's signature over the forged leg;
 	// reusing the old signature must fail verification.
-	oneLeg := &core.SettlePairRequest{
-		OrderAID: sellOrderID,
-		OrderBID: buyOrderID,
-		A:        forgedLeg,
-		B:        bobLeg,
-	}
-	if err := wrCall("orderbook", "SettlePair", oneLeg); err != nil {
-		t.Fatalf("submitting one-good-leg pair failed at HTTP level: %v", err)
+	forgedReq := ownerLegRequest(alicePriv, sellOrderID, buyOrderID, sellOrderID, 1, forgedLeg)
+	if err := wrCall("orderbook", "SubmitSettleLeg", forgedReq); err != nil {
+		t.Fatalf("submitting forged owner leg failed at HTTP level: %v", err)
 	}
 	waitBlock()
 	if st := queryOrders(t, buyOrderID)[0].Status; st != 5 {
-		t.Fatalf("pair with a forged leg must not settle: buy order moved to %d", st)
+		t.Fatalf("forged leg must not settle: buy order moved to %d", st)
 	}
 	if got := getPoolInfo(t); got.LeafCount != poolBefore.LeafCount {
 		t.Fatal("pair with a forged leg must mint nothing")
 	}
 
-	// Negative: swapping the legs (small shape on the larger side) must be
-	// rejected — the recorded cmp decides which circuit each side may use.
-	swapped := &core.SettlePairRequest{
-		OrderAID: sellOrderID,
-		OrderBID: buyOrderID,
-		A:        bobLeg,
-		B:        aliceLeg,
-	}
-	if err := wrCall("orderbook", "SettlePair", swapped); err != nil {
-		t.Fatalf("submitting swapped-legs pair failed at HTTP level: %v", err)
+	// Negative: the small shape submitted as larger owner A must be rejected;
+	// the recorded cmp decides which circuit each owner may use.
+	swapped := ownerLegRequest(alicePriv, sellOrderID, buyOrderID, sellOrderID, 1, bobLeg)
+	if err := wrCall("orderbook", "SubmitSettleLeg", swapped); err != nil {
+		t.Fatalf("submitting wrong-shape owner leg failed at HTTP level: %v", err)
 	}
 	waitBlock()
 	if st := queryOrders(t, sellOrderID)[0].Status; st != 5 {
-		t.Fatalf("swapped legs must be rejected, sell order moved to %d", st)
+		t.Fatalf("wrong-shape leg must be rejected, sell order moved to %d", st)
 	}
 
-	// Happy path: the ATOMIC pair settles both sides in one writing.
-	pairReq := &core.SettlePairRequest{
-		OrderAID: sellOrderID,
-		OrderBID: buyOrderID,
-		A:        aliceLeg,
-		B:        bobLeg,
+	// Happy path: each owner submits only its own leg. The first changes no
+	// balances; the second triggers the existing atomic pair executor.
+	aLegReq := ownerLegRequest(alicePriv, sellOrderID, buyOrderID, sellOrderID, 1, aliceLeg)
+	if err := wrCall("orderbook", "SubmitSettleLeg", aLegReq); err != nil {
+		t.Fatalf("SubmitSettleLeg (alice) failed: %v", err)
 	}
-	if err := wrCall("orderbook", "SettlePair", pairReq); err != nil {
-		t.Fatalf("SettlePair failed: %v", err)
+	waitBlock()
+	if got := getPoolInfo(t); got.LeafCount != poolBefore.LeafCount {
+		t.Fatal("one settlement leg must mint nothing")
+	}
+	bLegReq := ownerLegRequest(bobPriv, sellOrderID, buyOrderID, buyOrderID, 1, bobLeg)
+	if err := wrCall("orderbook", "SubmitSettleLeg", bLegReq); err != nil {
+		t.Fatalf("SubmitSettleLeg (bob) failed: %v", err)
 	}
 	waitBlock()
 
@@ -275,7 +237,7 @@ func runCompareSettleLifecycle(
 	// Both payouts and both refund notes landed in the same step (+4 leaves).
 	afterPair := getPoolInfo(t)
 	if afterPair.LeafCount != poolBefore.LeafCount+4 {
-		t.Fatalf("SettlePair must append exactly four pool notes, %d → %d",
+		t.Fatalf("two-leg settlement must append exactly four pool notes, %d → %d",
 			poolBefore.LeafCount, afterPair.LeafCount)
 	}
 	if getNoteByCm(t, bobLeg.CmNoteOut) < 0 || getNoteByCm(t, aliceLeg.CmNoteOut) < 0 {
@@ -284,7 +246,7 @@ func runCompareSettleLifecycle(
 
 	// Replays must not change anything (the pair is no longer Settling, and
 	// the settlement id has already minted).
-	if err := wrCall("orderbook", "SettlePair", pairReq); err != nil {
+	if err := wrCall("orderbook", "SubmitSettleLeg", aLegReq); err != nil {
 		t.Logf("replay rejected at txpool level: %v", err)
 	}
 	waitBlock()

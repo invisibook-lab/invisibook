@@ -1,6 +1,6 @@
 # Settlement Protocol Reference
 
-> **Status:** Current (2026-08-18, note model + locked-only orders,
+> **Status:** Current (2026-08-19, note model + locked-only orders,
 > branch `cozk-split`).
 > This document is the step-by-step reference for the settlement
 > protocol. It names every step trader A and trader B perform, every
@@ -48,10 +48,32 @@ of `x`; `Com(v, r) = P2(v, r)`.
 
 ## 2. The protocol
 
-The MPC proves the comparison (π_cmp). After `cmp` is public and
-anchored on chain, the smaller side reveals its opening; each side then
-proves its OWN settle circuit alone, and one atomic writing settles
-both legs.
+The MPC proves the comparison (π_cmp). Fiat–Shamir already makes the
+proof's common transcript components public to both sessions; each order
+owner submits that same canonical template plus its native SPDZ value shares
+of the two final KZG G1 points. Only after both payloads arrive, the templates
+match, the two point pairs are group-added, and the reconstructed standard
+proof verifies may the parties enter the pre-reveal payout-key barrier and
+then disclose the smaller opening. Each side subsequently proves and submits
+its OWN settle circuit alone. Both payout-note key pairs are exchanged and
+durably recorded before reveal, so no peer or MPC dependency remains
+afterward. Comparison verification creates the
+absolute settlement-leg deadline; the chain buffers owner legs and executes
+the pair atomically after the second verifies.
+
+> **Current security scope: compliant-until-fail-stop.** The pre-reveal
+> payout-key pairs are exchanged and WAL-persisted, but are not owner-signed
+> or committed on chain. In both settle circuits, `npk_ctr` and `r_note` are
+> private witness values with no public binding to the counterparty's
+> pre-reveal choice. A malicious payer can therefore choose another payout
+> opening and generate an otherwise valid proof that redirects the payment.
+> The required fix is an owner-signed, pre-reveal payout-key commitment plus a
+> public binding to that commitment in both settle circuits and chain checks.
+> Until then, atomic execution and timeout attribution do not make the overall
+> protocol Byzantine-safe. Independently, the configured
+> `PartyIDBeaverSource` uses predictable mock preprocessing: it provides no
+> production input privacy or proof zero knowledge and must be replaced by a
+> real SPDZ offline phase.
 
 ### 2.1 Sequence diagram
 
@@ -70,23 +92,27 @@ both legs.
  (3) │ MPC three-way compare ──────────▶ open cmp ∈ {−1,0,1}     │
  (4) │ sign(compare msg) ◀──sig limbs, plaintext──▶ sign(...)    │  host signs cmp
  (5) │ collaborative prove π_cmp; witness-validity gate;         │
-     │ MAC-checked open; each side verifies π_cmp locally        │
+     │ open common FS components; retain final G1 value shares    │
      │                             │                             │
- (6) │ SubmitCompareCoZk2p{ids, cmp, sig_A, sig_B, π_cmp}        │  either party
-     ├────────────────────────────▶│◀────────────(or)────────────┤
-     │      chain: verify 2 sigs + π_cmp → both orders Settling  │
-     │ SubmitSettleCheckpoint(state,round) from both owners      │
-     │ ...hosts BLOCK until both durable checkpoints (F1)...     │
+ (6) │ SubmitCompareShare(A,round,deadline,cmp,payload_A,outer_sig_A)│
+     ├────────────────────────────▶│◀────────────────────────────┤
+     │ SubmitCompareShare(B,round,deadline,cmp,payload_B,outer_sig_B)│
+     │ chain: require same template; add 2 G1-share pairs;        │
+     │        construct + verify π_cmp → both orders Settling   │
+     │        create settlement deadline = verify height + 10   │
+     │ ...hosts BLOCK until verification (pre-reveal gate)...   │
      │                             │                             │
- (7) │◀── X25519/ChaCha20-Poly1305 Enc(q, r_locked) ────────────▶│
-     │ open([q_small] − q) == 0, open([r_small] − r) == 0        │  lying reveal aborts
- (8) │ derive my payout (npk, r_recv); WAL v1;                   │
-     │◀───────── exchange (npk, r_recv) pairs ──────────────────▶│  WAL v2
- (9) │ rapidsnark π_B (large)      │      rapidsnark π_A (small) │  each proves alone
+ (7) │ derive my payout key; WAL own pair                        │
+     │◀───────── exchange (npk, r_recv) pairs ──────────────────▶│
+     │ WAL peer pair too — BOTH local payout-key WALs durable    │
+ (8) │◀── X25519/ChaCha20-Poly1305 Enc(q, r_locked) ────────────▶│
+     │ receiver locally checks the proof-bound commitment        │
+     │ ...no peer/MPC dependency remains after disclosure...     │
+ (9) │ complete witness; rapidsnark π_B │ complete witness; π_A  │  each proves alone
      │ sign own leg                │              sign own leg   │
-     │◀═══════════ exchange signed legs over the fabric ════════▶│
-(10) │ SettlePair{ids, leg_A, leg_B}                             │  either party
-     ├────────────────────────────▶│◀────────────(or)────────────┤
+(10) │ SubmitSettleLeg(owner=A,round,leg_A,outer_sig_A)        │
+     ├────────────────────────────▶│◀────────────────────────────┤
+     │ SubmitSettleLeg(owner=B,round,leg_B,outer_sig_B)        │
      │   chain: verify BOTH legs → mint BOTH payout notes in one │
      │   pool mutation; small side Done; large side relisted     │
      │  ...both hosts confirm on chain, persist note + residual  │
@@ -106,49 +132,98 @@ and proves π_A. When cmp = 0 there is no reveal and BOTH sides prove
 | 2 | input `[q_A], [r_A]` | input `[q_B], [r_B]` | fabric (shares) | `open(P2(needed([q]), [r]) − locked) == 0` for BOTH orders |
 | 3 | run the compare protocol (§3.3) | same | fabric | opened `cmp ∈ {−1,0,1}` |
 | 4 | host signs `compare msg(ids, cmp)`; limbs exchanged | same | stdio + fabric | own signature round-trips unchanged |
-| 5 | collaborative prove π_cmp | same | fabric | witness-validity gate (§3.5) passes; local verify of the opened proof |
-| 6 | either host submits `SubmitCompareCoZk2p`; both wait for `Settling`, upload `SubmitSettleCheckpoint`, and BLOCK until both round checkpoints exist | same | chain | the F1 anchor: a sole uploader can freeze a missing peer after 10 blocks; nothing was revealed yet |
-| 7 | (larger) decrypts the reveal | (smaller) sends `Enc(q, r)` | fabric (X25519 + ChaCha20-Poly1305) | AEAD authenticates pair/prices/side; `open([q_small] − q) == 0` and same for `r` |
-| 8 | derive own payout-note opening `(npk, r_recv)`; write WAL v1; exchange the pairs; write WAL v2 | same | fabric (plaintext) | own pair round-trips unchanged |
-| 9 | prove `settle_large` (π_B), sign the leg | prove `settle_small` (π_A), sign the leg | local (rapidsnark) | — |
-| 9' | exchange the signed legs | same | fabric (plaintext) | leg roles consistent (one A-leg, one B-leg) |
-| 10 | either host submits `SettlePair`; both confirm on chain; persist the payout and any non-zero refund (PENDING_MINT), plus the larger side's residual opening | same | chain | small order `Done`; large order relisted `Pending`; two payouts plus two hiding refund commitments mint atomically |
+| 5 | collaborative prove π_cmp; export common canonical template + PARTY0's two final G1 value shares | same template + PARTY1's two final G1 value shares | fabric then local export | witness-validity gate (§3.5) passes; common Fiat–Shamir components are opened as required, but neither session opens or locally verifies a complete standard proof |
+| 6 | submit A's identity/round/deadline-bound π_cmp payload | submit B's identity/round/deadline-bound π_cmp payload | chain | this round's `MatchHeight + 10` is the comparison deadline; Rust matches templates, group-adds only the final point-share pairs, and PLONK-verifies before moving both orders to `Settling`. The same transaction creates the settlement deadline `verification_height + 10` |
+| 7 | persist own payout `(npk, r_recv)`, exchange both pairs, persist peer pair | same | fabric + local `payout_keys.json` | own pair round-trips unchanged; BOTH local WALs contain both pairs before reveal |
+| 8 | (larger) decrypts and locally checks the reveal | (smaller) sends `Enc(q, r)` | fabric (X25519 + ChaCha20-Poly1305) | AEAD authenticates pair/prices/side; the receiver recomputes the proof-bound collateral commitment locally; no later peer/MPC operation |
+| 9 | complete `witness.json`; prove `settle_large` (π_B), sign | complete `witness.json`; prove `settle_small` (π_A), sign | local (rapidsnark) | every peer-supplied payout-key input was durable before reveal |
+| 10 | submit only A's owner-bound leg | submit only B's owner-bound leg | chain | submissions use the already-open absolute deadline; second valid leg triggers atomic mint/update. At expiry, only `cmp != 0` plus a lone valid large-side leg is punitive: release large and freeze missing small. Zero-leg, only-small, and incomplete `cmp = 0` rounds release both without blame |
 
 Who knows what, and when: `cmp` becomes public at step 3 (in-session)
-and on-chain at step 6. The smaller side's `(q, r_locked)` reaches ONLY
-the larger side, at step 7, strictly after the on-chain anchor.
-Payout-note openings are on the RECEIVER's disk (WAL) before the payer
-ever sees `(npk, r_recv)`.
+and on-chain at step 6. Before step 6 neither trader holds the complete
+standard PLONK proof: both know the transcript-common template and each
+knows only its own two final G1 value shares. The smaller side's
+`(q, r_locked)` reaches ONLY the larger side, at step 8, strictly after the
+on-chain anchor and the bilateral payout-key WAL barrier. At step 7 each side
+first persists its own pair, then persists the peer pair; therefore both
+owners already have every peer-supplied payout input before reveal. After
+step 8 each can finish locally even if the peer disconnects.
 
 ### 2.3 Exact on-chain submissions
 
-**`SubmitCompareCoZk2p`** (either party):
+**`SubmitCompareCoZk2pShare`** (once per owner):
 
 ```json
-{"order_a_id","order_b_id","cmp","sig_a","sig_b","zk_proof"}
+{"chain_id","order_a_id","order_b_id","owner_order_id",
+ "match_round","cmp","deadline_height","proof_share","signature"}
 ```
 
-`sig_a`/`sig_b` are both traders' ed25519 signatures over the SAME
-length-prefixed message with domain `invisibook-cozk2p-compare-v3` and
-fields `(order_a_id, order_b_id, cmp)`.
-`zk_proof` is the hex ark-compressed collaborative PLONK π_cmp.
+The chain verifies `signature` against `owner_order_id`'s order key. It
+binds chain id, canonical pair, owner, match round, `cmp`, the exact
+chain-derived `deadline_height`, and the SHA-256 digest of `proof_share`
+under `invisibook-cozk2p-proof-share-v3`.
+`proof_share` is lowercase hex of a versioned, party-tagged canonical Rust
+payload. Logically it contains:
 
-**`SettlePair`** (either party):
+- the standard proof's Fiat–Shamir common components (wire, permutation and
+  split-quotient commitments, polynomial evaluations, and the Plookup
+  option). Both owners submit the SAME canonical template. These public
+  components are submitted verbatim and compared for equality; they are
+  neither re-shared nor added;
+- this party's native additive SPDZ **value share** of each of the final
+  `opening_proof` and `shifted_opening_proof` KZG G1 points. The SPDZ MAC
+  shares are intentionally not serialized or uploaded because the chain
+  does not possess the MPC MAC-key shares.
+
+Every match/rematch writes the same fresh `MatchHeight` to both rows and fixes
+`deadline_height = MatchHeight + 10`; original `BlockHeight` is retained only
+for time priority. A submitter cannot choose or extend the deadline, and both
+payloads must arrive by it. Rust validates version and PARTY0/PARTY1 tags,
+requires the common templates to match, performs G1 group addition on only
+the two final point-share pairs, constructs the standard PLONK proof, and
+verifies it against the chain-rebuilt public statement. No byte-wise share
+operation is used.
+
+**`SubmitSettleLeg`** (once per owner):
 
 ```json
-{"order_a_id","order_b_id",
- "a":{"cm_note_out","cm_refund_out","signature","zk_proof"},      // small leg
- "b":{"cm_note_out","cm_refund_out","signature","zk_proof",
-      "cm_locked_residual"}}                                      // large leg
+{"chain_id","order_a_id","order_b_id","owner_order_id","match_round",
+ "leg":{"cm_note_out","cm_refund_out","signature","zk_proof",
+        "cm_locked_residual"},
+ "submission_signature"}
 ```
 
-Each leg carries its OWN owner's signature over a length-prefixed
+The outer `submission_signature` binds identity, canonical pair, round,
+all leg outputs, the inner signature, and the proof digest. The leg also
+carries its owner's inner signature over a length-prefixed
 message: small `["invisibook-settle-small-v2", order_id,
 match_order_id, cm_note_out, cm_refund_out]`; large
 `["invisibook-settle-large-v2", order_id, match_order_id,
 cm_locked_residual, cm_note_out, cm_refund_out]`. Each leg's
 Groth16 proof carries a `bind` public input over the same fields plus the
 chain id (§4.0).
+
+This request does not choose a deadline. When comparison verification moved
+the pair to `Settling`, the chain already created the settlement-leg row with
+`deadline_height = verification_height + 10`. A zero-leg expiry is treated as
+pre-reveal failure and releases both owners without blame. For `cmp != 0`, a
+lone valid large-side leg proves that the large owner knew the smaller
+opening; the large owner is released and the missing small owner is frozen.
+A lone small-side leg does not prove delivery to the large owner, so the
+chain releases both without blame. For `cmp = 0`, no smaller opening exists,
+so every incomplete round is also non-punitive.
+
+> **Attribution limit (current threat model).** Proof presence is not
+> uniformly objective delivery evidence. The large-side circuit opens the
+> counterparty's locked commitment, so a valid large leg supplies evidence
+> that its owner knew `(q, r_locked)` and safely supports freezing a missing
+> small owner. The small-side circuit uses only that owner's witness, so a
+> malicious small owner can generate its leg without proving that the opening
+> reached the large owner. The chain therefore does **not** punish an
+> only-small timeout. Fully Byzantine symmetric attribution needs a verifiable
+> encrypted reveal or another chain-checkable delivery artifact. An ordinary
+> signed receipt is insufficient: a receiver may obtain the opening and then
+> withhold the receipt, recreating the fair-exchange problem.
 
 ### 2.4 Measured latency, step by step
 
@@ -167,12 +242,12 @@ only where noted. Rows are the steps of §2.2. Reproduce with
 | 2 share inputs + collateral binding (2 Poseidon over shares) | 43 |
 | 3 three-way compare | 14 |
 | 4 signature ferry + exchange | 1 |
-| 5 collaborative prove π_cmp + local verify | 3 646 |
-| 6 on-chain compare anchor (host/chain wait) | 6 010 |
+| 5 collaborative prove π_cmp (historical baseline) | 3 646 |
+| 6 on-chain compare wait (historical baseline) | 6 010 |
 | 7 smaller-side reveal | 2 |
 | 8 payout-note keys + WAL | 1 |
 | **session subprocess total** | **10 034** |
-| 9 own settle leg (rapidsnark) + 9' leg exchange, R rendezvous, 10 `SettlePair` submit and confirm | 10 110 |
+| 9 own settle leg + R rendezvous + 10 settlement confirm (historical baseline) | 10 110 |
 | **`run_settle` total** | **20 144** (p95 22 094) |
 | **full trade, both orders** | **34 553** (p95 36 507) |
 
@@ -180,16 +255,22 @@ Step 5 is 18 % of the settlement, and every other cryptographic step
 together is under 100 ms. The block waits — steps 6 and 10 and the
 rendezvous — are 80 %.
 
-The chain verifies π_cmp in 12.4 ms and each Groth16 settle leg in
-4.4–4.6 ms. One trade puts 7 264 B on chain: 1 522 B per `SendOrder`,
-1 999 B for the compare writing, and 2 221 B for `SettlePair`.
+The same historical run reported 12.4 ms for chain-side π_cmp verification,
+4.4–4.6 ms for each Groth16 settlement leg, and 7 264 B on chain: 1 522 B per
+`SendOrder`, 1 999 B for the then-current comparison writing, and 2 221 B for
+the then-current atomic settlement writing. These figures predate the
+two-submission redesign. They remain a cryptographic baseline but are not
+current transaction-count or wire-size measurements; RQ3 must be rerun for
+those values.
 
 
 ## 3. MPC sub-protocols and their checks
 
-All building blocks run on the SPDZ fabric: every share carries an
-information-theoretic MAC, every `open_authenticated` MAC-checks the
-revealed value, and any deviation aborts the session. Both parties
+All building blocks run on the SPDZ fabric: every in-fabric share carries an
+information-theoretic MAC, and `open_authenticated` MAC-checks values opened
+through that API. The chain payload is a deliberate boundary: it exports only
+the two final points' local value shares, never their MAC shares. Final
+validity comes from PLONK verification after algebraic reconstruction. Both parties
 enqueue fabric operations in identical canonical order (A's values
 first) so the dataflow op-ids align.
 
@@ -234,20 +315,32 @@ Open both direction bits. Checks: each opened value must be exactly 0
 or 1, and the pair `(0, 0)` (impossible for honest inputs) aborts.
 Map `(1,1) → 0`, `(1,0) → +1`, `(0,1) → −1`. Leakage: `cmp` only.
 
-### 3.4 Authenticated exchange and encrypted reveal
+### 3.4 Pre-reveal payout-key barrier and encrypted reveal
 
-Signatures, payout `(npk, r)` pairs, and settle legs use
+Signatures and payout `(npk, r)` pairs use
 `share_plaintext(payload, sender)` inside the authenticated fabric. The
-sender echo-checks the result, so transport corruption aborts.
+sender echo-checks the result, so transport corruption aborts. Before any
+quantity opening, each side writes its own payout pair to
+`payout_keys.json`, exchanges both pairs, and rewrites the WAL with the peer
+pair. The reveal barrier is crossed only after BOTH local WALs contain both
+pairs. This is an operational barrier, not recipient authorization: the
+pairs carry no owner signature and have no on-chain commitment, and the
+settle proof does not expose a public value that binds its private
+`(npk_ctr, r_note)` to the peer's WAL choice. A Byzantine payer can substitute
+another note opening while still producing a valid proof. The planned repair
+is to owner-sign and commit each payout-key choice before reveal, then add and
+verify that commitment as a settle-circuit public binding.
 
 The quantity opening is different: the smaller party encrypts `(q,
-r_locked)` with ChaCha20-Poly1305 under a per-match-round X25519 shared
-key whose public keys are signed and included in the on-chain pre-open
-state commitment. Only ciphertext traverses the fabric. After decryption,
-the revealed plaintext is subtracted from the MPC-verified share and the
-difference is opened: `open([x] − x_revealed) == 0`. A lying reveal aborts
-immediately—the disclosed value is provably the one the MPC compared and
-proved.
+r_locked)` with ChaCha20-Poly1305 under a per-match-round X25519 shared key
+whose public keys are signed and included in the comparison state
+commitment. Only ciphertext traverses the fabric. After decryption, the
+receiver locally recomputes `needed(q, price, side)` and its Poseidon
+commitment and requires it to equal the on-chain commitment already bound by
+π_cmp. There is deliberately no authenticated opening or other MPC round
+after plaintext disclosure. A lying reveal aborts locally, while a malicious
+peer that disconnects after disclosure cannot prevent the honest owner from
+finishing its witness and proof.
 
 ### 3.5 Witness-validity gate (before ANY proof element is revealed)
 
@@ -268,13 +361,24 @@ before proving:
    with negligible probability; the mask makes a rejection leak
    nothing beyond "invalid".
 
-### 3.6 Collaborative prove and MAC-checked open
+### 3.6 Collaborative prove and native-share export
 
-`MultiproverPlonkKzgSnark::prove` runs the TurboPlonk rounds with
-every wire an SPDZ share; the result opens to a STANDARD single-prover
-PLONK proof (769 B compressed). The open is `open_authenticated`: every
-revealed proof element is MAC-checked. Each party then verifies the
-opened proof locally before releasing it to its host.
+`MultiproverPlonkKzgSnark::prove` runs the TurboPlonk rounds with every wire
+an SPDZ share. Fiat–Shamir requires the wire, permutation and quotient
+commitments plus polynomial evaluations to be disclosed while deriving later
+challenges. Those already-public values form an identical canonical template
+in both sessions; they are not secret-shared again.
+
+The last round leaves `opening_proof` and `shifted_opening_proof` as
+`AuthenticatedPointResult`s. Each session awaits its local handle directly,
+which yields its own `PointShare`, and places only `PointShare::share()` in
+the two corresponding G1 fields. It does **not** call
+`open_authenticated` on those final points and does not serialize
+`PointShare::mac()`. Consequently neither trader constructs or locally
+verifies the complete standard proof. The chain-side Rust bridge checks the
+two templates for equality, group-adds the PARTY0/PARTY1 value shares for the
+two final points, constructs the standard proof, and runs the ordinary PLONK
+verifier before allowing reveal.
 
 ## 4. ZK relations: complete constraint lists
 
@@ -346,7 +450,7 @@ r_note, npk_refund, r_refund`.
 | 2 | [RANGE(q)], [RANGE(collateral_price)], [RANGE(execution_price)] | all price products are integer-exact | — |
 | 3 | `needed = needed(q, collateral_price, side)`; [OPEN(locked; needed, r_locked)] | the order's own public price pins its quantity | — |
 | 4 | `payment = needed(q, execution_price, side)`; `refund = needed − payment`; range-check both | crossing-price conservation | — |
-| 5 | payout and refund `NoteCommit` checks | payment reaches the counterparty; price improvement returns shielded to the owner | — |
+| 5 | payout and refund `NoteCommit` checks | commits payment to the prover-supplied private `npk_ctr`; a compliant host uses the peer WAL choice, but the circuit lacks a public owner binding; price improvement returns shielded to the owner | — |
 | 6 | [BIND] over both output commitments | anti-replay weld | 1 |
 
 The complete circuit measures **2 608 non-linear R1CS constraints** with
@@ -372,43 +476,59 @@ openings, the residual opening, and payout/refund note openings.
 | 5 | `q_res = q − q_ctr`; [RANGE(q_res)] | the 64-bit range of the difference IS the `q ≥ q_ctr` proof (a wrap-around would exceed 64 bits) | 64 |
 | 6 | `locked_res = needed(q_res, collateral_price, side)`; residual commitment check | residual stays collateralized at its order's own price | — |
 | 7 | payment at `execution_price`; `refund = needed − locked_res − payment`; range-check both | crossing-price conservation | — |
-| 8 | payout and refund `NoteCommit` checks; [BIND] over all outputs | atomic shielded outputs + anti-replay weld | — |
+| 8 | payout and refund `NoteCommit` checks; [BIND] over all outputs | atomic shielded outputs + anti-replay weld, but no public binding from private `npk_ctr, r_note` to the peer's pre-reveal choice | — |
 
 The complete circuit measures **3 284 non-linear R1CS constraints** with
 circom 2.2.3 at `--O2`.
 
 ## 5. What the chain verifies, writing by writing
 
-**`SubmitCompareCoZk2p`** — pair preconditions (`loadMatchedPair`):
+**`SubmitCompareCoZk2pShare`** — pair preconditions (`loadMatchedPair`):
 both orders exist, both `Matched`, mutually linked, opposite sides,
 order A is the maker, prices valid and crossing, and both rows carry the
-same valid persisted execution price. Then: both signatures
-over the compare message, then π_cmp against the rebuilt statement
+same valid persisted execution price. Each owner signature binds its share,
+identity, round, chain, and the `MatchHeight + 10` comparison deadline. Only
+after both shares arrive does the chain
+require the common canonical templates to match, group-add the two final KZG
+point-share pairs, construct π_cmp, and verify it against the rebuilt statement
 `{cmp, orderA.LockedCommitment, orderB.LockedCommitment, priceA, priceB,
-orderA.Type == Sell}`. Effect: store `cmp`, both orders → `Settling`.
+orderA.Type == Sell}`. Effect: store `cmp`, both orders → `Settling`, and
+create the settlement-leg round with absolute deadline
+`verification_height + 10` in the same transaction.
 
-**`SubmitSettleCheckpoint` / `AbortSettleRound`** — each owner signs the
-exact match round. The chain derives the pre-open state commitment; both
-uploads are required before reveal. After 10 blocks, a sole uploader may
-requeue itself and freeze the missing uploader.
-
-**`SettlePair`** — both orders `Settling` and mutually linked; a
-recorded `cmp` exists and selects each leg's circuit (cmp = 0 → both
-π_A, no residuals). Verify BOTH legs (owner signature + Groth16 proof
-against publics rebuilt from the ORDER ROWS — never from the request)
-before touching state. Then the journaled pipeline: journal row →
+**`SubmitSettleLeg` / `FinalizeSettleLegs` / `ExpireSettleLegs`** — both orders are `Settling`
+and mutually linked; recorded `cmp` selects the submitting owner's circuit
+(cmp = 0 → both π_A). The chain immediately verifies that owner's inner
+signature and Groth16 proof against publics rebuilt from ORDER ROWS, then
+records it inside the comparison-created window. The second valid leg invokes
+the journaled pipeline: journal row →
 idempotent mint of both payout notes in ONE pool mutation → close the
 filled side(s) + relist the larger side in place (same id, same block
 height, fresh commitments) + journal DONE in one transaction → re-match
-+ cleanup. A crash anywhere is completed by resubmission or by the
-boot-time recovery.
++ cleanup. A crash anywhere is completed by a same-owner resubmission or
+boot-time recovery. If both in-deadline legs are stored but execution is not
+marked complete, either app (or any caller) may invoke permissionless
+`FinalizeSettleLegs`; it cannot alter the stored proofs, outputs, or
+signatures. Zero legs classify the round as pre-reveal and either
+owner may release both without blame. For `cmp != 0`, a lone large-side leg
+proves knowledge of the small opening; expiry returns the large owner to
+`Pending` and freezes the missing small owner. A lone small-side leg can be
+constructed independently and does not prove delivery, so it releases both
+without blame. For `cmp = 0` no opening was revealed, so every incomplete
+round also releases both.
 
 ## 6. Security-ordering summary
 
 | property | how the protocol gets it |
 |---|---|
-| anchor before disclosure | F1: the reveal of `(q, r_locked)` waits for `Settling` on chain |
+| anchor before disclosure | reveal waits until both canonical share payloads reconstruct/verify π_cmp and the chain creates the absolute settlement window |
+| durable pre-reveal inputs | both sides persist own and peer payout-note pairs before the smaller opening is sent; this is an operational WAL invariant, not cryptographic owner authorization |
 | what the counterparty learns | `cmp`, then the smaller side's full opening `(q, r_locked)` |
-| fair exchange | F2: one atomic `SettlePair` — both notes or nothing |
+| post-reveal independence | the reveal is checked locally; all later witness/proof work has no peer/MPC dependency |
+| atomic execution | each owner uploads only its own proof; execution still mints both notes or nothing, but the current circuits do not guarantee that a malicious payer selected the peer-authorized recipient key |
+| payout-recipient binding | **missing**: payout pairs are unsigned/off-chain and private `npk_ctr, r_note` are not bound to a public peer commitment; add owner-signed pre-reveal commitments and settle-circuit public bindings |
 | circuit-role gating | F3: the chain's `cmp` decides who may use π_A/π_B |
-| abort after learning | the smaller side's opening is known to the larger side once revealed; the `Settling` anchor attributes the abort |
+| abort before comparison verification | the round deadline is `MatchHeight + 10`; an incomplete comparison-share round releases both without punishment |
+| abort after verification but before reveal | comparison verification already started the settlement deadline; 0 legs at expiry release both without blame |
+| abort after reveal | for `cmp != 0`, only a lone large-side leg proves knowledge of the opening and freezes the missing small owner; only-small remains unattributed and releases both |
+| Byzantine attribution limit | the rule is conservative and asymmetric: a small leg alone does not prove delivery of `q`; symmetric Byzantine accountability requires verifiable encrypted reveal/objective delivery evidence, and a withholdable signed receipt is not enough |

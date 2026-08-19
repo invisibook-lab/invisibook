@@ -92,6 +92,9 @@ pub struct Order {
     pub protection_price: Option<u64>,
     pub execution_price: Option<u64>,
     pub match_round: u64,
+    /// Height at which the current match round was created. Unlike the
+    /// original block height (time priority), this refreshes on rematch.
+    pub match_height: u64,
     pub pubkey: String, // owner's ed25519 pubkey (64-char hex)
     pub locked_commitment: String,
     pub fee: u64,

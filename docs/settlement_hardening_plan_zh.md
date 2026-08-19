@@ -1,7 +1,8 @@
 # 结算安全加固计划(rev.4 增量 — 基于本轮 review)
 
-> **Status:** Current(中文计划文档;实施状态见 §六点五)。英文规范文档见
-> [README.md](README.md)(docs 索引)。
+> **Status:** Historical (rev.4 原子 `SettlePair` 方案记录)。当前实现已改为
+> comparison proof share 与 settlement leg 均由双方按身份、round 和 deadline
+> 分别上链；见 [settlement_protocol.md](settlement_protocol.md)。
 
 > 定位:在已批准的 rev.3 方案、已完成的 P0–P4(chain/lib)之上的**增量修改**。
 > 本轮讨论挖出一个**确认的时序 bug** + 三个设计缺口,本计划逐条给出修法、
@@ -44,11 +45,16 @@
 
 ### A.1 Compare 会话(MPC,产出可上链的 π_cmp)
 `run_compare_session`:preamble → share+bind 检查 → `compare_three_way` → 交换双签
-→ 协作证 π_cmp → 返回 `{cmp, public, proof_hex, sig_a, sig_b}`。
+→ 协作证 π_cmp → 返回本方
+`{cmp, public, proof_share_hex, sig_a, sig_b}`。其中 Fiat–Shamir 已公开字段是
+双方相同的 canonical template；只有最后两个 KZG 点保留并导出本方原生 SPDZ
+value share，不上传 MAC。
 **不做 reveal、不派生收款 note。**
 
-### A.2 上链 SubmitCompare(已存在的 writing)
-host 提交 `SubmitCompareCoZk`(π_cmp + 双签)→ 链验证 → 记录 cmp、两单转 Settling。
+### A.2 上链 SubmitCompareCoZk2pShare
+双方各自提交带 owner、match round 和绝对 `deadline_height` 签名的 proof share。
+Rust 检查两个 template 一致，只对两对 final KZG G1 share 做群加并验证重构后的
+π_cmp；通过后链记录 cmp、两单转 Settling。
 **host 等确认**(两单 = Settling)后才进入 A.3。
 
 ### A.3 Settle 阶段(此后才 reveal,且**不再需要 SPDZ**)

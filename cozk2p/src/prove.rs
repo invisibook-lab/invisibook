@@ -13,7 +13,7 @@ use ark_mpc::{
     algebra::{AuthenticatedScalarResult, Scalar},
 };
 use mpc_plonk::{
-    multiprover::proof_system::{MpcPlonkCircuit, MultiproverPlonkKzgSnark},
+    multiprover::proof_system::{CollaborativeProof, MpcPlonkCircuit, MultiproverPlonkKzgSnark},
     proof_system::{
         PlonkKzgSnark,
         structs::{Proof, ProvingKey, VerifyingKey},
@@ -22,10 +22,13 @@ use mpc_plonk::{
 };
 use mpc_relation::{PlonkCircuit, Variable, traits::Circuit};
 
-use crate::relation::{
-    PublicWires, SIDE_PRIVATE_LEN, SatisfiabilityWitness, SettlePublic, SidePrivate,
-    build_settle_relation, build_settle_relation_collecting, side_private_values,
-    side_wires_from_vars,
+use crate::{
+    proof_share::CompareProofShare,
+    relation::{
+        PublicWires, SIDE_PRIVATE_LEN, SatisfiabilityWitness, SettlePublic, SidePrivate,
+        build_settle_relation, build_settle_relation_collecting, side_private_values,
+        side_wires_from_vars,
+    },
 };
 
 /// Group the 6 canonical public wires
@@ -264,6 +267,51 @@ pub async fn prove_collaborative_timed(
     pk: &ProvingKey<Bn254>,
 ) -> Result<(Proof<Bn254>, ProveTimings)> {
     use std::time::Instant;
+    let (collab, mut timings) =
+        prove_collaborative_raw(fabric, my_party, my_side, public, pk).await?;
+    let open_start = Instant::now();
+    let proof = collab
+        .open_authenticated()
+        .await
+        .map_err(|e| anyhow!("opening collaborative proof (MAC check): {e}"))?;
+    timings.open_ms = open_start.elapsed().as_secs_f64() * 1e3;
+    Ok((proof, timings))
+}
+
+/// Run the collaborative prover without opening its two final KZG proof
+/// points.  The returned canonical payload contains the public transcript
+/// components and only this party's native additive shares in those fields.
+/// The chain reconstructs and verifies the standard proof after receiving one
+/// payload from each owner.
+pub async fn prove_collaborative_share_timed(
+    fabric: MpcFabric<G1Projective>,
+    my_party: u64,
+    my_side: &SidePrivate,
+    public: &SettlePublic,
+    pk: &ProvingKey<Bn254>,
+) -> Result<(CompareProofShare, ProveTimings)> {
+    use std::time::Instant;
+    let (collab, mut timings) =
+        prove_collaborative_raw(fabric, my_party, my_side, public, pk).await?;
+    let export_start = Instant::now();
+    let share = materialize_compare_proof_share(collab, my_party).await?;
+    // Keep the existing field name for experiment/report compatibility.  In
+    // this path it measures graph drain + authenticated public-component opens
+    // + local native-share materialization, not a final proof opening.
+    timings.open_ms = export_start.elapsed().as_secs_f64() * 1e3;
+    Ok((share, timings))
+}
+
+/// Common build/prove prefix shared by the legacy opened-proof API and the
+/// native-share API.
+async fn prove_collaborative_raw(
+    fabric: MpcFabric<G1Projective>,
+    my_party: u64,
+    my_side: &SidePrivate,
+    public: &SettlePublic,
+    pk: &ProvingKey<Bn254>,
+) -> Result<(CollaborativeProof<Bn254>, ProveTimings)> {
+    use std::time::Instant;
     let t0 = Instant::now();
 
     // Fail fast (with a diagnosable error) if the parties disagree on the
@@ -292,17 +340,84 @@ pub async fn prove_collaborative_timed(
     let collab = MultiproverPlonkKzgSnark::<Bn254>::prove(&circuit, pk, fabric)
         .map_err(|e| anyhow!("collaborative prove: {e}"))?;
     let t2 = Instant::now();
-    let proof = collab
-        .open_authenticated()
-        .await
-        .map_err(|e| anyhow!("opening collaborative proof (MAC check): {e}"))?;
-    let t3 = Instant::now();
     let timings = ProveTimings {
         build_ms: (t1 - t0).as_secs_f64() * 1e3,
         prove_ms: (t2 - t1).as_secs_f64() * 1e3,
-        open_ms: (t3 - t2).as_secs_f64() * 1e3,
+        open_ms: 0.0,
     };
-    Ok((proof, timings))
+    Ok((collab, timings))
+}
+
+/// Resolve the already-open Fiat--Shamir components and the two local final
+/// point shares into the versioned chain wire object. Awaiting an
+/// `AuthenticatedPointResult` itself yields the local `PointShare`; unlike
+/// `open_authenticated`, it performs no exchange of that final value.
+async fn materialize_compare_proof_share(
+    collab: CollaborativeProof<Bn254>,
+    my_party: u64,
+) -> Result<CompareProofShare> {
+    let CollaborativeProof {
+        wire_poly_comms,
+        prod_perm_poly_comm,
+        split_quot_poly_comms: split_quot_openings,
+        opening_proof,
+        shifted_opening_proof,
+        poly_evals,
+    } = collab;
+
+    let mut wires_poly_comms = Vec::with_capacity(wire_poly_comms.len());
+    for opening in wire_poly_comms {
+        wires_poly_comms.push(
+            opening
+                .await
+                .map_err(|e| anyhow!("opening wire commitment (MAC check): {e}"))?,
+        );
+    }
+    let prod_perm_poly_comm = prod_perm_poly_comm
+        .await
+        .map_err(|e| anyhow!("opening permutation commitment (MAC check): {e}"))?;
+    let mut split_quot_poly_comms = Vec::with_capacity(split_quot_openings.len());
+    for opening in split_quot_openings {
+        split_quot_poly_comms.push(
+            opening
+                .await
+                .map_err(|e| anyhow!("opening quotient commitment (MAC check): {e}"))?,
+        );
+    }
+
+    let mut wires_evals = Vec::with_capacity(poly_evals.wires_evals.len());
+    for evaluation in poly_evals.wires_evals {
+        wires_evals.push(evaluation.await.inner());
+    }
+    let mut wire_sigma_evals = Vec::with_capacity(poly_evals.wire_sigma_evals.len());
+    for evaluation in poly_evals.wire_sigma_evals {
+        wire_sigma_evals.push(evaluation.await.inner());
+    }
+    let perm_next_eval = poly_evals.perm_next_eval.await.inner();
+
+    // Resolve only the local additive values. PointShare::mac() is
+    // intentionally never serialized or exposed to the chain.
+    let opening_share = opening_proof.commitment.await;
+    let shifted_opening_share = shifted_opening_proof.commitment.await;
+    let mut opening_proof = prod_perm_poly_comm;
+    opening_proof.0 = opening_share.share().to_affine();
+    let mut shifted_opening_proof = prod_perm_poly_comm;
+    shifted_opening_proof.0 = shifted_opening_share.share().to_affine();
+
+    let proof: Proof<Bn254> = Proof {
+        wires_poly_comms,
+        prod_perm_poly_comm,
+        split_quot_poly_comms,
+        opening_proof,
+        shifted_opening_proof,
+        poly_evals: mpc_plonk::proof_system::structs::ProofEvaluations {
+            wires_evals,
+            wire_sigma_evals,
+            perm_next_eval,
+        },
+        plookup_proof: None,
+    };
+    CompareProofShare::new(my_party, proof)
 }
 
 /// Verify a settlement proof against the canonical public vector — the same

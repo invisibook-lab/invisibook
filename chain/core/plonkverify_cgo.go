@@ -13,6 +13,16 @@ int32_t cozk2p_verify_settle(const uint8_t* vk, size_t vk_len,
                              const uint8_t* public_json, size_t public_json_len,
                              const uint8_t* proof, size_t proof_len,
                              uint8_t* err, size_t err_cap);
+
+// Each input share is a versioned, party-tagged canonical payload produced
+// directly from the collaborative prover. Rust owns decoding and algebraic
+// reconstruction so Go never has to duplicate arkworks' field/group wire
+// formats.
+int32_t cozk2p_verify_settle_shares(const uint8_t* vk, size_t vk_len,
+                                    const uint8_t* public_json, size_t public_json_len,
+                                    const uint8_t* share_a, size_t share_a_len,
+                                    const uint8_t* share_b, size_t share_b_len,
+                                    uint8_t* err, size_t err_cap);
 */
 import "C"
 
@@ -30,6 +40,22 @@ func plonkVerifySettle2p(vkBytes, publicJSON, proofBytes []byte) error {
 		(*C.uint8_t)(unsafe.Pointer(&vkBytes[0])), C.size_t(len(vkBytes)),
 		(*C.uint8_t)(unsafe.Pointer(&publicJSON[0])), C.size_t(len(publicJSON)),
 		(*C.uint8_t)(unsafe.Pointer(&proofBytes[0])), C.size_t(len(proofBytes)),
+		(*C.uint8_t)(unsafe.Pointer(&errBuf[0])), C.size_t(len(errBuf)),
+	)
+	return plonkCodeToError(code, errBuf)
+}
+
+// plonkVerifySettle2pShares bridges two opaque native proof-share payloads to
+// Rust. The Rust side validates their embedded version/party tags, requires
+// their common/public components to be equal, group-adds only the two final
+// KZG point shares, and verifies the resulting standard proof.
+func plonkVerifySettle2pShares(vkBytes, publicJSON, shareA, shareB []byte) error {
+	errBuf := make([]byte, 512)
+	code := C.cozk2p_verify_settle_shares(
+		(*C.uint8_t)(unsafe.Pointer(&vkBytes[0])), C.size_t(len(vkBytes)),
+		(*C.uint8_t)(unsafe.Pointer(&publicJSON[0])), C.size_t(len(publicJSON)),
+		(*C.uint8_t)(unsafe.Pointer(&shareA[0])), C.size_t(len(shareA)),
+		(*C.uint8_t)(unsafe.Pointer(&shareB[0])), C.size_t(len(shareB)),
 		(*C.uint8_t)(unsafe.Pointer(&errBuf[0])), C.size_t(len(errBuf)),
 	)
 	return plonkCodeToError(code, errBuf)

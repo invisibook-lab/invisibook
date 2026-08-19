@@ -3,8 +3,8 @@
 #
 # Runs a complete trade on a live single-node chain with two real trader
 # processes: order proving and submission, matching, the collaborative
-# comparison, the on-chain comparison anchor, the two local settlement
-# proofs, the settlement-message exchange, and the atomic settlement.
+# comparison, both identity-bound comparison shares, the two owner-bound
+# settlement proofs, and the atomic settlement.
 # Every proof is verified on chain, so the node log carries the
 # verification time of each proof and the payload size of each writing.
 #

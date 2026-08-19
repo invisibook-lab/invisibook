@@ -16,7 +16,9 @@ import (
 
 // ────────────────────── SQL Model ──────────────────────
 
-// OrderScheme is the flat SQL model for the orders table.
+// OrderScheme is the flat SQL model for the orders table. MatchHeight is the
+// current round's deadline anchor and refreshes on rematch; BlockHeight is the
+// immutable admission/time-priority height.
 type OrderScheme struct {
 	ID               string `gorm:"primaryKey;column:id"`
 	Kind             int    `gorm:"column:kind;index:idx_pair_type"`
@@ -27,6 +29,7 @@ type OrderScheme struct {
 	ProtectionPrice  string `gorm:"column:protection_price"`
 	ExecutionPrice   string `gorm:"column:execution_price"`
 	MatchRound       uint64 `gorm:"column:match_round"`
+	MatchHeight      uint64 `gorm:"column:match_height"`
 	Pubkey           string `gorm:"column:pubkey;index"`
 	LockedCommitment string `gorm:"column:locked_commitment"`
 	Fee              uint64 `gorm:"column:fee"`
@@ -73,21 +76,52 @@ type CompareResultScheme struct {
 	Height   uint64 `gorm:"column:height"`
 }
 
-// SettleCheckpointScheme is the durable pre-open barrier for one match
-// round. Each side must upload the same chain-derived state commitment
-// before the smaller quantity opening may be revealed off chain.
-type SettleCheckpointScheme struct {
+// CompareShareScheme is the durable two-submission assembly row for one
+// collaborative PLONK comparison.  Each order owner signs and uploads only
+// its own opaque native proof share. DeadlineHeight is deterministically
+// fixed at the current round's MatchHeight+10; the comparison is recorded
+// only after the second share arrives in time and Rust reconstructs and
+// verifies the full proof.
+type CompareShareScheme struct {
 	OrderAID         string `gorm:"primaryKey;column:order_a_id"`
 	MatchRound       uint64 `gorm:"primaryKey;column:match_round"`
 	OrderBID         string `gorm:"column:order_b_id;index"`
+	Cmp              int    `gorm:"column:cmp"`
 	StateCommitment  string `gorm:"column:state_commitment;not null"`
+	ShareA           string `gorm:"column:share_a"`
+	ShareB           string `gorm:"column:share_b"`
 	ASubmittedHeight uint64 `gorm:"column:a_submitted_height"`
 	BSubmittedHeight uint64 `gorm:"column:b_submitted_height"`
-	AbortedOrderID   string `gorm:"column:aborted_order_id"`
-	AbortedAtHeight  uint64 `gorm:"column:aborted_at_height"`
+	DeadlineHeight   uint64 `gorm:"column:deadline_height"`
+	VerifiedHeight   uint64 `gorm:"column:verified_height"`
+	ExpiredAtHeight  uint64 `gorm:"column:expired_at_height"`
+	MissingOrderID   string `gorm:"column:missing_order_id"`
 }
 
-func (SettleCheckpointScheme) TableName() string { return "settle_checkpoints" }
+func (CompareShareScheme) TableName() string { return "compare_shares" }
+
+// SettleLegRoundScheme buffers independently authenticated settlement legs.
+// Comparison verification creates the row and its absolute deadline before
+// payout-key exchange/reveal. Zero legs, only-small, and incomplete cmp==0
+// rounds carry no verifiable reveal-delivery evidence and are unattributed.
+// Only a stored large proof demonstrates knowledge of the small opening and
+// can blame a missing small owner. The chain applies no payout until both
+// legs exist and atomic settlement completes.
+type SettleLegRoundScheme struct {
+	OrderAID         string `gorm:"primaryKey;column:order_a_id"`
+	MatchRound       uint64 `gorm:"primaryKey;column:match_round"`
+	OrderBID         string `gorm:"column:order_b_id;index"`
+	LegAJSON         string `gorm:"column:leg_a_json"`
+	LegBJSON         string `gorm:"column:leg_b_json"`
+	ASubmittedHeight uint64 `gorm:"column:a_submitted_height"`
+	BSubmittedHeight uint64 `gorm:"column:b_submitted_height"`
+	DeadlineHeight   uint64 `gorm:"column:deadline_height"`
+	CompletedHeight  uint64 `gorm:"column:completed_height"`
+	ExpiredAtHeight  uint64 `gorm:"column:expired_at_height"`
+	MissingOrderID   string `gorm:"column:missing_order_id"`
+}
+
+func (SettleLegRoundScheme) TableName() string { return "settle_leg_rounds" }
 
 // TableName returns the SQL table name for CompareResultScheme rows.
 func (CompareResultScheme) TableName() string {
@@ -110,7 +144,7 @@ func InitOrderDB(dsn string, logLevel logger.LogLevel) *gorm.DB {
 	if err != nil {
 		panic(fmt.Sprintf("failed to open orders database: %v", err))
 	}
-	if err := db.AutoMigrate(&OrderScheme{}, &SettleAddrScheme{}, &CompareResultScheme{}, &SettleCheckpointScheme{},
+	if err := db.AutoMigrate(&OrderScheme{}, &SettleAddrScheme{}, &CompareResultScheme{}, &CompareShareScheme{}, &SettleLegRoundScheme{},
 		&FeeCounterScheme{}, &SettlementJournalScheme{}); err != nil {
 		panic(fmt.Sprintf("failed to migrate orders table: %v", err))
 	}
@@ -130,7 +164,7 @@ const (
 // settlement (crash consistency). It is written to orders.db BEFORE the
 // payout notes are minted in accounts.db and carries everything the
 // order-side updates need, so a crash between the two databases can be
-// completed idempotently — by a resubmission of the same SettlePair or by
+// completed idempotently — by a resubmission of the same owner leg or by
 // the startup recovery (`recoverPendingSettlements`). Rows are keyed by
 // the settlement id (`orderA:orderB` — a pair settles at most once: the
 // smaller side ends Done and can never be Matched again).
@@ -138,6 +172,7 @@ type SettlementJournalScheme struct {
 	SettlementID   string `gorm:"primaryKey;column:settlement_id"`
 	OrderAID       string `gorm:"column:order_a_id;not null"`
 	OrderBID       string `gorm:"column:order_b_id;not null"`
+	MatchRound     uint64 `gorm:"column:match_round"`
 	CmNoteA        string `gorm:"column:cm_note_a;not null"`
 	CmNoteB        string `gorm:"column:cm_note_b;not null"`
 	CmRefundA      string `gorm:"column:cm_refund_a;not null;default:''"`
@@ -281,6 +316,7 @@ func orderToScheme(o *Order) *OrderScheme {
 		ProtectionPrice:  protectionPriceStr,
 		ExecutionPrice:   executionPriceStr,
 		MatchRound:       o.MatchRound,
+		MatchHeight:      o.MatchHeight,
 		Pubkey:           o.Pubkey,
 		LockedCommitment: o.LockedCommitment,
 		Fee:              o.Fee,
@@ -323,6 +359,7 @@ func schemeToOrder(s *OrderScheme) *Order {
 		ProtectionPrice:  protectionPrice,
 		ExecutionPrice:   executionPrice,
 		MatchRound:       s.MatchRound,
+		MatchHeight:      s.MatchHeight,
 		Pubkey:           s.Pubkey,
 		LockedCommitment: s.LockedCommitment,
 		Fee:              s.Fee,

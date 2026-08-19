@@ -29,13 +29,11 @@ use ark_mpc::{PARTY0, test_helpers::execute_mock_mpc};
 use ark_serialize::CanonicalSerialize;
 use clap::Parser;
 use cozk2p::{
-    SidePrivate, compute_public, default_cache_dir, dev_keys, needed_collateral,
+    SidePrivate, combine_compare_proof_shares, compute_public, decode_compare_proof_share_hex,
+    default_cache_dir, dev_keys, needed_collateral,
     poseidon::{commit, fr_to_hex},
     prove_single, sample_trade,
-    session::{
-        CompareReady, MyPrivate, NeedSig, SessionConfig, SessionInput, SettleLeg, SigIo,
-        exchange_settle_legs, run_session,
-    },
+    session::{CompareReady, MyPrivate, NeedSig, SessionConfig, SessionInput, SigIo, run_session},
     setup::circuit_size,
     stats::peak_rss_bytes,
     verify_settle,
@@ -312,22 +310,10 @@ async fn main() -> Result<()> {
                 )
                 .await
                 .expect("full session must succeed");
-                // Post-session settle-leg exchange (SettlePair path); the
-                // dummy proof stands in for the host's rapidsnark output.
-                let leg = SettleLeg {
-                    is_a: i_am_a,
-                    cm_note_out: result.my.recv_commitment.clone(),
-                    cm_refund_out: result.my.refund_commitment.clone(),
-                    signature: DUMMY_SIG.to_string(),
-                    zk_proof: "x".repeat(800),
-                    cm_locked_residual: result.my.new_locked_commitment.clone(),
-                };
-                let leg_start = Instant::now();
-                exchange_settle_legs(&fabric, party, &leg)
-                    .await
-                    .expect("leg exchange must succeed");
-                let leg_exchange_ms = leg_start.elapsed().as_secs_f64() * 1e3;
-                (result, leg_exchange_ms)
+                // Settlement proofs are now produced and submitted by each
+                // host independently.  There is no post-session peer leg
+                // exchange to emulate inside this cryptographic benchmark.
+                (result, 0.0_f64)
             }
         })
         .await;
@@ -350,6 +336,7 @@ async fn main() -> Result<()> {
             "session_overhead_ms": session_overhead_ms,
             "build_ms": tim.build_ms,
             "prove_ms": tim.prove_ms,
+            "share_export_ms": tim.open_ms,
             "open_ms": tim.open_ms,
             // Host/chain waits, NOT cryptography: the F1 on-chain compare
             // confirmation stand-in and the settle-leg round.
@@ -361,7 +348,7 @@ async fn main() -> Result<()> {
             mock_runs.push(record);
         }
         println!(
-            "  run: total {:.0} ms (compare+reveal+exchange ~{:.0}, prove build {:.0}/prove {:.0}/open {:.0}, onchain-wait {:.0}, leg-exchange {:.0})",
+            "  run: total {:.0} ms (compare+reveal+exchange ~{:.0}, prove build {:.0}/prove {:.0}/share-export {:.0}, onchain-wait {:.0}, leg-exchange {:.0})",
             total_ms,
             session_overhead_ms,
             tim.build_ms,
@@ -438,15 +425,7 @@ async fn main() -> Result<()> {
                 let mut stdin = child.stdin.take().context("child stdin")?;
                 writeln!(stdin, "{{\"sig\":\"{DUMMY_SIG}\"}}")?;
                 writeln!(stdin, "{{\"compare_confirmed\":true}}")?;
-                let leg = json!({"settle_leg": {
-                    "is_a": role == "trader-a",
-                    "cm_note_out": "11".repeat(32),
-                    "cm_refund_out": "12".repeat(32),
-                    "signature": DUMMY_SIG,
-                    "zk_proof": "x".repeat(800),
-                    "cm_locked_residual": "",
-                }});
-                writeln!(stdin, "{leg}")?;
+                writeln!(stdin, "{{\"settle_leg_submitted\":true}}")?;
                 drop(stdin);
                 children.push(child);
             }
@@ -457,9 +436,10 @@ async fn main() -> Result<()> {
             ensure!(ok, "a party process failed");
             let total_ms = t.elapsed().as_secs_f64() * 1e3;
 
-            // Read each party's result + stats; the proofs must be identical.
+            // Read each party's result + stats; their native shares must
+            // reconstruct the standard proof verified by the chain.
             let mut per_party = Vec::new();
-            let mut proofs = Vec::new();
+            let mut proof_shares = Vec::new();
             for role in ["trader-a", "trader-b"] {
                 let dir = session_tmp.join(format!("out_{role}"));
                 let stats: Value =
@@ -467,9 +447,21 @@ async fn main() -> Result<()> {
                 per_party.push(stats);
                 let result: Value =
                     serde_json::from_str(&fs::read_to_string(dir.join("result.json"))?)?;
-                proofs.push(result["proof_hex"].as_str().unwrap_or_default().to_string());
+                proof_shares.push(
+                    result["proof_share_hex"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                );
             }
-            ensure!(proofs[0] == proofs[1], "parties revealed different proofs");
+            ensure!(
+                proof_shares[0] != proof_shares[1],
+                "parties emitted identical native proof shares"
+            );
+            let share_a = decode_compare_proof_share_hex(&proof_shares[0])?;
+            let share_b = decode_compare_proof_share_hex(&proof_shares[1])?;
+            let reconstructed = combine_compare_proof_shares(&share_a, &share_b)?;
+            verify_settle(&vk, &public, &reconstructed)?;
 
             println!(
                 "  run: total {total_ms:.0} ms (incl. process startup + key load + full session)"
@@ -481,12 +473,14 @@ async fn main() -> Result<()> {
     }
 
     let report = json!({
+        "protocol_version": "native-final-kzg-spdz-share-v1",
         "circuit_gates": gates,
         "public_signals": public.to_vec().len(),
         "proof_size_bytes": {
             "compressed": proof_compressed,
             "uncompressed": proof_uncompressed,
         },
+        "comparison_share_size_bytes_compressed": proof_compressed + 2,
         "vk_size_bytes_compressed": vk.compressed_size(),
         "baseline_single_prover": {
             "prove_ms": single_ms,

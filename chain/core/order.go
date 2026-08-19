@@ -16,6 +16,9 @@ var Validator = validator.New()
 // P2(locked_value, r) over the collateral, which pins the hidden quantity
 // through the side-dependent equation needed(q) = q·price + side·(q −
 // q·price). `Fee` is the plaintext fee destroyed at admission.
+// `MatchHeight` is refreshed for every match/rematch and anchors that round's
+// comparison deadline; `BlockHeight` never changes and remains the time-priority
+// tiebreak.
 // `IntraBlockIndex` is the transaction index within the block, the 4th
 // matching tiebreak.
 type Order struct {
@@ -27,6 +30,7 @@ type Order struct {
 	ProtectionPrice  *big.Int  `json:"protection_price,omitempty"`
 	ExecutionPrice   *big.Int  `json:"execution_price,omitempty"`
 	MatchRound       uint64    `json:"match_round"`
+	MatchHeight      uint64    `json:"match_height"`
 	Pubkey           string    `json:"pubkey"  validate:"required"` // owner's ed25519 pubkey (64-char hex)
 	LockedCommitment string    `json:"locked_commitment"`
 	Fee              uint64    `json:"fee"`

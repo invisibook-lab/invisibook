@@ -22,7 +22,7 @@ type Config struct {
 // `SettleCoZkVKPath` is the joint settle_cozk circuit whose single proof is
 // generated collaboratively by both traders (SubmitCompareCoZk writing).
 // `SettleCoZk2pVKPath` is the ark-compressed PLONK verifying key of the
-// 2-party collaborative settlement (SubmitCompareCoZk2p writing; verification
+// 2-party collaborative settlement (SubmitCompareCoZk2pShare assembly; verification
 // requires a chain binary built with `-tags cozk2p`).
 // `RequireProofs` defaults to TRUE: an empty/missing settlement VK path is
 // a startup error instead of silently skipping verification (see LoadVK's

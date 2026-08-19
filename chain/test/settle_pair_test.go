@@ -11,9 +11,9 @@ import (
 	"github.com/invisibook-lab/invisibook/core"
 )
 
-// TestSettlePairAtomic drives match → SubmitCompareCoZk → SettlePair: one
-// atomic writing that verifies both settle proofs and mints both payout
-// notes together. Test mode skips proof verification (empty VK paths);
+// TestSettlePairAtomic drives match → two comparison shares → two owner
+// SubmitSettleLeg writings. The chain verifies each proof independently and
+// mints both payout notes atomically only after both are present. Test mode skips proof verification (empty VK paths);
 // signatures and the state machine are still enforced. It asserts the fully
 // filled side closes, the larger side relists its residual, both payout
 // notes land in ONE step, and — the point of the atomic writing — a single
@@ -62,18 +62,19 @@ func TestSettlePairAtomic(t *testing.T) {
 	}
 	poolBefore := getPoolInfo(t)
 
-	// --- Compare: cmp = 1 (alice's sell is the larger side) ---
-	cmpReq := &core.CompareRequest{
-		OrderAID: sellOrderID,
-		OrderBID: buyOrderID,
-		Cmp:      1,
-		ZkProof:  "test-proof-skip",
+	// --- Compare: both owners submit shares; cmp = 1 (A larger). ---
+	registerPairAddresses(t, alicePriv, bobPriv, sellOrderID, buyOrderID, 1)
+	deadline := queryCompareShareDeadline(t, sellOrderID, buyOrderID, sellOrderID, 1)
+	if err := wrCall("orderbook", "SubmitCompareCoZk2pShare",
+		compareShareRequest(alicePriv, sellOrderID, buyOrderID, sellOrderID, 1, 1,
+			deadline, hex.EncodeToString([]byte("native-share-a")))); err != nil {
+		t.Fatalf("A comparison share failed: %v", err)
 	}
-	msg := core.CoZkCompareMessage(cmpReq)
-	cmpReq.SigA = hex.EncodeToString(ed25519.Sign(alicePriv, msg))
-	cmpReq.SigB = hex.EncodeToString(ed25519.Sign(bobPriv, msg))
-	if err := wrCall("orderbook", "SubmitCompareCoZk", cmpReq); err != nil {
-		t.Fatalf("SubmitCompareCoZk failed: %v", err)
+	waitBlock()
+	if err := wrCall("orderbook", "SubmitCompareCoZk2pShare",
+		compareShareRequest(bobPriv, sellOrderID, buyOrderID, buyOrderID, 1, 1,
+			deadline, hex.EncodeToString([]byte("native-share-b")))); err != nil {
+		t.Fatalf("B comparison share failed: %v", err)
 	}
 	waitBlock()
 	if st := queryOrders(t, sellOrderID)[0].Status; st != 5 { // Settling
@@ -109,22 +110,23 @@ func TestSettlePairAtomic(t *testing.T) {
 		Signature: hex.EncodeToString(
 			ed25519.Sign(bobPriv, core.SettleSmallSigMessage(smallSig))),
 	}
-	pairReq := &core.SettlePairRequest{
-		OrderAID: sellOrderID,
-		OrderBID: buyOrderID,
-		A:        aLeg,
-		B:        bLeg,
+	// A's valid owner-bound leg lands first but cannot settle alone.
+	aReq := ownerLegRequest(alicePriv, sellOrderID, buyOrderID, sellOrderID, 1, aLeg)
+	if err := wrCall("orderbook", "SubmitSettleLeg", aReq); err != nil {
+		t.Fatalf("SubmitSettleLeg (A) failed: %v", err)
+	}
+	waitBlock()
+	if getPoolInfo(t).LeafCount != poolBefore.LeafCount {
+		t.Fatal("one valid owner leg must mint no notes")
 	}
 
-	// Negative: a single wrong-key leg must abort the WHOLE pair — no state
-	// change, no note minted (this is the atomicity the writing exists for).
-	badPair := *pairReq
+	// Negative: B's wrong-key inner leg must not complete the pair.
 	badB := bLeg
 	badB.Signature = hex.EncodeToString(
 		ed25519.Sign(alicePriv, core.SettleSmallSigMessage(smallSig))) // wrong key
-	badPair.B = badB
-	if err := wrCall("orderbook", "SettlePair", &badPair); err != nil {
-		t.Fatalf("submitting bad-leg pair failed at HTTP level: %v", err)
+	badBReq := ownerLegRequest(bobPriv, sellOrderID, buyOrderID, buyOrderID, 1, badB)
+	if err := wrCall("orderbook", "SubmitSettleLeg", badBReq); err != nil {
+		t.Fatalf("submitting bad B leg failed at HTTP level: %v", err)
 	}
 	waitBlock()
 	if st := queryOrders(t, sellOrderID)[0].Status; st != 5 {
@@ -134,9 +136,10 @@ func TestSettlePairAtomic(t *testing.T) {
 		t.Fatal("a rejected pair must mint no notes")
 	}
 
-	// Happy path: both legs settle atomically.
-	if err := wrCall("orderbook", "SettlePair", pairReq); err != nil {
-		t.Fatalf("SettlePair failed: %v", err)
+	// Happy path: B independently submits its own valid leg; both settle.
+	bReq := ownerLegRequest(bobPriv, sellOrderID, buyOrderID, buyOrderID, 1, bLeg)
+	if err := wrCall("orderbook", "SubmitSettleLeg", bReq); err != nil {
+		t.Fatalf("SubmitSettleLeg (B) failed: %v", err)
 	}
 	waitBlock()
 
@@ -156,7 +159,7 @@ func TestSettlePairAtomic(t *testing.T) {
 	// Both payouts and both private refund notes land atomically (+4 leaves).
 	afterPair := getPoolInfo(t)
 	if afterPair.LeafCount != poolBefore.LeafCount+4 {
-		t.Fatalf("SettlePair must append exactly four notes, %d → %d",
+		t.Fatalf("two-leg settlement must append exactly four notes, %d → %d",
 			poolBefore.LeafCount, afterPair.LeafCount)
 	}
 	if getNoteByCm(t, aLeg.CmNoteOut) < 0 || getNoteByCm(t, bLeg.CmNoteOut) < 0 {
@@ -166,5 +169,5 @@ func TestSettlePairAtomic(t *testing.T) {
 		t.Fatal("both refund notes must be in the pool tree")
 	}
 
-	t.Log("=== SettlePair atomic settlement verified on-chain ===")
+	t.Log("=== independent owner legs + atomic settlement verified on-chain ===")
 }

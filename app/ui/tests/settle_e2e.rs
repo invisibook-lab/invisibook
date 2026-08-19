@@ -10,11 +10,11 @@
 //! 1. SendOrder: real send_order Groth16 proofs spending genesis pool
 //!    notes (Alice limit-sells 2 ETH @ 3, Bob market-buys 1 ETH with
 //!    protection price 4), then crossing-price matching at maker price 3.
-//! 2. Collaborative compare (subprocess, PLONK verification ON on chain),
-//!    with the F1 two-phase ordering: the app lands SubmitCompareCoZk2p
-//!    and confirms BOTH orders Settling before the subprocess reveals.
-//! 3. Each side's own settle proof, the in-fabric settle-leg exchange,
-//!    and the ATOMIC SettlePair (F2) — Bob's order Done, Alice relisted
+//! 2. Collaborative compare (subprocess, PLONK verification ON on chain):
+//!    each owner uploads its identity-bound proof share; the chain rebuilds
+//!    and verifies π_cmp before the subprocess reveals.
+//! 3. Each owner independently submits its own settlement proof. The chain
+//!    atomically settles only after both verify — Bob's order Done, Alice relisted
 //!    in place with a 1-ETH remainder, both payout notes minted together.
 //!
 //! Ignored by default: it needs a chain, two collaborative provers, and
@@ -200,13 +200,13 @@ fn genesis_note(sk_byte: u8, r_byte: u8, token: &str, amount: u64, leaf: u64) ->
 
 /// Prove + submit one order through the production path (`prepare_order` →
 /// `ChainClient::send_order`), returning (order_id, opening, prove_ms,
-/// submit-to-Pending ms).
+/// submit-to-Pending ms, proof-start-to-Pending phase ms).
 async fn place_order(
     client: &Arc<ChainClient>,
     note: &NoteRecord,
     trade_type: TradeType,
     q: u64,
-) -> (String, OrderOpening, f64, f64) {
+) -> (String, OrderOpening, f64, f64, f64) {
     let lock_token = if trade_type == TradeType::Sell {
         TOKEN1
     } else {
@@ -218,6 +218,7 @@ async fn place_order(
         (OrderKind::Market, BUY_PROTECTION_PRICE)
     };
     let tree = client.fetch_note_tree().await.expect("fetch note tree");
+    let phase_started_at = Instant::now();
     let t = Instant::now();
     let prepared = prepare_order(
         CHAIN_ID,
@@ -249,7 +250,8 @@ async fn place_order(
     .await
     .expect("order landed on chain");
     let land_ms = t.elapsed().as_secs_f64() * 1e3;
-    (order_id, prepared.opening, prove_ms, land_ms)
+    let phase_ms = phase_started_at.elapsed().as_secs_f64() * 1e3;
+    (order_id, prepared.opening, prove_ms, land_ms, phase_ms)
 }
 
 /// Pool head (leaf count) for cross-step accounting.
@@ -261,7 +263,7 @@ async fn leaf_count(client: &ChainClient) -> u64 {
 
 /// Full-depth 2-party co-zk settlement over a live chain and two real
 /// `settle2p_session` provers, note model + two-phase orchestration +
-/// atomic SettlePair. Both traders' `run_settle` run concurrently; the
+/// independent owner leg submissions. Both traders' `run_settle` run concurrently; the
 /// cross-quantity match drives the relist path (Bob Done, Alice relisted).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the chain + settle2p_session prover and ~4 GB RAM; run with --ignored --test-threads=1"]
@@ -332,9 +334,9 @@ async fn settle_e2e_scenario() {
 
     // ── Step 1: SendOrder both sides (real send_order proofs). Alice
     //    first so her sell is in an earlier block → deterministic maker. ──
-    let (alice_order_id, alice_opening, alice_prove_ms, alice_land_ms) =
+    let (alice_order_id, alice_opening, alice_prove_ms, alice_land_ms, alice_order_phase_ms) =
         place_order(&alice, &alice_note, TradeType::Sell, 2).await;
-    let (bob_order_id, bob_opening, bob_prove_ms, bob_land_ms) =
+    let (bob_order_id, bob_opening, bob_prove_ms, bob_land_ms, bob_order_phase_ms) =
         place_order(&bob, &bob_note, TradeType::Buy, 1).await;
 
     // ── Step 2: both orders reach Matched ──
@@ -390,9 +392,9 @@ async fn settle_e2e_scenario() {
     assert!(warmed.success(), "warm-keys must succeed");
 
     // ── Step 3: run BOTH parties' run_settle concurrently. This drives the
-    //    complete hardened flow: MPC compare → compare_ready → on-chain
-    //    SubmitCompareCoZk2p + Settling confirm (F1 gate) → reveal → own
-    //    settle proofs → in-fabric leg exchange → atomic SettlePair (F2). ──
+    //    complete flow: MPC compare → each owner's comparison share →
+    //    on-chain proof reconstruction/verification → reveal → each
+    //    owner's settlement proof submission → atomic execution. ──
     let t_settle = Instant::now();
     let alice_fut = run_settle(
         &alice,
@@ -415,6 +417,35 @@ async fn settle_e2e_scenario() {
 
     let alice_outcome: SettleOutcome = alice_res.expect("alice run_settle must succeed");
     let bob_outcome: SettleOutcome = bob_res.expect("bob run_settle must succeed");
+    for (role, timings) in [
+        ("alice", &alice_outcome.timings),
+        ("bob", &bob_outcome.timings),
+    ] {
+        let phase_sum = timings.rendezvous_ms + timings.comparison_ms + timings.final_settlement_ms;
+        assert!(
+            (phase_sum - timings.total_ms).abs() < 1.0,
+            "{role} semantic phases must close to its driver total: {phase_sum} vs {}",
+            timings.total_ms,
+        );
+        assert!(
+            timings.settlement_proof_ms > 0.0
+                && timings.settlement_proof_ms < timings.final_settlement_ms,
+            "{role} settlement proof must be timed inside final settlement",
+        );
+    }
+    // The pair's settlement critical path is the slower trader's complete
+    // driver. Its semantic phases are non-overlapping and sum to that
+    // driver's total, unlike independently taking the maximum of each phase.
+    let (critical_role, critical_timings) =
+        if alice_outcome.timings.total_ms >= bob_outcome.timings.total_ms {
+            ("alice", &alice_outcome.timings)
+        } else {
+            ("bob", &bob_outcome.timings)
+        };
+    assert!(
+        (settle_ms - critical_timings.total_ms).abs() < 100.0,
+        "critical trader must close to the concurrent run_settle wall clock",
+    );
 
     // ── Outcome amounts (precise) ──
     // cmp = sign(order_a - order_b) = sign(2 - 1) = 1, seen by both parties.
@@ -466,7 +497,7 @@ async fn settle_e2e_scenario() {
         "collateral commitment must be rewritten to the residual commitment"
     );
 
-    // ── Payout NOTES exist in the pool tree; the atomic SettlePair also
+    // ── Payout NOTES exist in the pool tree; atomic execution also
     //    mints two hiding refund commitments (Alice's is zero; Bob's opens
     //    to the 1-USDT price improvement). All four land atomically. ──
     assert!(
@@ -495,9 +526,14 @@ async fn settle_e2e_scenario() {
     #[derive(serde::Deserialize, Default)]
     struct Stats {
         #[serde(default)]
+        protocol_version: String,
+        #[serde(default)]
         build_ms: f64,
         #[serde(default)]
         prove_ms: f64,
+        #[serde(default)]
+        share_export_ms: f64,
+        // Backward-compatible raw alias retained by the subprocess.
         #[serde(default)]
         open_ms: f64,
         #[serde(default)]
@@ -526,8 +562,10 @@ async fn settle_e2e_scenario() {
     /// One trader's session phases as JSON, steps included in protocol order.
     fn session_json(s: &Stats) -> serde_json::Value {
         serde_json::json!({
+            "protocol_version": s.protocol_version,
             "build_ms": s.build_ms,
             "prove_ms": s.prove_ms,
+            "share_export_ms": s.share_export_ms,
             "open_ms": s.open_ms,
             "verify_ms": s.verify_ms,
             "compare_onchain_wait_ms": s.compare_onchain_wait_ms,
@@ -547,22 +585,57 @@ async fn settle_e2e_scenario() {
         bob_prove_ms,
     );
     row("send_order submit → Pending", alice_land_ms, bob_land_ms);
+    row(
+        "ORDER PHASE: prove → confirmed",
+        alice_order_phase_ms,
+        bob_order_phase_ms,
+    );
     row("match wait (both Matched)", match_ms, match_ms);
     row("MPC circuit build", sa.build_ms, sb.build_ms);
     row("collaborative prove", sa.prove_ms, sb.prove_ms);
-    row("proof open", sa.open_ms, sb.open_ms);
+    row(
+        "native final-share export",
+        sa.share_export_ms,
+        sb.share_export_ms,
+    );
     row(
         "on-chain anchor wait (host, NOT crypto)",
         sa.compare_onchain_wait_ms,
         sb.compare_onchain_wait_ms,
     );
     row(
-        "settle-leg exchange (incl. peer prove wait)",
+        "legacy settle-leg exchange (disabled)",
         sa.leg_exchange_ms,
         sb.leg_exchange_ms,
     );
     row("session subprocess total", sa.total_ms, sb.total_ms);
+    row(
+        "rendezvous before comparison",
+        alice_outcome.timings.rendezvous_ms,
+        bob_outcome.timings.rendezvous_ms,
+    );
+    row(
+        "COMPARISON PHASE: start → both proof shares verified",
+        alice_outcome.timings.comparison_ms,
+        bob_outcome.timings.comparison_ms,
+    );
+    row(
+        "settlement proof generation",
+        alice_outcome.timings.settlement_proof_ms,
+        bob_outcome.timings.settlement_proof_ms,
+    );
+    row(
+        "FINAL PHASE: comparison verified → settled",
+        alice_outcome.timings.final_settlement_ms,
+        bob_outcome.timings.final_settlement_ms,
+    );
+    row(
+        "semantic settlement phases total",
+        alice_outcome.timings.total_ms,
+        bob_outcome.timings.total_ms,
+    );
     row("run_settle total (both, concurrent)", settle_ms, settle_ms);
+    eprintln!("settlement critical path: {critical_role}");
 
     // Per-protocol-step breakdown: one row per numbered step of
     // docs/settlement_protocol.md, in the order the session crosses them.
@@ -581,21 +654,51 @@ async fn settle_e2e_scenario() {
         let report = serde_json::json!({
             "scenario": "one trade: A limit-sells 2 ETH @ 3 (maker), B market-buys 1 ETH with protection 4",
             "order": {
-                "alice": {"prove_ms": alice_prove_ms, "land_ms": alice_land_ms},
-                "bob": {"prove_ms": bob_prove_ms, "land_ms": bob_land_ms},
+                "alice": {
+                    "prove_ms": alice_prove_ms,
+                    "land_ms": alice_land_ms,
+                    "phase_ms": alice_order_phase_ms,
+                },
+                "bob": {
+                    "prove_ms": bob_prove_ms,
+                    "land_ms": bob_land_ms,
+                    "phase_ms": bob_order_phase_ms,
+                },
                 "match_ms": match_ms,
             },
             "session": {
                 "alice": session_json(&sa),
                 "bob": session_json(&sb),
             },
+            "semantic_settlement_phases": {
+                "alice": {
+                    "rendezvous_ms": alice_outcome.timings.rendezvous_ms,
+                    "comparison_ms": alice_outcome.timings.comparison_ms,
+                    "settlement_proof_ms": alice_outcome.timings.settlement_proof_ms,
+                    "final_settlement_ms": alice_outcome.timings.final_settlement_ms,
+                    "total_ms": alice_outcome.timings.total_ms,
+                },
+                "bob": {
+                    "rendezvous_ms": bob_outcome.timings.rendezvous_ms,
+                    "comparison_ms": bob_outcome.timings.comparison_ms,
+                    "settlement_proof_ms": bob_outcome.timings.settlement_proof_ms,
+                    "final_settlement_ms": bob_outcome.timings.final_settlement_ms,
+                    "total_ms": bob_outcome.timings.total_ms,
+                },
+                "critical_path": {
+                    "role": critical_role,
+                    "rendezvous_ms": critical_timings.rendezvous_ms,
+                    "comparison_ms": critical_timings.comparison_ms,
+                    "settlement_proof_ms": critical_timings.settlement_proof_ms,
+                    "final_settlement_ms": critical_timings.final_settlement_ms,
+                    "total_ms": critical_timings.total_ms,
+                },
+            },
             "settle_ms": settle_ms,
-            // Full trade = order placement (proof + landing) + matching +
+            // Full trade = both complete order phases + matching +
             // both settlement drivers, which run concurrently.
-            "full_trade_ms": alice_prove_ms
-                + alice_land_ms
-                + bob_prove_ms
-                + bob_land_ms
+            "full_trade_ms": alice_order_phase_ms
+                + bob_order_phase_ms
                 + match_ms
                 + settle_ms,
         });

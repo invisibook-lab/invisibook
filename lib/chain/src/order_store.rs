@@ -7,7 +7,7 @@
 //! Protocol rule (persist-before-publish): the opening for a new order
 //! MUST be durably written (`save` fsyncs) BEFORE the SendOrder that
 //! creates the order is submitted. On a relist, the residual opening MUST
-//! be written before the SettlePair that swaps the on-chain commitments.
+//! be written before the second owner leg can trigger the atomic swap.
 
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
