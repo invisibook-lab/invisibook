@@ -18,26 +18,29 @@ import (
 
 // Settlement per the paper (§V-C/VI, plan rev. 3 Phase 3):
 //
-//  1. SubmitCompareCoZk / SubmitCompareCoZk2p — the ONLY collaborative
-//     step. Both traders jointly proved `cmp = sign(q_A − q_B)` against
-//     their on-chain order commitments (π_cmp) and both signed the result;
-//     the chain records cmp and moves the pair to Settling.
-//  2. SettleSmall — the fully filled side's own update (paper π_A): its
-//     whole collateral becomes a pool note paid to the counterparty.
-//  3. SettleLarge — the partially filled side's own update (paper π_B):
-//     pays the fill as a pool note, relists its residual under fresh
-//     commitments.
+//  1. SubmitCompareCoZk / SubmitCompareCoZk2pShare records the verified
+//     comparison and moves the pair to Settling. The 2-party path requires
+//     one identity-bound proof share from each owner and opens the absolute
+//     settlement-leg deadline immediately.
+//  2. Each owner calls SubmitSettleLeg with its own π_A (fully filled) or
+//     π_B (larger/residual) proof. Each valid leg is buffered within that
+//     pre-existing window; the second invokes the internal atomic pair
+//     executor below.
 //
 // Steps 2 and 3 are ordinary single-prover Groth16 proofs — each party
-// holds its complete witness after the comparison (the smaller side
-// revealed its opening over the settlement channel).
+// holds its complete witness after payout keys are exchanged and persisted,
+// then the smaller side reveals over the settlement channel. No peer/MPC
+// dependency remains after that reveal. The current payout-key exchange is a
+// compliant-client WAL invariant, not cryptographic recipient authorization:
+// the private payout opening is not yet bound to an owner-signed on-chain
+// pre-reveal commitment.
 
 // ────────────────────── Compare submission ──────────────────────
 
 // CompareRequest is the dual-signed comparison result of the collaborative
 // settlement's first phase. `Cmp` is sign(q_A − q_B); `ZkProof` is the
 // jointly generated π_cmp (snarkjs Groth16 JSON for SubmitCompareCoZk,
-// hex-encoded ark-compressed PLONK bytes for SubmitCompareCoZk2p). Order A
+// hex-encoded ark-compressed PLONK bytes in the local 2-party session). Order A
 // must be the maker (see makerTakerOrder).
 type CompareRequest struct {
 	OrderAID OrderID `json:"order_a_id" validate:"required"`
@@ -75,7 +78,8 @@ func CoZkCompareMessage(req *CompareRequest) []byte {
 	return compareMessage("invisibook-cozk-compare-v3", req)
 }
 
-// CoZk2pCompareMessage is the signed message for SubmitCompareCoZk2p.
+// CoZk2pCompareMessage is the local session's domain-separated agreement
+// message. Chain-facing participation is separately signed per proof share.
 func CoZk2pCompareMessage(req *CompareRequest) []byte {
 	return compareMessage("invisibook-cozk2p-compare-v3", req)
 }
@@ -466,8 +470,8 @@ func (ot *OrderBook) settlePublicPrefix(mine, match *Order) (locked string, ownP
 // verifySmallLeg checks the fully filled side's owner signature and π_A
 // against `mine`'s on-chain row (opening the locked collateral and
 // transferring all of it). Pure verification — no state change; returns the
-// payout note commitment to mint to the counterparty. Shared by SettleSmall
-// and SettlePair. `mine` and `match` must be a matched Settling pair.
+// payout note commitment to mint to the counterparty. Used by owner-leg
+// verification and the internal atomic executor.
 func (ot *OrderBook) verifySmallLeg(mine, match *Order, cmNoteOut, cmRefundOut, sig, proof string) ([]*big.Int, error) {
 	req := &SettleSmallRequest{
 		OrderID:      mine.ID,
@@ -518,8 +522,8 @@ func (ot *OrderBook) verifySmallLeg(mine, match *Order, cmNoteOut, cmRefundOut, 
 // against `mine`'s row and the counterparty's on-chain collateral
 // commitment (opened in-circuit on the OPPOSITE side, so the fill cannot
 // be understated). Pure verification — no state change; returns the fill
-// note commitment to mint to the counterparty. Shared by SettleLarge and
-// SettlePair.
+// note commitment to mint to the counterparty. Used by owner-leg
+// verification and the internal atomic executor.
 func (ot *OrderBook) verifyLargeLeg(
 	mine, match *Order, cmLockedResidual, cmNoteOut, cmRefundOut, sig, proof string,
 ) ([]*big.Int, error) {
@@ -588,11 +592,11 @@ func (ot *OrderBook) verifyLargeLeg(
 
 // ────────────────────── Writing: SettlePair (atomic) ──────────────────────
 
-// SettlePairLeg carries one side's settle artifacts inside a SettlePair.
+// SettlePairLeg carries one side's settle artifacts. It is submitted alone
+// by its owner and later assembled internally with the peer leg.
 // The residual field is set ONLY for the larger side (π_B); a fully filled
 // side (π_A, and both sides when cmp == 0) leaves it empty. Each leg keeps
-// its own owner signature, so SettlePair needs no new signed message — it
-// reuses SettleSmall/SettleLarge's per-leg messages.
+// its own inner owner signature.
 type SettlePairLeg struct {
 	CmNoteOut        string `json:"cm_note_out" validate:"required,len=64"`
 	CmRefundOut      string `json:"cm_refund_out" validate:"required,len=64"`
@@ -601,12 +605,9 @@ type SettlePairLeg struct {
 	CmLockedResidual string `json:"cm_locked_residual,omitempty"`
 }
 
-// SettlePairRequest settles BOTH sides of a matched pair in one atomic
-// writing: both proofs are verified and both payout notes are minted in a
-// single pool mutation, so neither side can be paid without the other (the
-// fair-exchange guarantee the two independent SettleSmall/SettleLarge
-// writings lack). A and B are the canonical maker/taker order ids; the
-// recorded cmp decides which leg is the larger one.
+// SettlePairRequest is the internal assembled form consumed after both
+// independently submitted legs exist. A and B are the canonical
+// maker/taker order ids; recorded cmp decides which leg is larger.
 type SettlePairRequest struct {
 	OrderAID OrderID       `json:"order_a_id" validate:"required"`
 	OrderBID OrderID       `json:"order_b_id" validate:"required"`
@@ -676,35 +677,12 @@ func settlementID(a, b OrderID) string {
 	return string(a) + ":" + string(b)
 }
 
-// SettlePair verifies both sides' settle proofs and applies both settlements
-// atomically: both payout notes are minted in ONE pool mutation, then the
-// fully filled side(s) close and the larger side (if any) relists its
-// residual. Either the whole pair settles or nothing does — closing the
-// "one leg lands, the other does not" fair-exchange gap. This is the ONLY
-// registered settlement writing.
-func (ot *OrderBook) SettlePair(ctx *context.WriteContext) error {
-	ctx.SetLei(100)
-	LogPayloadSize("SettlePair", ctx.GetRequestBytes())
-
-	req := new(SettlePairRequest)
-	if err := ctx.BindJson(req); err != nil {
-		return err
-	}
-	if err := Validator.Struct(req); err != nil {
-		return err
-	}
-	evt, err := ot.executeSettlePair(req, uint64(ctx.Block.Height))
-	if err != nil {
-		return err
-	}
-	return ctx.EmitJsonEvent(evt)
-}
-
 // executeSettlePair is the crash-consistent settlement pipeline. The
-// orderbook and pool state live in DIFFERENT SQLite databases, so one
-// shared transaction is impossible; instead the pipeline is journaled and
-// idempotent, so a crash at ANY point is completed by a resubmission of
-// the same request or by the startup recovery:
+// independently submitted legs are already stored before this internal
+// method runs. The orderbook and pool state live in DIFFERENT SQLite
+// databases, so one shared transaction is impossible; instead the pipeline
+// is journaled and idempotent, so a crash at ANY point is completed by a
+// resubmission of the second leg or by startup recovery:
 //
 //  1. Verify both legs (pure checks, no state).
 //  2. Write the settlement journal row (orders.db, PENDING) — the durable
@@ -745,6 +723,7 @@ func (ot *OrderBook) executeSettlePair(req *SettlePairRequest, height uint64) (*
 		SettlementID:   id,
 		OrderAID:       string(orderA.ID),
 		OrderBID:       string(orderB.ID),
+		MatchRound:     orderA.MatchRound,
 		CmNoteA:        req.A.CmNoteOut,
 		CmNoteB:        req.B.CmNoteOut,
 		CmRefundA:      req.A.CmRefundOut,
@@ -825,9 +804,20 @@ func (ot *OrderBook) finishSettlementOrders(j *SettlementJournalScheme) error {
 		if err := applyLeg(j.OrderBID, j.BLarge, j.CmLockedResidB); err != nil {
 			return fmt.Errorf("side B order update: %w", err)
 		}
+		if j.MatchRound != 0 {
+			// This marker commits atomically with the terminal/relisted order
+			// states and journal DONE. A crash can no longer leave both stored
+			// legs looking incomplete after their settlement already finished.
+			if err := tx.Model(&SettleLegRoundScheme{}).
+				Where("order_a_id = ? AND order_b_id = ? AND match_round = ? AND expired_at_height = 0 AND leg_a_json <> '' AND leg_b_json <> ''",
+					j.OrderAID, j.OrderBID, j.MatchRound).
+				Update("completed_height", j.Height).Error; err != nil {
+				return fmt.Errorf("marking settlement-leg round complete: %w", err)
+			}
+		}
 		return tx.Model(&SettlementJournalScheme{}).
 			Where("settlement_id = ?", j.SettlementID).
-			Update("state", SettlementDone).Error
+			Updates(map[string]any{"state": SettlementDone, "match_round": j.MatchRound}).Error
 	})
 }
 
@@ -844,7 +834,7 @@ func (ot *OrderBook) postSettlementCleanup(j *SettlementJournalScheme, evt *Sett
 			log.Printf("[settle] re-reading relisted order %s: %v", orderID, err)
 			return nil, nil
 		}
-		rematched, err := ot.matchOrder(relisted)
+		rematched, err := ot.matchOrder(relisted, j.Height)
 		if err != nil {
 			log.Printf("[settle] re-matching relisted order %s: %v", orderID, err)
 			return relisted, nil
@@ -857,6 +847,10 @@ func (ot *OrderBook) postSettlementCleanup(j *SettlementJournalScheme, evt *Sett
 		evt.RelistedA, evt.RematchedA = ra, ma
 		evt.RelistedB, evt.RematchedB = rb, mb
 	}
+	ot.deleteSettlementRendezvous(j)
+}
+
+func (ot *OrderBook) deleteSettlementRendezvous(j *SettlementJournalScheme) {
 	_ = ot.DeleteSettleAddr(OrderID(j.OrderAID))
 	_ = ot.DeleteSettleAddr(OrderID(j.OrderBID))
 }
@@ -891,11 +885,22 @@ func (ot *OrderBook) recoverPendingSettlements() {
 			}
 			continue
 		}
+		if j.MatchRound == 0 {
+			// Legacy journals predate the explicit round column. Pending crash
+			// recovery still has Settling order rows from which it can be inferred.
+			if order, orderErr := ot.GetOrder(OrderID(j.OrderAID)); orderErr == nil {
+				j.MatchRound = order.MatchRound
+			}
+		}
 		if err := ot.finishSettlementOrders(&j); err != nil {
 			log.Printf("[settle] recovery: completing %s: %v", j.SettlementID, err)
 			continue
 		}
-		ot.postSettlementCleanup(&j, nil)
+		// Recovery may run long after j.Height. Re-matching with that historic
+		// height would create a fresh pair whose MatchHeight+10 comparison
+		// deadline is already elapsed. Keep each relisted survivor Pending and
+		// let a later SendOrder match it at the then-current block height.
+		ot.deleteSettlementRendezvous(&j)
 		log.Printf("[settle] recovered settlement %s after crash", j.SettlementID)
 	}
 }

@@ -1,6 +1,6 @@
 # App Design
 
-> **Status:** Current (2026-08-17, locked-only model + two-phase
+> **Status:** Current (2026-08-19, locked-only model + two-phase
 > settlement). For every place this design differs from the paper, see
 > [paper_deviations.md](paper_deviations.md).
 
@@ -16,8 +16,8 @@ sharing one set of RSX components across desktop and mobile. The app:
    wallet records **before** it submits (persist-before-publish).
 3. Drives the full hardened settlement for its own matched orders: the
    2-party MPC compare (in the `settle2p_session` subprocess), the
-   on-chain compare confirmation (F1), this side's settle proof, the
-   settle-leg exchange, and the atomic `SettlePair` (F2).
+   on-chain comparison-share verification, the pre-reveal payout-key WAL
+   barrier, and this owner's independent settlement-proof submission.
 4. Keeps the wallet's money files: `notes.json` (note openings — this
    file IS the money) and `orders.json` (order openings).
 
@@ -115,19 +115,23 @@ run_settle
   │    (QUIC address + per-round X25519 key, dev metadata exposure)
   └─ settle2p_session subprocess over stdio:
        "need_sig"       → sign the canonical compare message
-       "compare_ready"  → cross-check the proven statement + both sigs,
-                          submit SubmitCompareCoZk2p, block until BOTH
-                          orders are Settling; upload a signed pre-open
-                          checkpoint and wait for the peer; then reply
-                          compare_confirmed ── the F1 gate
-       (subprocess: smaller side sends an X25519/ChaCha20-Poly1305
-        encrypted reveal; payout-note keys exchanged;
-        witness.json WAL written before secrets leave the process)
+       "compare_ready"  → cross-check the proven statement + both sigs;
+                          take `proof_share_hex` directly (the common
+                          canonical template + this owner's native shares of
+                          the two final KZG G1 points, with no SPDZ MACs),
+                          bind it to identity/round/deadline in the submission,
+                          then block until BOTH payloads verify on chain and
+                          open the absolute settlement-leg window; then
+                          reply compare_confirmed ── pre-reveal gate
+       (subprocess: both sides persist their own payout-note pair, exchange
+        pairs, and persist the peer pair in payout_keys.json; ONLY THEN the
+        smaller side sends its X25519/ChaCha20-Poly1305 encrypted reveal;
+        each side checks/completes witness.json locally with no later
+        peer/MPC dependency)
        "result_ready"   → read result.json, prove MY settle circuit
                           (settle_small if fully filled, else
-                          settle_large), sign the leg, hand it back
-       "pair_ready"     → both legs, exchanged in-fabric; either party
-                          submits the ATOMIC SettlePair (F2)
+                          settle_large), sign and immediately submit only
+                          this owner's leg; acknowledge submission
   ├─ confirm on chain: my order Done, or relisted under the residual cm
   └─ persist: recv note and any price-improvement refund → notes.json
        (PENDING_MINT); remainder →
@@ -138,12 +142,39 @@ Error classes: `CrossPrice` / `SelfMatch` / `Unrecoverable` are
 permanent (never retried); `Transient` / `OnChainRejected` retry after a
 backoff.
 
+Deadline handling is phase-specific. The comparison payload signs the
+current round's `MatchHeight + 10`; original `BlockHeight` is only time
+priority. When the second share verifies, the chain immediately creates a
+separate settlement deadline at `verification_height + 10`. A zero-leg
+expiry means the pre-reveal session did not complete and releases both orders
+without blame. For `cmp != 0`, only a lone valid large-side leg is punitive:
+the proof requires the smaller opening, so the large owner is released and
+the missing small owner is frozen. A lone small-side leg does not prove
+delivery to the large owner; only-small and every incomplete `cmp = 0` round
+therefore release both without blame. This rule is conservative but
+asymmetric; see
+[paper_deviations.md](paper_deviations.md) D4.
+
+While polling `QuerySettleLegs`, the app calls permissionless
+`FinalizeSettleLegs` whenever both legs are present but the round is neither
+complete nor expired. Finalization consumes only the already verified stored
+legs, so it adds crash/liveness recovery without granting the caller control
+over either output.
+
+The payout-key WAL is currently an operational compliant-client invariant,
+not cryptographic recipient authorization. Payout pairs are not owner-signed
+or committed on chain, while settle-circuit `npk_ctr, r_note` remain private
+and are not publicly bound to the peer's pre-reveal choice. A malicious payer
+can therefore redirect a valid payout. The planned fix is an owner-signed
+pre-reveal payout-key commitment plus a public binding in both settle
+circuits and the chain verifier (D18).
+
 **Crash recovery** (`recover_all_sessions`): on startup the app scans
 session dirs. A `witness.json` whose payout note is in the pool tree is
 materialized into the wallet stores (the note key is re-derived from the
 wallet seed + order id). When the note is NOT on chain yet, the witness
-is KEPT by default — the peer may hold both settle legs and submit the
-SettlePair at any time; it holds the only copy of the payout blinding.
+is KEPT by default — the peer may still submit its owner leg and complete
+the buffered atomic settlement; the witness holds the only copy of the payout blinding.
 Deletion needs proof of death: the order left Matched/Settling without
 this witness's note. An unreadable witness is quarantined to
 `<dir>.corrupt` (never deleted); chain-unreachable and mid-flight
@@ -179,12 +210,18 @@ per-step wall-clock table; numbers in
    matches the pair.
 2. Both apps auto-settle: signed QUIC/X25519 rendezvous, MPC compare (π_cmp ~4 s
    wall-clock), `compare_ready` → either app lands
-   `SubmitCompareCoZk2p`; both wait for `Settling`, upload the pre-open
-   checkpoint, and confirm only after both checkpoints exist.
-3. The subprocess sends Bob's (smaller) opening encrypted to Alice only now;
-   payout-note keys are exchanged; each app proves its own settle
-   circuit (~0.1 s) and the legs cross in-fabric.
-4. Either app submits `SettlePair`: Bob's order → `Done`, Alice's order
+   its own `SubmitCompareCoZk2pShare`. The chain requires the same canonical
+   template from both parties, group-adds only their native shares of the final
+   `opening_proof` and `shifted_opening_proof` points, constructs and verifies
+   π_cmp, moves the pair to `Settling`, and creates the absolute settlement
+   deadline. Both apps confirm only after that succeeds.
+3. Both subprocesses first persist their own payout-note pair, exchange the
+   pairs, and persist the peer pair. Only after both WAL barriers does Bob
+   send his smaller opening encrypted to Alice. Alice validates it locally;
+   from that point neither side needs the peer/MPC session. Each app completes
+   its witness, proves its own settle circuit (~0.1 s), and independently
+   submits its owner-bound leg.
+4. The second verified leg triggers atomic execution: Bob's order → `Done`, Alice's order
    relists in place with the residual collateral commitment; two payout
    notes and two hiding refund commitments mint. Each wallet persists its
    incoming note, any non-zero refund, and
@@ -215,11 +252,10 @@ per-step wall-clock table; numbers in
 | out | `{"event":"phase",...}` | progress |
 | out | `{"event":"need_sig","cmp":b}` | request the compare signature |
 | in | `{"sig":"<128-hex>"}` | the signature |
-| out | `{"event":"compare_ready","ready":{...}}` | π_cmp + both sigs; host must land the compare on chain |
+| out | `{"event":"compare_ready","ready":{...}}` | public statement, `cmp`, both signatures, and this party's `proof_share_hex`; host submits that native share payload unchanged |
 | in | `{"compare_confirmed":true\|false}` | F1 gate; `false` aborts before any reveal |
 | out | `{"event":"result_ready"}` | result.json is on disk; host proves its settle leg |
-| in | `{"settle_leg":{...}}` | the signed leg |
-| out | `{"event":"pair_ready","a":{...},"b":{...}}` | both legs (exchanged over the session fabric) |
+| in | `{"settle_leg_submitted":true}` | host confirms its own leg reached the chain |
 | out | `{"event":"done"}` | end |
 
 ### 4.3 Configuration

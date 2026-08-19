@@ -1,27 +1,33 @@
 //! One trader of the FULL 2-party settlement session: MPC comparison,
-//! fill reveal, output-commitment exchange, signature ferry, collaborative
-//! prove, local verify — everything crypto over one QUIC connection.
+//! signature ferry, collaborative native-share proving, pre-reveal
+//! payout-key exchange/WAL, encrypted fill reveal, and local witness
+//! completion over one QUIC connection.
 //!
 //! The host app drives this binary over piped stdio:
 //! - stdout: JSON lines — `{"event":"phase",...}` progress, one
 //!   `{"event":"need_sig",...}` request, one `{"event":"compare_ready",...}`
-//!   request (carries π_cmp + both sigs), one `{"event":"result_ready"}`
-//!   (result.json is on disk; the host proves its own settle leg), one
-//!   `{"event":"pair_ready","a":...,"b":...}` (both legs exchanged over the
-//!   still-open QUIC fabric, ready for an atomic SettlePair), and a final
-//!   `{"event":"done"}`.
+//!   request (carries this party's π_cmp share + both sigs), one
+//!   `{"event":"result_ready"}`
+//!   (result.json is on disk; the host proves and submits its own settle
+//!   leg), and a final `{"event":"done"}`.
 //! - stdin: one line `{"sig":"<128-hex>"}` answering `need_sig`, one line
 //!   `{"compare_confirmed":true}` after the host lands the compare on
 //!   chain (the reveal happens ONLY after that confirmation, so no secret
-//!   precedes the on-chain anchor), and one line `{"settle_leg":{...}}`
-//!   answering `result_ready`.
+//!   precedes the on-chain anchor), and one line
+//!   `{"settle_leg_submitted":true}` answering `result_ready`.
 //!
-//! Files written to --out-dir: `witness.json` (crash-recovery record,
-//! written BEFORE the signature leaves this process), `result.json` (the
-//! session product), `stats.json` (timings + peak RSS).
+//! Files written to --out-dir: `payout_keys.json` (both payout-key pairs,
+//! durable before reveal), `witness.json` (complete local crash-recovery
+//! record after reveal), `result.json` (the session product), and
+//! `stats.json` (timings + peak RSS). After a successful reveal there is no
+//! further peer/MPC dependency.
 //!
-//! DEV CAVEAT: Beaver triples come from the mock `PartyIDBeaverSource`;
-//! production needs a real SPDZ offline phase.
+//! DEV CAVEAT: Beaver triples come from the mock `PartyIDBeaverSource`; its
+//! predictable input masks expose the counterparty's inputs, so this binary
+//! provides no production privacy or zero knowledge without a real SPDZ
+//! offline phase. The payout-key WAL is also not cryptographic recipient
+//! authorization until the owner-signed pre-reveal choice is publicly bound
+//! by the settle circuits and chain.
 //!
 //! `--warm-keys` generates/loads the proving keys and exits — run it at app
 //! startup to move the ~48 s cold key generation off the settlement path.
@@ -43,8 +49,7 @@ use cozk2p::{
     default_cache_dir, dev_keys,
     net::connect_retry,
     session::{
-        CompareReady, NeedSig, SessionConfig, SessionInput, SettleLeg, SigIo, exchange_settle_legs,
-        run_session, sanity_check_input,
+        CompareReady, NeedSig, SessionConfig, SessionInput, SigIo, run_session, sanity_check_input,
     },
     stats::peak_rss_bytes,
 };
@@ -239,42 +244,46 @@ async fn main() -> Result<()> {
     )
     .context("writing result.json")?;
 
-    // ── Settle-leg exchange over the still-open fabric: the host reads
-    //    result.json, proves ITS settle circuit, and hands the leg back;
-    //    both parties then hold both legs, so either can submit the atomic
-    //    SettlePair. ──
+    // ── Independent settlement-leg submission: the host reads
+    //    result.json, proves THIS owner's settle circuit, and submits it
+    //    directly to the chain. No peer proof is handed to the host. ──
     emit_line(json!({"event": "result_ready"}));
-    let leg_line = read_stdin_line(Duration::from_secs(600), "the settle leg")?;
+    let leg_line = read_stdin_line(Duration::from_secs(600), "settlement-leg submission")?;
     #[derive(serde::Deserialize)]
     struct LegLine {
-        settle_leg: SettleLeg,
+        settle_leg_submitted: bool,
     }
     let parsed: LegLine =
-        serde_json::from_str(leg_line.trim()).context("parsing settle leg line from host")?;
-    emit_phase("leg-exchange", "exchanging settle legs with the peer");
-    let leg_start = Instant::now();
-    let (leg_a, leg_b) = exchange_settle_legs(&fabric, party, &parsed.settle_leg).await?;
-    let leg_exchange_ms = leg_start.elapsed().as_secs_f64() * 1e3;
-    emit_line(json!({"event": "pair_ready", "a": leg_a, "b": leg_b}));
+        serde_json::from_str(leg_line.trim()).context("parsing settle-leg acknowledgement")?;
+    ensure!(
+        parsed.settle_leg_submitted,
+        "host did not submit its settlement leg"
+    );
 
     let total_ms = total_start.elapsed().as_secs_f64() * 1e3;
     let stats = json!({
+        "protocol_version": "native-final-kzg-spdz-share-v1",
         "role": input.role,
         "cmp": result.cmp,
         "build_ms": result.timings.build_ms,
         "prove_ms": result.timings.prove_ms,
+        // `open_ms` is retained as a raw compatibility alias for archived
+        // experiment readers. The native-share protocol does not open the
+        // final proof to the peers; this phase drains the graph and exports
+        // this party's two final KZG point shares.
+        "share_export_ms": result.timings.open_ms,
         "open_ms": result.timings.open_ms,
         "verify_ms": result.verify_ms,
         // Chain/host latencies, kept OUT of the cryptographic phases above:
         // the F1 on-chain compare confirmation and the settle-leg round.
         "compare_onchain_wait_ms": result.onchain_wait_ms,
-        "leg_exchange_ms": leg_exchange_ms,
+        "leg_exchange_ms": 0.0,
         // Per-protocol-step wall clock (docs/settlement_protocol.md §2.2),
         // in protocol order.
         "steps": result.steps.steps,
         "total_ms": total_ms,
         "peak_rss_bytes": peak_rss_bytes(),
-        "proof_size_bytes_compressed": result.proof_hex.len() / 2,
+        "proof_size_bytes_compressed": result.proof_share_hex.len() / 2,
     });
     fs::write(
         out_dir.join("stats.json"),

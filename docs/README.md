@@ -23,7 +23,7 @@
 |---|---|---|---|
 | [paper_deviations.md](paper_deviations.md) | EN | **Current** | Implementation vs. the paper, item by item (D1–D17) |
 | [settlement_protocol.md](settlement_protocol.md) | EN | **Current** | The settlement protocol step by step: A/B walkthroughs, sequence diagrams, exact submissions, every MPC/ZK constraint |
-| [chain_design.md](chain_design.md) | EN | **Current** | L2 chain: tripods, note pool, matching, compare gate, atomic `SettlePair` |
+| [chain_design.md](chain_design.md) | EN | **Current** | L2 chain: tripods, note pool, matching, owner-bound proof shares/legs, atomic execution |
 | [zk_design.md](zk_design.md) | EN | **Current** | Note primitives (golden spec), Groth16 circuit catalog, binds, proving/verifying toolchain |
 | [cozk2p_design.md](cozk2p_design.md) | EN | **Current** | 2-party SPDZ + collaborative PLONK compare session, stdio protocol, trust caveats |
 | [app_design.md](app_design.md) | EN | **Current** | Wallet stores, note-based order placement, two-phase settlement driver, crash recovery |
@@ -55,11 +55,10 @@ document.
    *order opening* (`(q, locked_amount, r_locked)`),
    *collateral commitment* (`Order.LockedCommitment` — the order's
    ONLY commitment, locked-only model, D17),
-   *compare gate* (`SubmitCompareCoZk2p` /
-   `SubmitCompareCoZk`), *two-phase settlement* (compare anchored on
+   *compare gate* (`SubmitCompareCoZk2pShare`), *two-phase settlement* (compare anchored on
    chain before any reveal — F1), *settle leg* (one side's signed
-   settle proof), *atomic `SettlePair`* (both legs in one writing —
-   F2). F1/F2/F3/F4 always refer to the rev.4 findings in
+   settle proof), *atomic settlement* (independent owner submissions,
+   both legs execute together). F1/F2/F3/F4 always refer to the rev.4 findings in
    [settlement_hardening_plan_zh.md](settlement_hardening_plan_zh.md).
 5. **Numbers live in one place.** Measurements go into
    [cozk_experiments.md](cozk_experiments.md) with the command that

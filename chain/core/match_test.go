@@ -43,7 +43,7 @@ func TestMatcherMatchesCrossingUnequalPrices(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	matched, err := ot.matchOrder(buy)
+	matched, err := ot.matchOrder(buy, uint64(buy.BlockHeight))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,6 +61,10 @@ func TestMatcherMatchesCrossingUnequalPrices(t *testing.T) {
 		if order.ExecutionPrice == nil || order.ExecutionPrice.Uint64() != 4 {
 			t.Fatalf("order %s execution price must be maker sell price 4", id)
 		}
+		if order.MatchHeight != 2 || compareProofShareDeadline(order, order) != 12 {
+			t.Fatalf("order %s match height/deadline = %d/%d, want 2/12", id,
+				order.MatchHeight, compareProofShareDeadline(order, order))
+		}
 	}
 }
 
@@ -76,7 +80,7 @@ func TestMatcherMatchesEqualPrices(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	matched, err := ot.matchOrder(buy)
+	matched, err := ot.matchOrder(buy, uint64(buy.BlockHeight))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +116,7 @@ func TestMatcherPricePrecedesTime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	matched, err := ot.matchOrder(buy)
+	matched, err := ot.matchOrder(buy, uint64(buy.BlockHeight))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +182,7 @@ func TestMatcherMarketLimitAndProtection(t *testing.T) {
 	if err := ot.InsertOrder(buy); err != nil {
 		t.Fatal(err)
 	}
-	matched, err := ot.matchOrder(buy)
+	matched, err := ot.matchOrder(buy, uint64(buy.BlockHeight))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +204,7 @@ func TestMatcherMarketMarketDoesNotMatch(t *testing.T) {
 	if err := ot.InsertOrder(buy); err != nil {
 		t.Fatal(err)
 	}
-	matched, err := ot.matchOrder(buy)
+	matched, err := ot.matchOrder(buy, uint64(buy.BlockHeight))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +223,7 @@ func TestMatcherRejectsNonCrossingLimits(t *testing.T) {
 	if err := ot.InsertOrder(buy); err != nil {
 		t.Fatal(err)
 	}
-	matched, err := ot.matchOrder(buy)
+	matched, err := ot.matchOrder(buy, uint64(buy.BlockHeight))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +243,7 @@ func TestMatcherAssignsSharedMonotonicRound(t *testing.T) {
 	if err := ot.InsertOrder(buy); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ot.matchOrder(buy); err != nil {
+	if _, err := ot.matchOrder(buy, uint64(buy.BlockHeight)); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []OrderID{sell.ID, buy.ID} {
@@ -266,11 +270,21 @@ func TestMatcherRematchUsesChronologicalMakerPrice(t *testing.T) {
 	if err := ot.InsertOrder(newBuy); err != nil {
 		t.Fatal(err)
 	}
-	matched, err := ot.matchOrder(oldSell)
+	matched, err := ot.matchOrder(oldSell, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if matched == nil || oldSell.ExecutionPrice == nil || oldSell.ExecutionPrice.Uint64() != 4 {
 		t.Fatalf("rematch must execute at old maker price 4, got match=%v price=%v", matched, oldSell.ExecutionPrice)
+	}
+	for _, id := range []OrderID{oldSell.ID, newBuy.ID} {
+		order, err := ot.GetOrder(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if order.MatchHeight != 100 || compareProofShareDeadline(order, order) != 110 {
+			t.Fatalf("rematched order %s has match height/deadline %d/%d", id,
+				order.MatchHeight, compareProofShareDeadline(order, order))
+		}
 	}
 }

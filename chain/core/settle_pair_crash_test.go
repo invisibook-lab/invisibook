@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gorm.io/gorm"
 )
 
 // canonicalTestHex builds a deterministic 64-char CANONICAL field-element
@@ -85,6 +87,15 @@ func newPairFixture(t *testing.T) *pairFixture {
 		Cmp:      1, // A larger
 		Height:   3,
 	}); err != nil {
+		t.Fatal(err)
+	}
+	// A real pair reaches Settling only when comparison verification creates
+	// this absolute window in the same transaction. Settlement tests must not
+	// rely on the first leg manufacturing or extending its own deadline.
+	if err := ot.db.Create(&SettleLegRoundScheme{
+		OrderAID: string(orderA), OrderBID: string(orderB), MatchRound: 1,
+		DeadlineHeight: 110,
+	}).Error; err != nil {
 		t.Fatal(err)
 	}
 
@@ -203,6 +214,18 @@ func TestSettlePairCrashBetweenDatabasesThenRetry(t *testing.T) {
 // must complete the order-side updates from the journal.
 func TestSettlePairCrashThenRestartRecovery(t *testing.T) {
 	fx := newPairFixture(t)
+	waitingBuy := mkOrder("waiting-buy", Buy, 3, 20)
+	if err := fx.ot.InsertOrder(waitingBuy); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []*SettleAddrScheme{
+		{OrderID: string(fx.orderA), MatchOrderID: string(fx.orderB), MatchRound: 1, Addr: "a"},
+		{OrderID: string(fx.orderB), MatchOrderID: string(fx.orderA), MatchRound: 1, Addr: "b"},
+	} {
+		if err := fx.ot.UpsertSettleAddr(row); err != nil {
+			t.Fatal(err)
+		}
+	}
 	settlePairFailpoint = func() error { return errors.New("injected crash") }
 	if _, err := fx.ot.executeSettlePair(fx.pairRequest, 10); err == nil {
 		t.Fatal("expected the injected crash")
@@ -217,9 +240,42 @@ func TestSettlePairCrashThenRestartRecovery(t *testing.T) {
 	}
 	mustStatus(t, fx.ot, fx.orderA, Pending)
 	mustStatus(t, fx.ot, fx.orderB, Done)
+	mustStatus(t, fx.ot, waitingBuy.ID, Pending)
+	relisted, err := fx.ot.GetOrder(fx.orderA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relisted.MatchOrder != "" {
+		t.Fatalf("recovery must not rematch at historic journal height: %+v", relisted)
+	}
+	for _, id := range []OrderID{fx.orderA, fx.orderB} {
+		if _, err := fx.ot.GetSettleAddr(id); !errors.Is(err, gorm.ErrRecordNotFound) {
+			t.Fatalf("recovery did not clear rendezvous row %s: %v", id, err)
+		}
+	}
 	j, _ := fx.ot.GetSettlementJournal(settlementID(fx.orderA, fx.orderB))
 	if j == nil || j.State != SettlementDone {
 		t.Fatalf("journal must be DONE after recovery, got %+v", j)
+	}
+
+	// A later incoming order is matched at its current height, never the
+	// recovered journal's historic height.
+	freshBuy := mkOrder("fresh-buy-after-recovery", Buy, 3, 100)
+	if err := fx.ot.InsertOrder(freshBuy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.ot.matchOrder(freshBuy, 100); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []OrderID{fx.orderA, freshBuy.ID} {
+		order, err := fx.ot.GetOrder(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if order.MatchHeight != 100 || compareProofShareDeadline(order, order) != 110 {
+			t.Fatalf("post-recovery match %s has stale height/deadline %d/%d", id,
+				order.MatchHeight, compareProofShareDeadline(order, order))
+		}
 	}
 }
 
@@ -272,6 +328,7 @@ func TestSettlePairPreMintCrashJournalDropped(t *testing.T) {
 		SettlementID: settlementID(fx.orderA, fx.orderB),
 		OrderAID:     string(fx.orderA),
 		OrderBID:     string(fx.orderB),
+		MatchRound:   1,
 		CmNoteA:      canonicalTestHex(0xC2),
 		CmNoteB:      canonicalTestHex(0xC1),
 		CmRefundA:    canonicalTestHex(0xD2),

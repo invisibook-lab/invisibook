@@ -44,12 +44,23 @@ func LoadPlonkVK(name, path string) (*PlonkVK, error) {
 	return &PlonkVK{Name: name, VKBytes: bytes}, nil
 }
 
-// VerifyPlonkSettle2p verifies `proofHex` (hex of the ark-compressed PLONK
-// proof both traders revealed) against `vk` and `publicJSON`, the canonical
+// VerifyPlonkSettle2p verifies `proofHex` (hex of one complete
+// ark-compressed PLONK proof) against `vk` and `publicJSON`, the canonical
 // `SettlePublic` statement JSON the chain rebuilt from on-chain state.
 // Logs one line per call plus the verdict, like VerifyGroth16.
 func VerifyPlonkSettle2p(vk *PlonkVK, proofHex string, publicJSON []byte) error {
 	return verifyPlonkWith(vk, proofHex, publicJSON, plonkVerifySettle2p)
+}
+
+// VerifyPlonkSettle2pShares verifies a collaborative comparison without ever
+// reconstructing its proof in Go. shareAHex and shareBHex are opaque
+// versioned canonical payloads emitted by PARTY0 and PARTY1 respectively;
+// Rust checks their common public transcript, group-adds their two final KZG
+// point shares, and verifies the resulting proof.
+func VerifyPlonkSettle2pShares(
+	vk *PlonkVK, shareAHex, shareBHex string, publicJSON []byte,
+) error {
+	return verifyPlonkSharesWith(vk, shareAHex, shareBHex, publicJSON, plonkVerifySettle2pShares)
 }
 
 // verifyPlonkWith is the shared decode/log/skip shell around one FFI
@@ -76,6 +87,49 @@ func verifyPlonkWith(
 	if err := verify(vk.VKBytes, publicJSON, proofBytes); err != nil {
 		log.Printf("[zk] %s REJECTED: %v", vk.Name, err)
 		return fmt.Errorf("plonk verification failed for %s: %w", vk.Name, err)
+	}
+	log.Printf("[zk] %s ok in %.3f ms", vk.Name, float64(time.Since(start).Microseconds())/1e3)
+	return nil
+}
+
+// verifyPlonkSharesWith is the decode/log/skip shell around the native
+// two-share FFI entry. Keeping both payloads opaque here makes Rust the sole
+// implementation of arkworks' canonical share layout.
+func verifyPlonkSharesWith(
+	vk *PlonkVK, shareAHex, shareBHex string, publicJSON []byte,
+	verify func(vkBytes, publicJSON, shareA, shareB []byte) error,
+) error {
+	if vk == nil {
+		log.Printf("[zk] no PLONK VK loaded, skipping proof-share verification")
+		return nil
+	}
+	decode := func(owner, encoded string) ([]byte, error) {
+		raw, err := hex.DecodeString(strings.TrimSpace(encoded))
+		if err != nil {
+			return nil, fmt.Errorf("decoding %s %s proof share hex: %w", vk.Name, owner, err)
+		}
+		if len(raw) == 0 {
+			return nil, fmt.Errorf("%s %s proof share is empty", vk.Name, owner)
+		}
+		return raw, nil
+	}
+	shareA, err := decode("order A", shareAHex)
+	if err != nil {
+		return err
+	}
+	shareB, err := decode("order B", shareBHex)
+	if err != nil {
+		return err
+	}
+	if len(publicJSON) == 0 {
+		return fmt.Errorf("%s public statement is empty", vk.Name)
+	}
+	log.Printf("[zk] verifying %s: %d B + %d B native proof shares (PLONK)",
+		vk.Name, len(shareA), len(shareB))
+	start := time.Now()
+	if err := verify(vk.VKBytes, publicJSON, shareA, shareB); err != nil {
+		log.Printf("[zk] %s REJECTED: %v", vk.Name, err)
+		return fmt.Errorf("plonk proof-share verification failed for %s: %w", vk.Name, err)
 	}
 	log.Printf("[zk] %s ok in %.3f ms", vk.Name, float64(time.Since(start).Microseconds())/1e3)
 	return nil

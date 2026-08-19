@@ -131,9 +131,10 @@ Asymmetry note: `settle_small` does not self-prove `q ≤ q_ctr`; the
 chain's recorded `cmp` gates which circuit each side may use (F3 in the
 hardening plan; [paper_deviations.md](paper_deviations.md) D15).
 
-Both legs are verified together by the atomic `SettlePair` writing
-(shared `verifySmallLeg`/`verifyLargeLeg` in
-[chain/core/orderbook_cozk.go](../chain/core/orderbook_cozk.go)).
+Each owner leg is verified when `SubmitSettleLeg` receives it. Once both
+are stored, the same `verifySmallLeg`/`verifyLargeLeg` helpers are rerun by
+the internal atomic executor before any payout
+([chain/core/orderbook_settle_leg.go](../chain/core/orderbook_settle_leg.go)).
 
 ### 4.4 Compare gate
 
@@ -145,7 +146,7 @@ price_a, price_b, a_is_seller]` — both own prices and `a_is_seller` are in the
 because the collateral equation needs them to pin the compared
 quantities. Production uses the cozk2p PLONK prover for the same
 6-signal statement; this Groth16 twin serves fixtures, tests, and the
-`SubmitCompareCoZk` variant.
+the unregistered Groth16 fixture/test variant.
 
 ## 5. Wallet-side proving
 

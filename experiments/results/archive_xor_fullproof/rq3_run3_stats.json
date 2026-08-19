@@ -1,0 +1,132 @@
+{
+  "full_trade_ms": 40940.139103,
+  "order": {
+    "alice": {
+      "land_ms": 4007.648489,
+      "phase_ms": 4329.640966999999,
+      "prove_ms": 321.9919
+    },
+    "bob": {
+      "land_ms": 6009.893862,
+      "phase_ms": 6323.684246,
+      "prove_ms": 313.78976600000004
+    },
+    "match_ms": 4005.6081360000003
+  },
+  "scenario": "one trade: A limit-sells 2 ETH @ 3 (maker), B market-buys 1 ETH with protection 4",
+  "semantic_settlement_phases": {
+    "alice": {
+      "comparison_ms": 13818.037502,
+      "final_settlement_ms": 6438.699665,
+      "rendezvous_ms": 6024.437078,
+      "settlement_proof_ms": 164.820566,
+      "total_ms": 26281.174320000002
+    },
+    "bob": {
+      "comparison_ms": 13813.734928,
+      "final_settlement_ms": 6443.782859999999,
+      "rendezvous_ms": 6020.476842,
+      "settlement_proof_ms": 204.012955,
+      "total_ms": 26277.994674999998
+    },
+    "critical_path": {
+      "comparison_ms": 13818.037502,
+      "final_settlement_ms": 6438.699665,
+      "rendezvous_ms": 6024.437078,
+      "role": "alice",
+      "settlement_proof_ms": 164.820566,
+      "total_ms": 26281.174320000002
+    }
+  },
+  "session": {
+    "alice": {
+      "build_ms": 81.43997999999999,
+      "compare_onchain_wait_ms": 8018.490973000001,
+      "leg_exchange_ms": 0.0,
+      "open_ms": 4349.341217,
+      "peak_rss_bytes": 1814224896,
+      "prove_ms": 1187.447946,
+      "steps": [
+        [
+          "1 preamble fingerprint",
+          2.0918780000000003
+        ],
+        [
+          "2 share inputs + collateral binding",
+          49.529555
+        ],
+        [
+          "3 three-way compare",
+          14.184278
+        ],
+        [
+          "4 signature ferry + exchange",
+          0.8154819999999999
+        ],
+        [
+          "5 collaborative prove + local verify",
+          5628.307312000001
+        ],
+        [
+          "6 on-chain compare anchor (host wait)",
+          8018.556238
+        ],
+        [
+          "7 smaller-side reveal",
+          2.869571
+        ],
+        [
+          "8 payout-note keys + WAL",
+          2.274681
+        ]
+      ],
+      "total_ms": 14186.348021,
+      "verify_ms": 9.754448
+    },
+    "bob": {
+      "build_ms": 81.422281,
+      "compare_onchain_wait_ms": 8017.212415999999,
+      "leg_exchange_ms": 0.0,
+      "open_ms": 4329.7921830000005,
+      "peak_rss_bytes": 1809186816,
+      "prove_ms": 1202.096169,
+      "steps": [
+        [
+          "1 preamble fingerprint",
+          0.26107
+        ],
+        [
+          "2 share inputs + collateral binding",
+          49.741147
+        ],
+        [
+          "3 three-way compare",
+          14.411371
+        ],
+        [
+          "4 signature ferry + exchange",
+          0.518333
+        ],
+        [
+          "5 collaborative prove + local verify",
+          5624.404242
+        ],
+        [
+          "6 on-chain compare anchor (host wait)",
+          8017.413806
+        ],
+        [
+          "7 smaller-side reveal",
+          7.465045
+        ],
+        [
+          "8 payout-note keys + WAL",
+          2.360637
+        ]
+      ],
+      "total_ms": 14185.09225,
+      "verify_ms": 10.658063
+    }
+  },
+  "settle_ms": 26281.205754
+}

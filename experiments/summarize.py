@@ -70,6 +70,11 @@ def mib(x):
     return f"{x / 1024 ** 2:.1f}"
 
 
+def share_export_ms(record):
+    """Native final-share export, with the old open_ms key as a raw-data fallback."""
+    return record.get("share_export_ms", record.get("open_ms", 0.0))
+
+
 # ──────────────────────────────── RQ1 ───────────────────────────────────
 
 
@@ -83,6 +88,7 @@ def rq1(args):
 
     mock = raw.get("cozk2p_mock_inprocess", [])
     mock_phase = lambda key: stats([r.get(key, 0.0) for r in mock])
+    mock_share_export = stats([share_export_ms(r) for r in mock])
 
     quic = [run for run in raw.get("cozk2p_quic_2process", []) if run.get("per_party")]
     parties = [p for run in quic for p in run["per_party"]]
@@ -92,13 +98,16 @@ def rq1(args):
     quic_phase = lambda key: stats(
         [max(p.get(key, 0.0) for p in run["per_party"]) for run in quic]
     )
+    quic_share_export = stats(
+        [max(share_export_ms(p) for p in run["per_party"]) for run in quic]
+    )
 
     # The proof core excludes the surrounding MPC comparison/session steps.
     def proof_core(rec):
         return (
             rec.get("build_ms", 0.0)
             + rec.get("prove_ms", 0.0)
-            + rec.get("open_ms", 0.0)
+            + share_export_ms(rec)
             + rec.get("verify_ms", 0.0)
         )
 
@@ -113,6 +122,7 @@ def rq1(args):
     )
 
     summary = {
+        "protocol_version": raw.get("protocol_version", "legacy-opened-proof"),
         "environment": env,
         "circuit": {
             "turboplonk_gates": raw.get("circuit_gates"),
@@ -120,6 +130,9 @@ def rq1(args):
             "proof_bytes_compressed": raw.get("proof_size_bytes", {}).get("compressed"),
             "proof_bytes_uncompressed": raw.get("proof_size_bytes", {}).get(
                 "uncompressed"
+            ),
+            "comparison_share_bytes_compressed": raw.get(
+                "comparison_share_size_bytes_compressed"
             ),
             "verifying_key_bytes_compressed": raw.get("vk_size_bytes_compressed"),
         },
@@ -131,7 +144,7 @@ def rq1(args):
         "two_party_in_process": {
             "build_ms": mock_phase("build_ms"),
             "prove_ms": mock_phase("prove_ms"),
-            "open_ms": mock_phase("open_ms"),
+            "share_export_ms": mock_share_export,
             "verify_ms": mock_phase("verify_ms"),
             "session_overhead_ms": mock_phase("session_overhead_ms"),
             "proof_core_ms": mock_proof_core,
@@ -140,7 +153,7 @@ def rq1(args):
         "two_party_quic": {
             "build_ms": quic_phase("build_ms"),
             "prove_ms": quic_phase("prove_ms"),
-            "open_ms": quic_phase("open_ms"),
+            "share_export_ms": quic_share_export,
             "verify_ms": quic_phase("verify_ms"),
             "proof_core_ms": quic_proof_core,
             "total_ms": quic_total,
@@ -170,21 +183,21 @@ def rq1(args):
         ("in-process two-party",
          summary["two_party_in_process"]["build_ms"]["median"],
          summary["two_party_in_process"]["prove_ms"]["median"],
-         summary["two_party_in_process"]["open_ms"]["median"],
+         summary["two_party_in_process"]["share_export_ms"]["median"],
          summary["two_party_in_process"]["verify_ms"]["median"],
          summary["two_party_in_process"]["proof_core_ms"]["median"],
          summary["two_party_in_process"]["total_ms"]["median"]),
         ("two-process QUIC",
          summary["two_party_quic"]["build_ms"]["median"],
          summary["two_party_quic"]["prove_ms"]["median"],
-         summary["two_party_quic"]["open_ms"]["median"],
+         summary["two_party_quic"]["share_export_ms"]["median"],
          summary["two_party_quic"]["verify_ms"]["median"],
          summary["two_party_quic"]["proof_core_ms"]["median"],
          summary["two_party_quic"]["total_ms"]["median"]),
     ]
     with open(args.csv_out, "w") as f:
         f.write(
-            "configuration,build_ms,prove_ms,open_ms,verify_ms,"
+            "configuration,build_ms,prove_ms,share_export_ms,verify_ms,"
             "proof_core_ms,session_total_ms\n"
         )
         for name, b, p, o, v, core, total in rows:
@@ -200,22 +213,23 @@ def rq1(args):
         f"(two traders each), {m['total_ms']['n']} in-process sessions, "
         f"{s['prove_ms']['n']} single-prover runs.",
         "One observation is recorded per session; two-process phase values use the slower trader.",
+        f"Protocol: {summary['protocol_version']}.",
         "",
         "## Latency per phase and session (ms)",
         "",
-        "| configuration | build | prove | open | verify | proof core | session total | p95 session |",
+        "| configuration | build | prove | share export | local verify | proof core | session total | p95 session |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
         f"| single prover | — | {ms(s['prove_ms']['median'])} | — | "
         f"{s['verify_ms']['median']:.1f} | {ms(s['total_ms']['median'])} | "
         f"{ms(s['total_ms']['median'])} | "
         f"{ms(s['total_ms']['p95'])} |",
         f"| two parties, one process | {ms(m['build_ms']['median'])} | "
-        f"{ms(m['prove_ms']['median'])} | {ms(m['open_ms']['median'])} | "
+        f"{ms(m['prove_ms']['median'])} | {ms(m['share_export_ms']['median'])} | "
         f"{m['verify_ms']['median']:.1f} | {ms(m['proof_core_ms']['median'])} | "
         f"{ms(m['total_ms']['median'])} | "
         f"{ms(m['total_ms']['p95'])} |",
         f"| two processes, QUIC | {ms(q['build_ms']['median'])} | "
-        f"{ms(q['prove_ms']['median'])} | {ms(q['open_ms']['median'])} | "
+        f"{ms(q['prove_ms']['median'])} | {ms(q['share_export_ms']['median'])} | "
         f"{q['verify_ms']['median']:.1f} | {ms(q['proof_core_ms']['median'])} | "
         f"{ms(q['total_ms']['median'])} | "
         f"{ms(q['total_ms']['p95'])} |",
@@ -243,6 +257,7 @@ def rq1(args):
         f"| public signals | {c['public_signals']} |",
         f"| proof size | {c['proof_bytes_compressed']} B compressed "
         f"({c['proof_bytes_uncompressed']} B uncompressed) |",
+        f"| comparison share size | {c['comparison_share_bytes_compressed']} B compressed |",
         f"| verifying key size | {c['verifying_key_bytes_compressed']} B compressed |",
         "",
         f"Machine: {env.get('cpu', '?')}, {env.get('logical_cpus', '?')} logical CPUs, "
@@ -280,12 +295,15 @@ def rq2(args):
                 for run in runs
             ]
         )
+        export = stats(
+            [max(share_export_ms(p) for p in run["per_party"]) for run in runs]
+        )
         proof_core = stats(
             [
                 max(
                     p.get("build_ms", 0.0)
                     + p.get("prove_ms", 0.0)
-                    + p.get("open_ms", 0.0)
+                    + share_export_ms(p)
                     + p.get("verify_ms", 0.0)
                     for p in run["per_party"]
                 )
@@ -298,10 +316,11 @@ def rq2(args):
                 "rtt_ms": point["rtt_ms"],
                 "one_way_delay_ms": point["one_way_delay_ms"],
                 "status": point["status"],
+                "protocol_version": bench.get("protocol_version", "legacy-opened-proof"),
                 "sessions": len(runs),
                 "build_ms": phase("build_ms"),
                 "prove_ms": phase("prove_ms"),
-                "open_ms": phase("open_ms"),
+                "share_export_ms": export,
                 "verify_ms": phase("verify_ms"),
                 "proof_core_ms": proof_core,
                 "total_ms": total,
@@ -327,13 +346,13 @@ def rq2(args):
 
     with open(args.csv_out, "w") as f:
         f.write(
-            "rtt_ms,build_ms,prove_ms,open_ms,verify_ms,proof_core_ms,"
+            "rtt_ms,build_ms,prove_ms,share_export_ms,verify_ms,proof_core_ms,"
             "session_total_ms,p95_session_total_ms\n"
         )
         for p in points:
             f.write(
                 f"{p['rtt_ms']},{p['build_ms']['median']:.1f},"
-                f"{p['prove_ms']['median']:.1f},{p['open_ms']['median']:.1f},"
+                f"{p['prove_ms']['median']:.1f},{p['share_export_ms']['median']:.1f},"
                 f"{p['verify_ms']['median']:.1f},{p['proof_core_ms']['median']:.1f},"
                 f"{p['total_ms']['median']:.1f},"
                 f"{p['total_ms']['p95']:.1f}\n"
@@ -345,7 +364,7 @@ def rq2(args):
         f"Rate cap {summary['rate_mbit']} Mbit/s, {summary['runs_per_point']} sessions "
         "per point. One observation is recorded per session; phase values use the slower trader.",
         "",
-        "| RTT (ms) | build | prove | open | verify | proof core | session total | p95 session |",
+        "| RTT (ms) | build | prove | share export | local verify | proof core | session total | p95 session |",
         "|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for p in points:
@@ -354,7 +373,7 @@ def rq2(args):
             continue
         lines.append(
             f"| {p['rtt_ms']} | {ms(p['build_ms']['median'])} | "
-            f"{ms(p['prove_ms']['median'])} | {ms(p['open_ms']['median'])} | "
+            f"{ms(p['prove_ms']['median'])} | {ms(p['share_export_ms']['median'])} | "
             f"{p['verify_ms']['median']:.1f} | {ms(p['proof_core_ms']['median'])} | "
             f"{ms(p['total_ms']['median'])} | "
             f"{ms(p['total_ms']['p95'])} |"
@@ -409,11 +428,6 @@ def parse_node_log(path):
     return verifications, payloads
 
 
-# Both traders submit these writings, for liveness. The first one takes
-# effect and the chain rejects the second, so a trade needs only one copy.
-SUBMITTED_TWICE = ("SubmitCompareCoZk2p", "SettlePair")
-
-
 def effective_payload(payloads, runs):
     """Bytes one trade must put on chain: every writing counted once per
     effect. `payloads` maps a writing name to the sizes the node logged,
@@ -423,7 +437,10 @@ def effective_payload(payloads, runs):
         if not values:
             continue
         median = percentile(values, 50)
-        count = 1 if name in SUBMITTED_TWICE else len(values) / max(runs, 1)
+        # Comparison shares and settlement legs are deliberately two
+        # owner submissions, so their observed per-trade count must not be
+        # collapsed to one as the retired one-shot protocol did.
+        count = len(values) / max(runs, 1)
         total += median * count
     return round(total)
 
@@ -476,35 +493,50 @@ def rq3(args):
 
     alice_steps, bob_steps = steps("alice"), steps("bob")
 
-    # Categories: what the trade spends its wall clock on. Both traders
-    # settle at the same time, so one trader's session covers that span.
-    # The four categories add up to the full trade.
-    session_total = field("session.alice.total_ms")["median"]
-    anchor_wait = field("session.alice.compare_onchain_wait_ms")["median"]
-    crypto_ms = session_total - anchor_wait
+    # Semantic phase boundaries are recorded by the app, not inferred from
+    # the subprocess lifetime. The critical-path trader is selected per run,
+    # so rendezvous + comparison + final settlement is one non-overlapping
+    # decomposition of that run's settlement driver.
+    rendezvous_ms = field(
+        "semantic_settlement_phases.critical_path.rendezvous_ms"
+    )["median"]
+    comparison_ms = field(
+        "semantic_settlement_phases.critical_path.comparison_ms"
+    )["median"]
+    final_settlement_ms = field(
+        "semantic_settlement_phases.critical_path.final_settlement_ms"
+    )["median"]
     order_prove_ms = (
         field("order.alice.prove_ms")["median"] + field("order.bob.prove_ms")["median"]
     )
-    chain_wait_ms = (
-        field("order.alice.land_ms")["median"]
-        + field("order.bob.land_ms")["median"]
-        + field("order.match_ms")["median"]
-        + anchor_wait
+
+    def proof_core(run, trader):
+        rec = run.get("session", {}).get(trader, {})
+        return (
+            rec.get("build_ms", 0.0)
+            + rec.get("prove_ms", 0.0)
+            + share_export_ms(rec)
+            + rec.get("verify_ms", 0.0)
+        )
+
+    comparison_proof_core = stats(
+        [max(proof_core(run, "alice"), proof_core(run, "bob")) for run in runs]
     )
-    # What is left of the settlement driver: the rendezvous, each side's own
-    # Groth16 settlement proof, the leg exchange, and the settlement
-    # submission with its confirmation.
-    settle_tail_ms = field("settle_ms")["median"] - session_total
 
     summary = {
+        "protocol_version": runs[0].get("session", {}).get("alice", {}).get(
+            "protocol_version", "legacy-opened-proof"
+        ),
         "environment": env,
         "runs": len(runs),
         "scenario": runs[0].get("scenario"),
         "order": {
             "alice_prove_ms": field("order.alice.prove_ms"),
             "alice_land_ms": field("order.alice.land_ms"),
+            "alice_phase_ms": field("order.alice.phase_ms"),
             "bob_prove_ms": field("order.bob.prove_ms"),
             "bob_land_ms": field("order.bob.land_ms"),
+            "bob_phase_ms": field("order.bob.phase_ms"),
             "match_ms": field("order.match_ms"),
         },
         "session": {
@@ -513,7 +545,7 @@ def rq3(args):
                 for key in (
                     "build_ms",
                     "prove_ms",
-                    "open_ms",
+                    "share_export_ms",
                     "verify_ms",
                     "compare_onchain_wait_ms",
                     "leg_exchange_ms",
@@ -523,14 +555,28 @@ def rq3(args):
             }
             for trader in ("alice", "bob")
         },
+        "semantic_settlement_phases": {
+            scope: {
+                key: field(f"semantic_settlement_phases.{scope}.{key}")
+                for key in (
+                    "rendezvous_ms",
+                    "comparison_ms",
+                    "settlement_proof_ms",
+                    "final_settlement_ms",
+                    "total_ms",
+                )
+            }
+            for scope in ("alice", "bob", "critical_path")
+        },
+        "comparison_proof_core_ms": comparison_proof_core,
         "steps": {"alice": alice_steps, "bob": bob_steps},
         "settle_ms": field("settle_ms"),
         "full_trade_ms": field("full_trade_ms"),
         "categories_ms": {
-            "collaborative_cryptography": crypto_ms,
             "single_prover_order_proofs": order_prove_ms,
-            "chain_waits": chain_wait_ms,
-            "settlement_submission_and_legs": settle_tail_ms,
+            "rendezvous": rendezvous_ms,
+            "comparison_phase": comparison_ms,
+            "final_settlement_phase": final_settlement_ms,
         },
         "chain_verification_ms": {
             name: stats(values) for name, values in sorted(verifications.items())
@@ -559,6 +605,9 @@ def rq3(args):
         f"| order submission until it lands | "
         f"{ms(summary['order']['alice_land_ms']['median'])} | "
         f"{ms(summary['order']['bob_land_ms']['median'])} |",
+        f"| **order phase: proof start → confirmed** | "
+        f"**{ms(summary['order']['alice_phase_ms']['median'])}** | "
+        f"**{ms(summary['order']['bob_phase_ms']['median'])}** |",
         f"| matching | {ms(summary['order']['match_ms']['median'])} | "
         f"{ms(summary['order']['match_ms']['median'])} |",
     ]
@@ -572,14 +621,41 @@ def rq3(args):
         f"{ms(summary['settle_ms']['median'])} |",
         f"| **full trade** | **{ms(summary['full_trade_ms']['median'])}** | |",
         "",
-        "## Where the time goes",
+        "## Paper phase boundaries (ms, median)",
         "",
-        "| category | ms |",
-        "|---|---:|",
-        f"| collaborative cryptography | {ms(crypto_ms)} |",
-        f"| single-prover order proofs | {ms(order_prove_ms)} |",
-        f"| chain waits (blocks and polling) | {ms(chain_wait_ms)} |",
-        f"| settlement submission, own leg and confirmation | {ms(settle_tail_ms)} |",
+        "The settlement rows use the critical-path trader selected separately in each run. "
+        "Rendezvous, comparison, and final settlement are non-overlapping.",
+        "",
+        "| phase | median (ms) | p95 (ms) |",
+        "|---|---:|---:|",
+        f"| order, maker | {ms(summary['order']['alice_phase_ms']['median'])} | "
+        f"{ms(summary['order']['alice_phase_ms']['p95'])} |",
+        f"| order, taker | {ms(summary['order']['bob_phase_ms']['median'])} | "
+        f"{ms(summary['order']['bob_phase_ms']['p95'])} |",
+        f"| rendezvous (reported separately) | "
+        f"{ms(summary['semantic_settlement_phases']['critical_path']['rendezvous_ms']['median'])} | "
+        f"{ms(summary['semantic_settlement_phases']['critical_path']['rendezvous_ms']['p95'])} |",
+        f"| comparison: MPC start → both proof shares verified | "
+        f"{ms(summary['semantic_settlement_phases']['critical_path']['comparison_ms']['median'])} | "
+        f"{ms(summary['semantic_settlement_phases']['critical_path']['comparison_ms']['p95'])} |",
+        f"| final settlement: comparison confirmed → settlement confirmed | "
+        f"{ms(summary['semantic_settlement_phases']['critical_path']['final_settlement_ms']['median'])} | "
+        f"{ms(summary['semantic_settlement_phases']['critical_path']['final_settlement_ms']['p95'])} |",
+        f"| **complete trade** | **{ms(summary['full_trade_ms']['median'])}** | "
+        f"**{ms(summary['full_trade_ms']['p95'])}** |",
+        "",
+        "## Cryptographic work (ms)",
+        "",
+        "| operation | trader A | trader B |",
+        "|---|---:|---:|",
+        f"| order Groth16 generation | "
+        f"{ms(summary['order']['alice_prove_ms']['median'])} | "
+        f"{ms(summary['order']['bob_prove_ms']['median'])} |",
+        f"| settlement Groth16 generation | "
+        f"{ms(summary['semantic_settlement_phases']['alice']['settlement_proof_ms']['median'])} | "
+        f"{ms(summary['semantic_settlement_phases']['bob']['settlement_proof_ms']['median'])} |",
+        f"| collaborative comparison proof core (slower trader) | "
+        f"{ms(summary['comparison_proof_core_ms']['median'])} | — |",
         "",
         "## What the chain does",
         "",
@@ -600,10 +676,11 @@ def rq3(args):
     lines += [
         "",
         f"On-chain payload of one trade: "
-        f"{summary['onchain_payload_effective_bytes']} B. Both traders submit "
-        "the comparison and the settlement for liveness, so the node receives "
-        f"{summary['onchain_payload_received_bytes'] // max(summary['runs'], 1)} B "
-        "and rejects the second copy of each.",
+        f"{summary['onchain_payload_effective_bytes']} B. This includes one "
+        "identity-bound comparison share and one owner-bound settlement leg "
+        "from each trader; all four submissions are required and accepted. "
+        "Each settlement leg is verified when submitted and re-verified before "
+        "the pair executes atomically.",
         "",
         f"Peak memory per trader: "
         f"{gib(summary['session']['alice']['peak_rss_bytes']['median'])} GiB (A), "

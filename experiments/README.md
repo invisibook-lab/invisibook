@@ -20,9 +20,12 @@ relation and the SAME keys, which is the computational lower bound. Three
 configurations run: one prover, two parties in one process with in-memory
 channels, and two trader processes that speak QUIC. For each one the
 script separates circuit build and witness check, collaborative proving,
-authenticated opening, and local verification. It also records the peak
-memory of each trader, the traffic each trader sends, and the constant
-sizes: circuit gates, proof, and verifying key.
+and final native-share export. The final proof is not opened to the two
+traders: each exports its two local SPDZ KZG-point value shares, and RQ3
+measures the chain-side reconstruction and verification. RQ1 also records
+the peak memory of each trader, the traffic each trader sends, and the
+constant sizes: circuit gates, canonical comparison share, proof, and
+verifying key.
 
 ```bash
 ./experiments/rq1_crypto_overhead.sh                 # 20 runs, 3 warm-up runs
@@ -75,10 +78,20 @@ Output:
 
 Runs a whole trade on a live single-node chain with two real trader
 processes: order proving and submission, matching, the collaborative
-comparison, the on-chain comparison anchor, the two local settlement
-proofs, the settlement-message exchange, and the atomic settlement. The
+comparison, both on-chain comparison shares, the two local owner-bound
+settlement-proof submissions, and atomic execution. The
 node verifies every proof, and it logs each verification time and each
 writing's payload size, which the summary collects.
+
+RQ3 records paper-facing semantic boundaries directly. The order phase runs
+from proof generation through confirmation. After the address rendezvous
+(reported separately), the comparison phase runs from starting the MPC to
+confirmation that both comparison shares reconstructed and verified the
+collaborative proof. The non-overlapping final-settlement phase then runs
+through reveal, both local proof submissions, atomic execution, and final confirmation.
+The slower trader's complete driver is the settlement critical path for each
+run, and the harness asserts that its three settlement intervals close to the
+measured driver total.
 
 ```bash
 ./experiments/rq3_end_to_end.sh              # one trade

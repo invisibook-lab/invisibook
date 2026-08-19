@@ -3,8 +3,9 @@
 > **Status:** Current(中文理论笔记,背景阅读;与实现的对应关系见
 > [cozk2p_design.md](cozk2p_design.md))。
 
-> 说明:本文解释 `cozk2p` 比较协议里"每次打开都是 `open_authenticated`,
-> 篡改份额会在 MAC 校验处 abort"这一机制的全部理论细节。
+> 说明：本文解释 SPDZ 的 `open_authenticated` 理论。当前 `cozk2p` 确实在
+> 核心 bind/compare opening 使用它，但上游还有部分 opening 未保留 MAC-check
+> handle，且最后两个 KZG share 改由链重构后做 PLONK 验证；实现差距见第 9 节。
 >
 > 公式用 `$...$` / `$$...$$`,在 GitHub、Typora、或装了数学插件的 VSCode
 > Markdown 预览里可正常渲染。
@@ -17,12 +18,11 @@
 - 域固定为 $\mathbb{F}=\mathbb{F}_r$,即 BN254 的标量域($r\approx 2^{254}$)。
   这也是协作 PLONK 证明的原生域,所以 MPC 与证明同域。
 
-**一个必须先讲清的实现前提:** 下面的定理针对 **在线阶段**
-(`open_authenticated`,ark-mpc 的真实 SPDZ 实现)。但 **offline 阶段**
-(Beaver 三元组 + 全局 MAC 密钥)在本仓库用的是 `PartyIDBeaverSource`
-**mock**(见 `cozk2p/src/lib.rs:17-18`),等于一个可信 dealer 直接发正确的
-三元组和 MAC 密钥。所以:在线论证严格成立;端到端 malicious 安全还差一个
-真实 offline(MASCOT / LowGear / SoftSpokenOT)。详见第 9 节。
+**一个必须先讲清的实现前提：** 下面的定理假设 **真实、主动安全的 offline
+preprocessing** 与完整等待的 MAC checks。当前仓库的
+`PartyIDBeaverSource` 是 deterministic 开发 mock，input mask 可预测，既不是
+秘密可信 dealer，也不满足隐私前提。因此下面首先是理论说明，不能直接当作当前
+demo 的端到端 malicious-security 证明；详见第 9 节。
 
 ---
 
@@ -196,10 +196,11 @@ $$\sigma_1 = \alpha_1 x + c - \alpha_1 x'
 
 $$\Pr[\text{接受错误打开}] \;\le\; \frac{2}{|\mathbb{F}|} \;\approx\; \frac{2}{2^{254}} \;=\; 2^{-253}.$$
 
-**这就是"没人能靠捣乱份额把比较结果翻过来"的严格含义:** 任何一处发错份额、
-算错本地乘法、篡改中间打开,都会在最终那道 `open_authenticated` 上留下非零
-$\delta$;蒙混过关 $\equiv$ 在信息论隐藏的 $\alpha$ 下伪造 $\alpha\delta$,
-概率 $2^{-253}$。
+**这就是在真实、主动安全 SPDZ preprocessing 假设下，“没人能靠捣乱份额把
+经过认证打开的比较结果翻过来”的严格含义：** 对一个确实保留并等待其 MAC-check
+handle 的 opening，发错份额会留下非零 $\delta$；蒙混过关 $\equiv$ 在信息论隐藏的
+$\alpha$ 下伪造 $\alpha\delta$，概率 $2^{-253}$。这个结论不能自动推广到没有等待
+MAC check 的上游 opening，也不能替代下文对当前 mock offline source 的限制。
 
 ---
 
@@ -245,17 +246,22 @@ $\delta$;蒙混过关 $\equiv$ 在信息论隐藏的 $\alpha$ 下伪造 $\alpha\
 
 ---
 
-## 9. 诚实警告:我们的 offline 是 mock 的
+## 9. 诚实警告：当前运行时不满足上述安全前提
 
-- 上面第 5 节定理针对 **在线阶段**;ark-mpc 的 `open_authenticated` 是它的
-  真实实现,可靠性论证 **都成立**。
-- 但三元组和 $\alpha$ 来自 `PartyIDBeaverSource` **mock**(`cozk2p/src/lib.rs:17-18`),
-  等于一个可信 dealer 直接发正确三元组和 MAC 密钥。
-- 后果:第 5 节的 $2^{-253}$ 伪造界,在 **假设三元组与 $\alpha$ 由诚实 offline
-  产生** 的前提下严格成立;把 mock 换成真实 offline(MASCOT / LowGear /
-  SoftSpokenOT——在无可信 dealer 下生成 **带 MAC、经 sacrifice 验证的** 三元组),
-  是从"demo 正确"到"生产 malicious-secure"要补的那一步。与"生产要换真实 SRS
-  ceremony"同级别。
+- 上面第 5 节定理只适用于 **真实、主动安全的 offline preprocessing**，且每个
+  authenticated opening 的 MAC-check handle 都被协议保留并等待成功。
+- 当前 `cozk2p` 使用 `PartyIDBeaverSource` 开发 mock。它的 input mask 是可预测的
+  固定值，不等价于秘密可信 dealer；对手可从广播的 masked input 恢复另一方的
+  `q`/`r`。因此当前 demo **不提供输入隐私或零知识**，也不能套用第 5 节的
+  $2^{-253}$ 生产安全结论。
+- mpc-jellyfish 目前还丢弃了部分已公开 scalar opening 的 MAC-check handle。最终
+  comparison 输出路径不打开两个 KZG G1 share：双方把各自 value share 交给链，
+  链重构标准 proof 并做 PLONK verification。这能阻止无效 comparison 进入 reveal，
+  但不能倒推出完整的 malicious-secure SPDZ transcript，也不能在重构失败时判定
+  哪一方提交了坏 share。
+- 生产化必须替换为真实 LowGear/MASCOT/SoftSpokenOT 等 preprocessing（带 MAC、
+  经 sacrifice 验证），补齐所有 authenticated opening 的 MAC check，并使用不可
+  重现 trapdoor 的正式 SRS ceremony。这些不是当前 benchmark 所测量的能力。
 
 ---
 

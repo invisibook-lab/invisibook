@@ -1,0 +1,248 @@
+{
+  "schema_version": 1,
+  "protocols": {
+    "old": {
+      "id": "xor_full_proof",
+      "label": "XOR full-proof"
+    },
+    "new": {
+      "id": "native_final_kzg_spdz_share",
+      "label": "native final-KZG SPDZ share"
+    }
+  },
+  "change_definition": "(new - old) / old * 100; negative means reduction",
+  "non_comparable_phase_note": "old open_ms and new share_export_ms are listed separately without a direct change percentage",
+  "sources": {
+    "old": {
+      "rq1": "experiments/results/archive_xor_fullproof/rq1_summary.json",
+      "rq2": "experiments/results/archive_xor_fullproof/rq2_summary.json",
+      "rq3": "experiments/results/archive_xor_fullproof/rq3_summary.json"
+    },
+    "new": {
+      "rq1": "experiments/results/rq1_summary.json",
+      "rq2": "experiments/results/rq2_summary.json",
+      "rq3": "experiments/results/rq3_summary.json"
+    }
+  },
+  "rq1": {
+    "median_total_ms": {
+      "single_prover": {
+        "old": 425.06598599999995,
+        "new": 480.8011775,
+        "change_pct": 13.112127
+      },
+      "two_party_in_process": {
+        "old": 3962.3436659999998,
+        "new": 4016.716939,
+        "change_pct": 1.37225
+      },
+      "two_party_quic": {
+        "old": 5150.0629475000005,
+        "new": 4936.5113025,
+        "change_pct": -4.146583
+      }
+    },
+    "comparison_material_size_bytes": {
+      "old_metric": "compressed standard proof; each XOR share has equal length",
+      "new_metric": "compressed native final-KZG SPDZ proof share",
+      "old": 769,
+      "new": 771,
+      "change_pct": 0.260078
+    },
+    "traffic_per_trader": {
+      "a_to_b_bytes": {
+        "old": 65466086,
+        "new": 65201409,
+        "change_pct": -0.404296
+      },
+      "b_to_a_bytes": {
+        "old": 64277160,
+        "new": 63917197,
+        "change_pct": -0.560017
+      },
+      "total_bidirectional_bytes": {
+        "old": 129743246,
+        "new": 129118606,
+        "change_pct": -0.481443
+      }
+    },
+    "non_comparable_phase_ms": {
+      "note": "open_ms and share_export_ms have different semantics; no direct change is calculated.",
+      "old_open_ms": {
+        "two_party_in_process": 2268.727805,
+        "two_party_quic": 3160.5241905000003
+      },
+      "new_share_export_ms": {
+        "two_party_in_process": 2388.698862,
+        "two_party_quic": 3239.557775
+      }
+    }
+  },
+  "rq2": {
+    "points": [
+      {
+        "rtt_ms": 0,
+        "old_status": "ok",
+        "new_status": "ok",
+        "median_total_ms": {
+          "old": 6659.608193,
+          "new": 6209.67917,
+          "change_pct": -6.756088
+        },
+        "non_comparable_phase_ms": {
+          "old_open_ms": 4929.531075,
+          "new_share_export_ms": 4490.676857
+        }
+      },
+      {
+        "rtt_ms": 10,
+        "old_status": "ok",
+        "new_status": "ok",
+        "median_total_ms": {
+          "old": 17734.040915,
+          "new": 14712.512587,
+          "change_pct": -17.038014
+        },
+        "non_comparable_phase_ms": {
+          "old_open_ms": 13486.878815,
+          "new_share_export_ms": 10520.214792
+        }
+      },
+      {
+        "rtt_ms": 30,
+        "old_status": "ok",
+        "new_status": "ok",
+        "median_total_ms": {
+          "old": 30234.272201,
+          "new": 22475.617369,
+          "change_pct": -25.661788
+        },
+        "non_comparable_phase_ms": {
+          "old_open_ms": 21026.702614,
+          "new_share_export_ms": 13483.100439
+        }
+      },
+      {
+        "rtt_ms": 60,
+        "old_status": "ok",
+        "new_status": "ok",
+        "median_total_ms": {
+          "old": 35486.328923,
+          "new": 42886.265813,
+          "change_pct": 20.852923
+        },
+        "non_comparable_phase_ms": {
+          "old_open_ms": 18844.274624,
+          "new_share_export_ms": 26711.396023
+        }
+      },
+      {
+        "rtt_ms": 100,
+        "old_status": "ok",
+        "new_status": "ok",
+        "median_total_ms": {
+          "old": 52532.729195,
+          "new": 47488.866237,
+          "change_pct": -9.601372
+        },
+        "non_comparable_phase_ms": {
+          "old_open_ms": 26277.43116,
+          "new_share_export_ms": 20451.703161
+        }
+      }
+    ],
+    "phase_note": "open_ms and share_export_ms are reported separately and have no direct change percentage."
+  },
+  "rq3": {
+    "median_full_trade_ms": {
+      "old": 34478.356480999995,
+      "new": 35187.137637,
+      "change_pct": 2.055728
+    },
+    "semantic_critical_path_ms": {
+      "rendezvous_ms": {
+        "old": 4019.465711,
+        "new": 4019.8430869999997,
+        "change_pct": 0.009389
+      },
+      "comparison_ms": {
+        "old": 11544.83715,
+        "new": 10081.718959,
+        "change_pct": -12.673355
+      },
+      "settlement_proof_ms": {
+        "old": 164.820566,
+        "new": 121.45549799999999,
+        "change_pct": -26.310471
+      },
+      "final_settlement_ms": {
+        "old": 4476.62422,
+        "new": 6309.317266,
+        "change_pct": 40.939176
+      },
+      "total_ms": {
+        "old": 19856.470693,
+        "new": 20497.596069,
+        "change_pct": 3.228798
+      }
+    },
+    "chain_verification_ms": {
+      "send_order": {
+        "old": 5.2665,
+        "new": 5.3495,
+        "change_pct": 1.575999
+      },
+      "settle_cozk2p": {
+        "old": 11.975,
+        "new": 12.456,
+        "change_pct": 4.016701
+      },
+      "settle_large": {
+        "old": 5.125,
+        "new": 4.991,
+        "change_pct": -2.614634
+      },
+      "settle_small": {
+        "old": 4.839499999999999,
+        "new": 4.839,
+        "change_pct": -0.010332
+      }
+    },
+    "comparison_share_payload": {
+      "old_writing": "SubmitCompareCoZk2pShare",
+      "new_writing": "SubmitCompareCoZk2pShare",
+      "per_submission_median_bytes": {
+        "old": 1983.0,
+        "new": 2008.0,
+        "change_pct": 1.260716
+      },
+      "submissions_per_trade": {
+        "old": 2.0,
+        "new": 2.0,
+        "change_pct": 0.0
+      },
+      "per_trade_effective_bytes": {
+        "old": 3966.0,
+        "new": 4016.0,
+        "change_pct": 1.260716
+      }
+    },
+    "total_effective_onchain_payload_bytes": {
+      "old": 11517,
+      "new": 11567,
+      "change_pct": 0.434141
+    },
+    "non_comparable_session_phase_ms": {
+      "note": "open_ms and share_export_ms have different semantics; no direct change is calculated.",
+      "old_open_ms": {
+        "alice": 3894.066451,
+        "bob": 3890.918981
+      },
+      "new_share_export_ms": {
+        "alice": 2772.11592,
+        "bob": 2703.519259
+      }
+    }
+  },
+  "warnings": []
+}

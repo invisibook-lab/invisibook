@@ -1,23 +1,28 @@
 //! Desktop settlement per the paper (§VI) on the note model, hardened per
 //! the rev.4 plan (F1 + F2):
 //!
-//! The collaborative part — the MPC comparison, the smaller side's reveal,
-//! the payout-note key exchange, and the collaborative PLONK π_cmp — runs
+//! The collaborative part — the MPC comparison, collaborative PLONK π_cmp,
+//! pre-reveal payout-note key exchange/WAL, and smaller-side reveal — runs
 //! in the pre-built `settle2p_session` subprocess (a separate cargo
 //! workspace pinned to an older toolchain, so it cannot be linked). This
 //! module drives that subprocess over piped stdio in TWO phases:
 //!
-//! 1. Compare phase: ferry the one ed25519 compare signature, then — on
-//!    the subprocess's `compare_ready` — submit `SubmitCompareCoZk2p`,
-//!    block until BOTH orders are Settling on chain, and only then answer
-//!    `compare_confirmed`. The subprocess reveals nothing before that
-//!    anchor lands (the F1 ordering).
+//! 1. Compare phase: ferry the ed25519 comparison signature, then — on
+//!    `compare_ready` — submit this owner's proof share. The chain only
+//!    reconstructs and verifies π_cmp after both identity-bound shares land;
+//!    only then does the host answer `compare_confirmed`, so the smaller
+//!    opening is not revealed before on-chain verification.
 //! 2. Settle phase: on `result_ready`, prove THIS side's settle circuit
 //!    (settle_small when fully filled, settle_large otherwise) with
-//!    rapidsnark and hand the signed leg back; the subprocess exchanges
-//!    legs over its still-open QUIC fabric and emits `pair_ready`, after
-//!    which either party submits the ATOMIC `SettlePair` (the F2 fix —
-//!    both payout notes mint together or nothing changes).
+//!    rapidsnark and immediately submit this owner's signed leg. The
+//!    settlement-leg window was already created when π_cmp verified;
+//!    settlement remains atomic and runs only when both owners' legs verify.
+//!    At expiry, only a non-equal round with a lone large-side leg freezes the
+//!    missing small owner; zero-leg, only-small, and incomplete equal rounds
+//!    release both without blame. A small-side leg alone is not delivery
+//!    evidence. Payout-key WAL entries are not yet owner-signed/on-chain or
+//!    publicly bound by the settle circuits, so the overall client model is
+//!    compliant-until-fail-stop rather than Byzantine-safe.
 //!
 //! NOTE: peer QUIC addresses are exchanged on-chain today; production would
 //! use an anonymous overlay. The subprocess uses mock Beaver triples and a
@@ -25,7 +30,26 @@
 
 #[cfg(not(target_os = "android"))]
 mod inner {
-    use std::{fmt, fs, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+    /// The comparison-share deadline is derived from this round's
+    /// `MatchHeight`, so
+    /// both owners can sign the same absolute height without a checkpoint or
+    /// a first-uploader-selected window.
+    const COMPARE_SHARE_TIMEOUT_BLOCKS: u64 = 10;
+
+    /// Keep a stalled RPC/chain from occupying the serial settlement worker
+    /// forever. Durable chain rows and the session WAL make a later retry safe.
+    const CHAIN_TERMINAL_WAIT_TIMEOUT_SECS: u64 = 300;
+    const CHAIN_RPC_TIMEOUT_SECS: u64 = 20;
+    const RENDEZVOUS_TIMEOUT_SECS: u64 = 90;
+
+    use std::{
+        collections::HashSet,
+        fmt, fs,
+        path::PathBuf,
+        process::Stdio,
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     use serde::{Deserialize, Serialize};
     use sha2::{Digest, Sha256};
@@ -36,8 +60,9 @@ mod inner {
 
     use invisibook_lib::{
         chain::{
-            ChainClient, CompareParams, SettleLargeParams, SettlePairLegParams, SettlePairParams,
-            SettleSmallParams, verify_compare_cozk2p_sig,
+            ChainClient, CompareParams, CompareShareParams, SettleLargeParams, SettleLegProgress,
+            SettlePairLegParams, SettleSmallParams, SubmitSettleLegParams,
+            verify_compare_cozk2p_sig,
         },
         note::{
             asset_id, fr_from_be_bytes, note_fr_to_hex, npk_from_sk, settle_large_bind,
@@ -89,6 +114,25 @@ mod inner {
         pub remainder: Option<Remainder>,
         /// Session scratch dir; the caller deletes it after persisting.
         pub session_dir: PathBuf,
+        /// Non-overlapping wall-clock intervals for this trader's settlement
+        /// driver. These boundaries follow the protocol, rather than the
+        /// subprocess lifetime, so experiments can report comparison and
+        /// final settlement without mixing them.
+        pub timings: SettlePhaseTimings,
+    }
+
+    /// One trader's semantic settlement phases. Their sum is `total_ms`:
+    /// rendezvous ends immediately before the comparison subprocess starts;
+    /// comparison ends only after both proof shares reconstruct and verify
+    /// on chain; final settlement then runs through proof generation, the
+    /// owner's leg submission, and atomic confirmation.
+    #[derive(Clone, Debug, Default)]
+    pub struct SettlePhaseTimings {
+        pub rendezvous_ms: f64,
+        pub comparison_ms: f64,
+        pub final_settlement_ms: f64,
+        pub settlement_proof_ms: f64,
+        pub total_ms: f64,
     }
 
     /// Why a settlement did not complete. `CrossPrice`, `SelfMatch`, and
@@ -193,14 +237,15 @@ mod inner {
         a_is_seller: bool,
     }
 
-    /// The subprocess's `compare_ready` payload: π_cmp + both signatures,
-    /// handed over BEFORE any reveal so the app can land the comparison on
+    /// The subprocess's `compare_ready` payload: this party's native
+    /// collaborative-proof share plus both comparison signatures. It is
+    /// handed over BEFORE any reveal so the app can land its own share on
     /// chain first (F1 ordering).
     #[derive(Deserialize)]
     struct CompareReadyWire {
         cmp: i8,
         public: PublicWire,
-        proof_hex: String,
+        proof_share_hex: String,
         sig_a: String,
         sig_b: String,
     }
@@ -244,15 +289,13 @@ mod inner {
     struct SessionResultWire {
         cmp: i8,
         public: PublicWire,
-        proof_hex: String,
+        proof_share_hex: String,
         sig_a: String,
         sig_b: String,
         my: MyOutcomeWire,
     }
 
-    /// One side's settle artifacts, exchanged through the subprocess so
-    /// either party can submit the atomic SettlePair. Mirrors cozk2p's
-    /// `SettleLeg` serde.
+    /// One side's settlement proof and signed public outputs.
     #[derive(Clone, Serialize, Deserialize)]
     struct SettleLegWire {
         is_a: bool,
@@ -319,8 +362,8 @@ mod inner {
     }
 
     /// Run the full settlement for a matched pair: compare session, on-chain
-    /// compare confirmation, this side's settle proof, leg exchange, and the
-    /// atomic SettlePair submission. `opening` is this order's locally
+    /// compare confirmation, this side's proof submission, and atomic
+    /// settlement. `opening` is this order's locally
     /// persisted (q, collateral) opening.
     pub async fn run_settle(
         client: &Arc<ChainClient>,
@@ -330,6 +373,7 @@ mod inner {
         deps: &SettleDeps,
         mut progress: impl FnMut(&str),
     ) -> Result<SettleOutcome, SettleError> {
+        let run_started_at = Instant::now();
         let my_pubkey = client.pubkey_hex().to_string();
 
         // Self-match would deadlock the serial settle coroutine.
@@ -342,6 +386,8 @@ mod inner {
         let (maker, taker) = orderbook::maker_taker(my_order, counter_order);
         let i_am_maker = maker.id == my_order.id;
         let role = if i_am_maker { "trader-a" } else { "trader-b" };
+        let comparison_deadline =
+            maker.match_height.max(taker.match_height) + COMPARE_SHARE_TIMEOUT_BLOCKS;
 
         let price_a = collateral_price(maker)?;
         let price_b = collateral_price(taker)?;
@@ -380,25 +426,62 @@ mod inner {
         progress("Registering settlement address...");
         let base = bind_ephemeral_port().await?;
         let local_addr = format!("127.0.0.1:{base}");
-        client
-            .register_settle_addr(
+        let register_error = match tokio::time::timeout(
+            Duration::from_secs(CHAIN_RPC_TIMEOUT_SECS),
+            client.register_settle_addr(
                 my_order.id.clone(),
                 counter_order.id.clone(),
                 my_order.match_round,
                 &local_addr,
                 &hex::encode(transport_pubkey.as_bytes()),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(SettleError::Transient(format!("register_settle_addr: {e}"))),
+            Err(_) => Some(SettleError::Transient(
+                "register_settle_addr timed out".into(),
+            )),
+        };
+        if let Some(cause) = register_error {
+            return Err(close_failed_pre_reveal_round(
+                client,
+                &maker.id,
+                &taker.id,
+                &my_order.id,
+                my_order.match_round,
+                comparison_deadline,
+                cause,
+                &mut progress,
             )
-            .await
-            .map_err(|e| SettleError::Transient(format!("register_settle_addr: {e}")))?;
+            .await);
+        }
 
         progress("Waiting for counterparty...");
-        let peer = poll_peer_addr(
+        let peer = match poll_peer_addr(
             client,
             &my_order.id,
             &counter_order.id,
             my_order.match_round,
         )
-        .await?;
+        .await
+        {
+            Ok(peer) => peer,
+            Err(cause) => {
+                return Err(close_failed_pre_reveal_round(
+                    client,
+                    &maker.id,
+                    &taker.id,
+                    &my_order.id,
+                    my_order.match_round,
+                    comparison_deadline,
+                    cause,
+                    &mut progress,
+                )
+                .await);
+            }
+        };
 
         let input = SessionInputWire {
             role: role.to_string(),
@@ -451,7 +534,12 @@ mod inner {
             opening,
             session_dir: &session_dir,
         };
-        let output = run_prover_session(
+        let comparison_started_at = Instant::now();
+        let rendezvous_ms = comparison_started_at
+            .duration_since(run_started_at)
+            .as_secs_f64()
+            * 1e3;
+        let output = match run_prover_session(
             deps,
             role,
             &local_addr,
@@ -460,23 +548,112 @@ mod inner {
             &session,
             &mut progress,
         )
-        .await?;
-
-        // ── Atomic SettlePair: either party may land it (F2) ──
-        progress("Submitting atomic settlement pair...");
-        let pair = build_pair_params(&maker.id, &taker.id, &output.legs)?;
-        if let Err(e) = client.settle_pair(&pair).await {
-            let msg = e.to_string();
-            // The counterparty may already have landed the pair; the real
-            // verdict comes from the on-chain confirmation below.
-            if !(msg.contains("is not Settling") || msg.contains("duplicated")) {
-                progress(&format!("settle_pair submit warning: {msg}"));
+        .await
+        {
+            Ok(output) => output,
+            Err(session_err) => {
+                // Comparison may already be verified even though the peer
+                // aborted before reveal/result_ready. The chain opens a
+                // zero-leg deadline together with Settling; after it elapses
+                // either owner can release both orders without blame. A lone
+                // large-side leg is punitive only when cmp != 0 because that
+                // proof requires the small opening; a lone small-side leg is
+                // non-punitive because it does not prove reveal delivery.
+                if matches!(
+                    query_one(client, &my_order.id).await,
+                    Some(order) if order.status == OrderStatus::Settling
+                ) {
+                    progress("Settlement peer stopped; waiting for the chain deadline...");
+                    let terminal = wait_for_settlement_terminal(
+                        client,
+                        &maker.id,
+                        &taker.id,
+                        &my_order.id,
+                        my_order.match_round,
+                        true,
+                        &mut progress,
+                    )
+                    .await?;
+                    if terminal.complete {
+                        return Err(SettleError::Transient(format!(
+                            "{session_err}; settlement completed on chain and will be recovered from the session WAL"
+                        )));
+                    }
+                    let submitted = terminal.my_submitted || terminal.peer_submitted;
+                    return Err(if !terminal.missing_order_id.is_empty() {
+                        SettleError::OnChainRejected(format!(
+                            "settlement proof deadline elapsed; missing owner {} was recorded on chain",
+                            terminal.missing_order_id
+                        ))
+                    } else if submitted {
+                        SettleError::OnChainRejected(
+                            "settlement deadline elapsed with one proof but no objective reveal-delivery evidence; both orders were released without blame"
+                                .into(),
+                        )
+                    } else {
+                        SettleError::OnChainRejected(
+                            "peer stopped before reveal completion; both orders were released without penalty"
+                                .into(),
+                            )
+                    });
+                }
+                return Err(close_failed_pre_reveal_round(
+                    client,
+                    &maker.id,
+                    &taker.id,
+                    &my_order.id,
+                    my_order.match_round,
+                    comparison_deadline,
+                    session_err,
+                    &mut progress,
+                )
+                .await);
             }
-        }
+        };
 
         progress("Confirming settlement on chain...");
         let outcome = &output.res.my;
-        confirm_on_chain(client, &my_order.id, &outcome.new_locked_commitment).await?;
+        let terminal = wait_for_settlement_terminal(
+            client,
+            &maker.id,
+            &taker.id,
+            &my_order.id,
+            my_order.match_round,
+            false,
+            &mut progress,
+        )
+        .await?;
+        if !terminal.complete {
+            let submitted = terminal.my_submitted || terminal.peer_submitted;
+            return Err(if !terminal.missing_order_id.is_empty() {
+                SettleError::OnChainRejected(format!(
+                    "settlement proof deadline elapsed; missing owner {} was recorded on chain",
+                    terminal.missing_order_id
+                ))
+            } else if submitted {
+                SettleError::OnChainRejected(
+                    "settlement deadline elapsed with one proof but no objective reveal-delivery evidence; both orders were released without blame"
+                        .into(),
+                )
+            } else {
+                SettleError::OnChainRejected(
+                    "settlement deadline elapsed before either owner submitted a proof; both orders were released"
+                        .into(),
+                )
+            });
+        }
+
+        let timings = SettlePhaseTimings {
+            rendezvous_ms,
+            comparison_ms: output
+                .comparison_confirmed_at
+                .duration_since(comparison_started_at)
+                .as_secs_f64()
+                * 1e3,
+            final_settlement_ms: output.comparison_confirmed_at.elapsed().as_secs_f64() * 1e3,
+            settlement_proof_ms: output.settlement_proof_ms,
+            total_ms: run_started_at.elapsed().as_secs_f64() * 1e3,
+        };
 
         Ok(outcome_from_result(
             &deps.note_seed,
@@ -484,14 +661,15 @@ mod inner {
             output.res.cmp,
             outcome,
             session_dir,
+            timings,
         ))
     }
 
-    /// The prover subprocess's parsed products: the session result and the
-    /// exchanged (A, B) settle legs.
+    /// The prover subprocess's parsed products.
     struct ProverOutput {
         res: SessionResultWire,
-        legs: (SettleLegWire, SettleLegWire),
+        comparison_confirmed_at: Instant,
+        settlement_proof_ms: f64,
     }
 
     /// Chain-facing context the subprocess interaction needs (grouped to
@@ -538,41 +716,38 @@ mod inner {
         counter_id: &str,
         match_round: u64,
     ) -> Result<invisibook_lib::chain::SettlePeer, SettleError> {
-        for _ in 0..45 {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            match client
-                .query_settle_addr(my_order_id.to_string(), counter_id.to_string(), match_round)
+        let poll = async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                match tokio::time::timeout(
+                    Duration::from_secs(CHAIN_RPC_TIMEOUT_SECS),
+                    client.query_settle_addr(
+                        my_order_id.to_string(),
+                        counter_id.to_string(),
+                        match_round,
+                    ),
+                )
                 .await
-            {
-                Ok(Some(addr)) => return Ok(addr),
-                Ok(None) => continue,
-                Err(e) => eprintln!("[settle] query_settle_addr: {e}"),
+                {
+                    Ok(Ok(Some(addr))) => return addr,
+                    Ok(Ok(None)) => continue,
+                    Ok(Err(e)) => eprintln!("[settle] query_settle_addr: {e}"),
+                    Err(_) => eprintln!("[settle] query_settle_addr timed out"),
+                }
             }
+        };
+        match tokio::time::timeout(Duration::from_secs(RENDEZVOUS_TIMEOUT_SECS), poll).await {
+            Ok(addr) => Ok(addr),
+            Err(_) => Err(SettleError::Transient(
+                "timed out waiting for the counterparty to register".into(),
+            )),
         }
-        Err(SettleError::Transient(
-            "timed out waiting for the counterparty to register".into(),
-        ))
-    }
-
-    /// Poll until `order_id` reaches Settling (the comparison landed —
-    /// submitted by either party). `Done` counts too (fast counterparty).
-    async fn wait_for_settling(client: &ChainClient, order_id: &str) -> Result<(), SettleError> {
-        for _ in 0..30 {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            match query_one(client, order_id).await {
-                Some(order) if order.status == OrderStatus::Settling => return Ok(()),
-                Some(order) if order.status == OrderStatus::Done => return Ok(()),
-                _ => continue,
-            }
-        }
-        Err(SettleError::OnChainRejected(
-            "comparison not observed on chain within the confirmation window".into(),
-        ))
     }
 
     async fn query_one(client: &ChainClient, order_id: &str) -> Option<Order> {
-        client
-            .query_orders(
+        match tokio::time::timeout(
+            Duration::from_secs(CHAIN_RPC_TIMEOUT_SECS),
+            client.query_orders(
                 Some(order_id.to_string()),
                 None,
                 None,
@@ -580,10 +755,299 @@ mod inner {
                 None,
                 Some(1),
                 Some(0),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(orders)) => orders.into_iter().find(|o| o.id == order_id),
+            Ok(Err(e)) => {
+                eprintln!("[settle] query order {order_id}: {e}");
+                None
+            }
+            Err(_) => {
+                eprintln!("[settle] query order {order_id} timed out");
+                None
+            }
+        }
+    }
+
+    enum ComparisonRoundTerminal {
+        Verified,
+        Expired,
+    }
+
+    /// Resolve one exact comparison-share round from durable chain state.
+    /// `eager_expiry` is used after rendezvous/MPC failure, when this client
+    /// knows it will never upload a share in the current session. The expiry
+    /// writing is still only a request: the function returns solely after a
+    /// read observes `verified` or `expired`.
+    async fn wait_for_comparison_terminal(
+        client: &ChainClient,
+        order_a_id: &str,
+        order_b_id: &str,
+        owner_order_id: &str,
+        match_round: u64,
+        expected_deadline: u64,
+        eager_expiry: bool,
+        progress: &mut impl FnMut(&str),
+    ) -> Result<ComparisonRoundTerminal, SettleError> {
+        let wait_started = Instant::now();
+        let mut last_expiry_attempt: Option<Instant> = None;
+        loop {
+            if wait_started.elapsed() >= Duration::from_secs(CHAIN_TERMINAL_WAIT_TIMEOUT_SECS) {
+                return Err(SettleError::Transient(
+                    "timed out waiting for a durable comparison-round terminal".into(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            match tokio::time::timeout(
+                Duration::from_secs(CHAIN_RPC_TIMEOUT_SECS),
+                client.query_compare_cozk2p_shares(
+                    order_a_id.to_string(),
+                    order_b_id.to_string(),
+                    owner_order_id.to_string(),
+                    match_round,
+                ),
             )
             .await
-            .ok()
-            .and_then(|orders| orders.into_iter().find(|o| o.id == order_id))
+            {
+                Ok(Ok(round)) => {
+                    if round.deadline_height != expected_deadline {
+                        return Err(SettleError::Transient(format!(
+                            "comparison round reported deadline {} (expected {expected_deadline})",
+                            round.deadline_height
+                        )));
+                    }
+                    if round.ready {
+                        if !round.my_submitted
+                            || !round.peer_submitted
+                            || round.verified_height == 0
+                            || round.state_commitment.is_empty()
+                        {
+                            return Err(SettleError::Transient(
+                                "chain reported an internally inconsistent verified comparison round"
+                                    .into(),
+                            ));
+                        }
+                        return Ok(ComparisonRoundTerminal::Verified);
+                    }
+                    if round.expired_at_height != 0 {
+                        return Ok(ComparisonRoundTerminal::Expired);
+                    }
+                }
+                Ok(Err(e)) => eprintln!("[settle] query comparison-share round: {e}"),
+                Err(_) => eprintln!("[settle] query comparison-share round timed out"),
+            }
+
+            let now = Instant::now();
+            let expiry_due = (eager_expiry || wait_started.elapsed() >= Duration::from_secs(35))
+                && last_expiry_attempt
+                    .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(5));
+            if expiry_due {
+                progress("Waiting for the comparison deadline or the peer share...");
+                match tokio::time::timeout(
+                    Duration::from_secs(CHAIN_RPC_TIMEOUT_SECS),
+                    client.expire_compare_cozk2p_shares(
+                        order_a_id.to_string(),
+                        order_b_id.to_string(),
+                        owner_order_id.to_string(),
+                        match_round,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => eprintln!("[settle] request comparison-share expiry: {e}"),
+                    Err(_) => eprintln!("[settle] comparison-share expiry request timed out"),
+                }
+                last_expiry_attempt = Some(now);
+            }
+        }
+    }
+
+    /// Resolve a comparison-created settlement-leg round from durable chain
+    /// state. In particular, a successful HTTP write is only an admission
+    /// acknowledgement, not proof that expiry executed. We therefore keep
+    /// polling until the row itself says `complete` or `expired` and retry the
+    /// signed expiry request after the expected ten-block window.
+    async fn wait_for_settlement_terminal(
+        client: &ChainClient,
+        order_a_id: &str,
+        order_b_id: &str,
+        owner_order_id: &str,
+        match_round: u64,
+        eager_expiry: bool,
+        progress: &mut impl FnMut(&str),
+    ) -> Result<SettleLegProgress, SettleError> {
+        let wait_started = Instant::now();
+        let mut last_expiry_attempt: Option<Instant> = None;
+        let mut last_finalize_attempt: Option<Instant> = None;
+        loop {
+            if wait_started.elapsed() >= Duration::from_secs(CHAIN_TERMINAL_WAIT_TIMEOUT_SECS) {
+                return Err(SettleError::Transient(
+                    "timed out waiting for a durable settlement-round terminal".into(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            match tokio::time::timeout(
+                Duration::from_secs(CHAIN_RPC_TIMEOUT_SECS),
+                client.query_settle_legs(
+                    order_a_id.to_string(),
+                    order_b_id.to_string(),
+                    owner_order_id.to_string(),
+                    match_round,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(round)) => {
+                    if round.complete {
+                        if !round.my_submitted
+                            || !round.peer_submitted
+                            || round.completed_height == 0
+                        {
+                            return Err(SettleError::Transient(
+                                "chain reported an internally inconsistent completed settlement round"
+                                    .into(),
+                            ));
+                        }
+                        return Ok(round);
+                    }
+                    if round.expired_at_height != 0 {
+                        return Ok(round);
+                    }
+                    if round.my_submitted && round.peer_submitted {
+                        let now = Instant::now();
+                        if last_finalize_attempt
+                            .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(5))
+                        {
+                            progress(
+                                "Both settlement proofs are present; finalizing atomically...",
+                            );
+                            match tokio::time::timeout(
+                                Duration::from_secs(CHAIN_RPC_TIMEOUT_SECS),
+                                client.finalize_settle_legs(
+                                    order_a_id.to_string(),
+                                    order_b_id.to_string(),
+                                    match_round,
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => {
+                                    eprintln!("[settle] finalize stored settlement legs: {e}")
+                                }
+                                Err(_) => {
+                                    eprintln!("[settle] finalize settlement legs timed out")
+                                }
+                            }
+                            last_finalize_attempt = Some(now);
+                        }
+
+                        // Expiry must reject a round whose two immutable legs
+                        // are already present. Keep polling and idempotently
+                        // retry finalization until a read observes completion.
+                        continue;
+                    }
+                    if round.deadline_height == 0 {
+                        eprintln!(
+                            "[settle] comparison is Settling but its settlement deadline is not visible yet"
+                        );
+                    }
+                }
+                Ok(Err(e)) => eprintln!("[settle] query settlement-leg round: {e}"),
+                Err(_) => eprintln!("[settle] query settlement-leg round timed out"),
+            }
+
+            let now = Instant::now();
+            let expiry_due = (eager_expiry || wait_started.elapsed() >= Duration::from_secs(35))
+                && last_expiry_attempt
+                    .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(5));
+            if expiry_due {
+                progress("Waiting for the settlement deadline or the peer proof...");
+                match tokio::time::timeout(
+                    Duration::from_secs(CHAIN_RPC_TIMEOUT_SECS),
+                    client.expire_settle_legs(
+                        order_a_id.to_string(),
+                        order_b_id.to_string(),
+                        owner_order_id.to_string(),
+                        match_round,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => eprintln!("[settle] request settlement-leg expiry: {e}"),
+                    Err(_) => eprintln!("[settle] settlement-leg expiry request timed out"),
+                }
+                last_expiry_attempt = Some(now);
+            }
+        }
+    }
+
+    /// A rendezvous/MPC failure before `compare_ready` still has an active
+    /// match-bound comparison deadline. Drive that round to a durable chain
+    /// terminal so a zero-share abort cannot leave both orders Matched
+    /// forever. If an earlier/uncertain write already verified comparison,
+    /// continue through the zero-leg settlement deadline instead.
+    async fn close_failed_pre_reveal_round(
+        client: &ChainClient,
+        order_a_id: &str,
+        order_b_id: &str,
+        owner_order_id: &str,
+        match_round: u64,
+        comparison_deadline: u64,
+        cause: SettleError,
+        progress: &mut impl FnMut(&str),
+    ) -> SettleError {
+        match wait_for_comparison_terminal(
+            client,
+            order_a_id,
+            order_b_id,
+            owner_order_id,
+            match_round,
+            comparison_deadline,
+            true,
+            progress,
+        )
+        .await
+        {
+            Ok(ComparisonRoundTerminal::Expired) => SettleError::OnChainRejected(format!(
+                "{cause}; comparison round expired before reveal and both orders were released"
+            )),
+            Ok(ComparisonRoundTerminal::Verified) => {
+                progress(
+                    "Comparison verified during recovery; waiting for the no-reveal settlement deadline...",
+                );
+                match wait_for_settlement_terminal(
+                    client,
+                    order_a_id,
+                    order_b_id,
+                    owner_order_id,
+                    match_round,
+                    true,
+                    progress,
+                )
+                .await
+                {
+                    Ok(round) if round.complete => SettleError::Transient(format!(
+                        "{cause}; settlement nevertheless completed on chain and will be recovered from WAL"
+                    )),
+                    Ok(round) if !round.missing_order_id.is_empty() => {
+                        SettleError::OnChainRejected(format!(
+                            "{cause}; settlement closed with missing owner {}",
+                            round.missing_order_id
+                        ))
+                    }
+                    Ok(_) => SettleError::OnChainRejected(format!(
+                        "{cause}; reveal delivery was not proven and both orders were released without blame"
+                    )),
+                    Err(e) => e,
+                }
+            }
+            Err(e) => e,
+        }
     }
 
     /// Cross-check a proven statement against the rows read from the chain:
@@ -609,9 +1073,9 @@ mod inner {
     }
 
     /// Handle the subprocess's `compare_ready`: cross-check the proven
-    /// statement and signatures, submit the comparison, and block until
-    /// BOTH orders are Settling. Only a `true` reply lets the subprocess
-    /// reveal (the F1 gate).
+    /// statement and signatures, submit THIS owner's proof share, and block
+    /// until the peer's independently signed share lets the chain reconstruct
+    /// and verify the proof. Only a `true` reply lets the subprocess reveal.
     async fn confirm_compare(
         ctx: &SessionCtx<'_>,
         ready: &CompareReadyWire,
@@ -624,7 +1088,10 @@ mod inner {
             cmp: ready.cmp,
             sig_a: ready.sig_a.clone(),
             sig_b: ready.sig_b.clone(),
-            zk_proof: ready.proof_hex.clone(),
+            // The canonical comparison signature does not include proof
+            // material. The native share is identity-bound separately by
+            // SubmitCompareCoZk2pShare's outer signature.
+            zk_proof: String::new(),
         };
         if !verify_compare_cozk2p_sig(&params, ctx.maker_pubkey, &ready.sig_a)
             || !verify_compare_cozk2p_sig(&params, ctx.taker_pubkey, &ready.sig_b)
@@ -634,69 +1101,56 @@ mod inner {
             ));
         }
 
-        progress("Submitting comparison...");
-        if let Err(e) = ctx.client.submit_compare_cozk2p(&params).await {
-            let msg = e.to_string();
-            // The counterparty may have submitted first; the Settling wait
-            // below is the real verdict.
-            if !(msg.contains("not Matched") || msg.contains("duplicated")) {
-                progress(&format!("compare submit warning: {msg}"));
-            }
-        }
-        progress("Waiting for the comparison to land on chain...");
-        wait_for_settling(ctx.client, &ctx.my_order.id).await?;
-        wait_for_settling(ctx.client, &ctx.counter_order.id).await?;
-
-        // Durable pre-open barrier: both parties put the chain-derived
-        // state for this exact match round on chain before the subprocess
-        // is allowed to reveal the smaller quantity. A missing uploader is
-        // attributable after the deadline and can be frozen by the peer.
-        progress("Publishing pre-open checkpoint...");
-        ctx.client
-            .submit_settle_checkpoint(
-                ctx.my_order.id.clone(),
-                ctx.counter_order.id.clone(),
-                ctx.my_order.match_round,
-            )
-            .await
-            .map_err(|e| SettleError::Transient(format!("submit checkpoint: {e}")))?;
-        for _ in 0..45 {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            match ctx
-                .client
-                .query_settle_checkpoint(
-                    ctx.my_order.id.clone(),
-                    ctx.counter_order.id.clone(),
-                    ctx.my_order.match_round,
-                )
-                .await
-            {
-                Ok(status) if status.ready && status.state_commitment.len() == 64 => return Ok(()),
-                Ok(_) => {}
-                Err(e) => eprintln!("[settle] query checkpoint: {e}"),
-            }
-        }
-        match ctx
+        progress("Submitting this order's comparison proof share...");
+        let deadline_height = ctx
+            .my_order
+            .match_height
+            .max(ctx.counter_order.match_height)
+            + COMPARE_SHARE_TIMEOUT_BLOCKS;
+        if let Err(submit_err) = ctx
             .client
-            .abort_settle_round(
-                ctx.my_order.id.clone(),
-                ctx.counter_order.id.clone(),
-                ctx.my_order.match_round,
-            )
+            .submit_compare_cozk2p_share(CompareShareParams {
+                chain_id: ctx.client.chain_id(),
+                order_a_id: ctx.maker_id.to_string(),
+                order_b_id: ctx.taker_id.to_string(),
+                owner_order_id: ctx.my_order.id.clone(),
+                match_round: ctx.my_order.match_round,
+                cmp: ready.cmp,
+                deadline_height,
+                proof_share: ready.proof_share_hex.clone(),
+                signature: String::new(),
+            })
             .await
         {
-            Ok(()) => Err(SettleError::OnChainRejected(
-                "peer missed the pre-open checkpoint deadline; its order was frozen and this order was requeued"
+            // A transport failure is not proof that the write did not land.
+            // Keep the prover behind the reveal gate and resolve the round
+            // from chain state instead of killing it with a possibly-live
+            // identity-bound share still pending.
+            eprintln!("[settle] comparison-share submission uncertain: {submit_err}");
+        }
+        progress("Waiting for both proof shares and on-chain verification...");
+        match wait_for_comparison_terminal(
+            ctx.client,
+            ctx.maker_id,
+            ctx.taker_id,
+            &ctx.my_order.id,
+            ctx.my_order.match_round,
+            deadline_height,
+            false,
+            progress,
+        )
+        .await?
+        {
+            ComparisonRoundTerminal::Verified => Ok(()),
+            ComparisonRoundTerminal::Expired => Err(SettleError::OnChainRejected(
+                "comparison proof-share deadline elapsed; both orders were released before reveal"
                     .into(),
             )),
-            Err(e) => Err(SettleError::Transient(format!(
-                "pre-open checkpoint timed out; abort attempt: {e}"
-            ))),
         }
     }
 
     /// Prove THIS side's settle circuit from the session outcome and wrap
-    /// it as a signed SettlePair leg.
+    /// it as this owner's independently submitted leg.
     fn prove_my_leg(
         ctx: &SessionCtx<'_>,
         outcome: &MyOutcomeWire,
@@ -831,48 +1285,30 @@ mod inner {
         }
     }
 
-    /// Build the atomic SettlePair request from the exchanged (A, B) legs.
-    fn build_pair_params(
-        maker_id: &str,
-        taker_id: &str,
-        legs: &(SettleLegWire, SettleLegWire),
-    ) -> Result<SettlePairParams, SettleError> {
-        let to_leg = |leg: &SettleLegWire| {
-            if leg.cm_locked_residual.is_empty() {
-                SettlePairLegParams::small(
-                    leg.cm_note_out.clone(),
-                    leg.cm_refund_out.clone(),
-                    leg.signature.clone(),
-                    leg.zk_proof.clone(),
-                )
-            } else {
-                SettlePairLegParams::large(
-                    leg.cm_note_out.clone(),
-                    leg.cm_refund_out.clone(),
-                    leg.cm_locked_residual.clone(),
-                    leg.signature.clone(),
-                    leg.zk_proof.clone(),
-                )
-            }
-        };
-        if !legs.0.is_a || legs.1.is_a {
-            return Err(SettleError::Transient(
-                "exchanged settle legs carry inconsistent roles".into(),
-            ));
+    fn chain_leg_params(leg: &SettleLegWire) -> SettlePairLegParams {
+        if leg.cm_locked_residual.is_empty() {
+            SettlePairLegParams::small(
+                leg.cm_note_out.clone(),
+                leg.cm_refund_out.clone(),
+                leg.signature.clone(),
+                leg.zk_proof.clone(),
+            )
+        } else {
+            SettlePairLegParams::large(
+                leg.cm_note_out.clone(),
+                leg.cm_refund_out.clone(),
+                leg.cm_locked_residual.clone(),
+                leg.signature.clone(),
+                leg.zk_proof.clone(),
+            )
         }
-        Ok(SettlePairParams {
-            order_a_id: maker_id.to_string(),
-            order_b_id: taker_id.to_string(),
-            a: to_leg(&legs.0),
-            b: to_leg(&legs.1),
-        })
     }
 
     /// Spawn `settle2p_session` and drive its full stdio protocol:
     /// `need_sig` → sign; `compare_ready` → submit + confirm on chain
-    /// (F1 gate); `result_ready` → prove this side's leg; `pair_ready` →
-    /// capture both legs. Bounded by a 15-minute watchdog; the child is
-    /// killed if this future is dropped.
+    /// (pre-reveal gate); `result_ready` → prove and submit this owner's
+    /// leg. Bounded by a 15-minute watchdog; the child is killed if this
+    /// future is dropped.
     async fn run_prover_session(
         deps: &SettleDeps,
         role: &str,
@@ -909,7 +1345,8 @@ mod inner {
         let mut stderr = child.stderr.take().expect("piped stderr");
         let mut lines = BufReader::new(stdout).lines();
 
-        let mut legs: Option<(SettleLegWire, SettleLegWire)> = None;
+        let mut comparison_confirmed_at: Option<Instant> = None;
+        let mut settlement_proof_ms: Option<f64> = None;
 
         let interaction = async {
             // Reply one JSON line on the child's stdin.
@@ -971,6 +1408,11 @@ mod inner {
                                 })?;
                         match confirm_compare(ctx, &ready, progress).await {
                             Ok(()) => {
+                                // Semantic phase boundary: comparison is not
+                                // complete until both proof shares reconstruct
+                                // and verify on chain. Everything after this
+                                // instant belongs to final settlement.
+                                comparison_confirmed_at = Some(Instant::now());
                                 reply(&mut stdin, "{\"compare_confirmed\":true}".into()).await?;
                             }
                             Err(e) => {
@@ -983,8 +1425,8 @@ mod inner {
                         }
                     }
                     Some("result_ready") => {
-                        // result.json is on disk while the child still
-                        // holds the QUIC connection for the leg exchange.
+                        // result.json is on disk; this host now proves and
+                        // submits only its own settlement leg.
                         let result_bytes =
                             fs::read(ctx.session_dir.join("result.json")).map_err(|e| {
                                 SettleError::Transient(format!("reading prover result: {e}"))
@@ -994,25 +1436,32 @@ mod inner {
                                 SettleError::Transient(format!("parsing prover result: {e}"))
                             })?;
                         progress("Proving this side's settlement...");
+                        let proof_started_at = Instant::now();
                         let leg = prove_my_leg(ctx, &res.my)?;
-                        let leg_line = serde_json::to_string(&serde_json::json!({
-                            "settle_leg": leg
-                        }))
-                        .expect("leg serializes");
-                        reply(&mut stdin, leg_line).await?;
-                    }
-                    Some("pair_ready") => {
-                        let leg_a: SettleLegWire =
-                            serde_json::from_value(value.get("a").cloned().unwrap_or_default())
-                                .map_err(|e| {
-                                    SettleError::Transient(format!("bad pair_ready leg a: {e}"))
-                                })?;
-                        let leg_b: SettleLegWire =
-                            serde_json::from_value(value.get("b").cloned().unwrap_or_default())
-                                .map_err(|e| {
-                                    SettleError::Transient(format!("bad pair_ready leg b: {e}"))
-                                })?;
-                        legs = Some((leg_a, leg_b));
+                        settlement_proof_ms = Some(proof_started_at.elapsed().as_secs_f64() * 1e3);
+                        if leg.is_a != (ctx.my_order.id == ctx.maker_id) {
+                            return Err(SettleError::Transient(
+                                "settlement proof carries the wrong canonical owner role".into(),
+                            ));
+                        }
+                        progress("Submitting this order's settlement proof...");
+                        ctx.client
+                            .submit_settle_leg(SubmitSettleLegParams {
+                                chain_id: ctx.client.chain_id(),
+                                order_a_id: ctx.maker_id.to_string(),
+                                order_b_id: ctx.taker_id.to_string(),
+                                owner_order_id: ctx.my_order.id.clone(),
+                                match_round: ctx.my_order.match_round,
+                                leg: chain_leg_params(&leg),
+                                submission_signature: String::new(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                SettleError::Transient(format!(
+                                    "submit this owner's settlement proof: {e}"
+                                ))
+                            })?;
+                        reply(&mut stdin, "{\"settle_leg_submitted\":true}".into()).await?;
                     }
                     Some("done") => break,
                     _ => {}
@@ -1055,9 +1504,6 @@ mod inner {
             )));
         }
 
-        let legs = legs.ok_or_else(|| {
-            SettleError::Transient("prover exited without exchanging settle legs".into())
-        })?;
         let result_bytes = fs::read(ctx.session_dir.join("result.json"))
             .map_err(|e| SettleError::Transient(format!("reading prover result: {e}")))?;
         let res: SessionResultWire = serde_json::from_slice(&result_bytes)
@@ -1065,32 +1511,16 @@ mod inner {
         // Redundant with confirm_compare, but result.json is re-read here:
         // keep the invariant local.
         check_public_statement(ctx, &res.public)?;
-        let _ = (&res.proof_hex, &res.sig_a, &res.sig_b); // consumed in compare phase
-        Ok(ProverOutput { res, legs })
-    }
-
-    /// Poll until this trader's order is `Done` or has been relisted with
-    /// its new residual collateral commitment. Timing out while the pair is
-    /// still mutually matched means the writing was rejected.
-    async fn confirm_on_chain(
-        client: &ChainClient,
-        my_order_id: &str,
-        my_new_locked_commitment: &str,
-    ) -> Result<(), SettleError> {
-        for _ in 0..30 {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            if let Some(order) = query_one(client, my_order_id).await {
-                if order.status == OrderStatus::Done
-                    || (!my_new_locked_commitment.is_empty()
-                        && order.locked_commitment == *my_new_locked_commitment)
-                {
-                    return Ok(());
-                }
-            }
-        }
-        Err(SettleError::OnChainRejected(
-            "settlement not observed on chain within the confirmation window".into(),
-        ))
+        let _ = (&res.proof_share_hex, &res.sig_a, &res.sig_b); // consumed in compare phase
+        Ok(ProverOutput {
+            res,
+            comparison_confirmed_at: comparison_confirmed_at.ok_or_else(|| {
+                SettleError::Transient("prover exited before comparison confirmation".into())
+            })?,
+            settlement_proof_ms: settlement_proof_ms.ok_or_else(|| {
+                SettleError::Transient("prover exited before settlement proving".into())
+            })?,
+        })
     }
 
     /// Assemble the local outcome from the subprocess result.
@@ -1100,6 +1530,7 @@ mod inner {
         cmp: i8,
         my: &MyOutcomeWire,
         session_dir: PathBuf,
+        timings: SettlePhaseTimings,
     ) -> SettleOutcome {
         let recv = NewNote {
             cm: my.recv_commitment.clone(),
@@ -1131,6 +1562,7 @@ mod inner {
             refund,
             remainder,
             session_dir,
+            timings,
         }
     }
 
@@ -1150,6 +1582,125 @@ mod inner {
         pub dir: PathBuf,
     }
 
+    /// Exact immutable identity of one comparison-created settlement window.
+    /// Recovery derives this only from mutually linked `Settling` rows read
+    /// from the chain; no local WAL field is trusted to select a round.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct RecoverableSettleRound {
+        order_a_id: String,
+        order_b_id: String,
+        owner_order_id: String,
+        match_round: u64,
+    }
+
+    /// Select this wallet's exact live settlement rounds from one chain
+    /// snapshot. Both rows must still be `Settling`, point at each other, and
+    /// carry the same non-zero round. Canonical A/B ordering is recomputed in
+    /// lockstep with the chain, and self-owned pairs are de-duplicated.
+    fn owned_recoverable_settle_rounds(
+        orders: &[Order],
+        owner_pubkey: &str,
+    ) -> Vec<RecoverableSettleRound> {
+        let mut seen = HashSet::new();
+        let mut rounds = Vec::new();
+        for mine in orders {
+            if mine.pubkey != owner_pubkey || mine.status != OrderStatus::Settling {
+                continue;
+            }
+            let Some(peer_id) = mine.match_order.as_deref() else {
+                continue;
+            };
+            let Some(peer) = orders.iter().find(|order| order.id == peer_id) else {
+                continue;
+            };
+            if peer.status != OrderStatus::Settling
+                || peer.match_order.as_deref() != Some(mine.id.as_str())
+                || mine.match_round == 0
+                || peer.match_round != mine.match_round
+            {
+                continue;
+            }
+            let (a, b) = orderbook::maker_taker(mine, peer);
+            let key = (a.id.clone(), b.id.clone(), mine.match_round);
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            rounds.push(RecoverableSettleRound {
+                order_a_id: key.0,
+                order_b_id: key.1,
+                owner_order_id: mine.id.clone(),
+                match_round: key.2,
+            });
+        }
+        rounds
+    }
+
+    /// On restart, resume every exact owner-controlled `Settling` round from
+    /// durable chain state. This deliberately never reconstructs or submits a
+    /// settlement leg from `payout_keys.json` or a partial/corrupt witness:
+    /// two already-stored legs may be finalized permissionlessly; otherwise
+    /// the existing signed expiry path resolves the fixed deadline.
+    async fn resume_owned_settling_rounds(client: &ChainClient) {
+        let orders = match tokio::time::timeout(
+            Duration::from_secs(CHAIN_RPC_TIMEOUT_SECS),
+            client.query_orders(
+                None,
+                None,
+                None,
+                None,
+                Some(OrderStatus::Settling),
+                None,
+                None,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(orders)) => orders,
+            Ok(Err(e)) => {
+                eprintln!("[settle] restart recovery could not query Settling orders: {e}");
+                return;
+            }
+            Err(_) => {
+                eprintln!("[settle] restart recovery query for Settling orders timed out");
+                return;
+            }
+        };
+
+        for round in owned_recoverable_settle_rounds(&orders, client.pubkey_hex()) {
+            let mut progress = |status: &str| {
+                eprintln!(
+                    "[settle] restart recovery {} (round {}): {status}",
+                    orderbook::short_id(&round.owner_order_id),
+                    round.match_round
+                );
+            };
+            match wait_for_settlement_terminal(
+                client,
+                &round.order_a_id,
+                &round.order_b_id,
+                &round.owner_order_id,
+                round.match_round,
+                true,
+                &mut progress,
+            )
+            .await
+            {
+                Ok(terminal) if terminal.complete => eprintln!(
+                    "[settle] restart recovery completed round {} for {}",
+                    round.match_round, round.owner_order_id
+                ),
+                Ok(terminal) => eprintln!(
+                    "[settle] restart recovery expired round {} for {} (missing={})",
+                    round.match_round, round.owner_order_id, terminal.missing_order_id
+                ),
+                Err(e) => eprintln!(
+                    "[settle] restart recovery left round {} for a later retry: {e}",
+                    round.match_round
+                ),
+            }
+        }
+    }
+
     /// Inspect every session dir and decide, per the recovery rules below,
     /// whether it LANDED (materialize its records), is provably DEAD
     /// (delete it), is CORRUPT (quarantine for diagnosis), or must be KEPT.
@@ -1161,6 +1712,14 @@ mod inner {
         sessions_dir: &std::path::Path,
     ) -> Vec<Recovered> {
         let mut out = Vec::new();
+
+        // A process crash can leave the chain in `Settling` before a complete
+        // witness exists (including payout_keys-only sessions). Resolve those
+        // exact chain rounds first, so neither a missing WAL nor two restarted
+        // clients can strand the pair forever. If finalization mints the note,
+        // the directory scan below materializes it in this same startup pass.
+        resume_owned_settling_rounds(client).await;
+
         let entries = match fs::read_dir(sessions_dir) {
             Ok(e) => e,
             Err(_) => return out,
@@ -1222,8 +1781,8 @@ mod inner {
     /// The pure recovery decision for a witness whose payout note is NOT
     /// in the pool tree yet.
     ///
-    /// The peer may hold both settle legs and submit the SettlePair at any
-    /// time while the pair is still Matched/Settling on chain, so the
+    /// The peer may still submit its own leg and complete the atomic
+    /// settlement while the pair is Matched/Settling on chain, so the
     /// witness (which holds the ONLY copy of the payout-note blinding) must
     /// be kept in every uncertain state. Deleting is allowed only when the
     /// on-chain order state PROVES this settlement can never land: the
@@ -1265,8 +1824,8 @@ mod inner {
             Err(_) => return Recovery::InProgress, // can't decide now; retry later
         };
         if leaf_index < 0 {
-            // Note not on chain (yet): the peer may still submit the
-            // SettlePair. Only a provably dead order state allows cleanup.
+            // Note not on chain (yet): the peer may still submit its leg.
+            // Only a provably dead order state allows cleanup.
             let my_status = query_one(client, &witness.my_order_id)
                 .await
                 .map(|o| o.status);
@@ -1332,9 +1891,88 @@ mod inner {
     mod recovery_tests {
         use super::*;
 
+        fn recovery_order(
+            id: &str,
+            pubkey: &str,
+            status: OrderStatus,
+            match_round: u64,
+            block_height: u32,
+            intra_block_index: u32,
+        ) -> Order {
+            Order {
+                id: id.into(),
+                kind: OrderKind::Limit,
+                trade_type: TradeType::Sell,
+                subject: TradePair {
+                    token1: "ETH".into(),
+                    token2: "USDT".into(),
+                },
+                price: Some(1),
+                protection_price: None,
+                execution_price: Some(1),
+                match_round,
+                match_height: 100,
+                pubkey: pubkey.into(),
+                locked_commitment: "11".repeat(32),
+                fee: 0,
+                block_height,
+                intra_block_index,
+                status,
+                match_order: None,
+            }
+        }
+
+        /// Restart recovery must derive canonical A/B and the round solely
+        /// from two mutually linked Settling rows. The owner may be the taker;
+        /// the resulting request must still use maker-first chain ordering.
+        #[test]
+        fn restart_recovery_selects_exact_owner_pair_and_round() {
+            let mut maker = recovery_order("maker", "peer-key", OrderStatus::Settling, 7, 10, 0);
+            let mut mine = recovery_order("mine", "my-key", OrderStatus::Settling, 7, 11, 0);
+            maker.match_order = Some(mine.id.clone());
+            mine.match_order = Some(maker.id.clone());
+
+            let rounds = owned_recoverable_settle_rounds(&[mine, maker], "my-key");
+            assert_eq!(
+                rounds,
+                vec![RecoverableSettleRound {
+                    order_a_id: "maker".into(),
+                    order_b_id: "mine".into(),
+                    owner_order_id: "mine".into(),
+                    match_round: 7,
+                }]
+            );
+        }
+
+        /// A stale/local WAL must never select a chain round. Any status,
+        /// reciprocal-link, or round disagreement suppresses recovery writes.
+        #[test]
+        fn restart_recovery_rejects_non_exact_chain_pair() {
+            let mut mine = recovery_order("mine", "my-key", OrderStatus::Settling, 7, 10, 0);
+            let mut peer = recovery_order("peer", "peer-key", OrderStatus::Settling, 8, 11, 0);
+            mine.match_order = Some(peer.id.clone());
+            peer.match_order = Some(mine.id.clone());
+            assert!(
+                owned_recoverable_settle_rounds(&[mine.clone(), peer.clone()], "my-key").is_empty()
+            );
+
+            peer.match_round = 7;
+            peer.match_order = Some("someone-else".into());
+            assert!(
+                owned_recoverable_settle_rounds(&[mine.clone(), peer.clone()], "my-key").is_empty()
+            );
+
+            peer.match_order = Some(mine.id.clone());
+            peer.status = OrderStatus::Pending;
+            assert!(owned_recoverable_settle_rounds(&[mine.clone(), peer], "my-key").is_empty());
+
+            mine.status = OrderStatus::Matched;
+            assert!(owned_recoverable_settle_rounds(&[mine], "my-key").is_empty());
+        }
+
         /// P1-6 regression: while the payout note is absent, every
         /// uncertain state KEEPS the witness — the peer may still submit
-        /// the exchanged SettlePair later. Only a provably dead order
+        /// its settlement leg later. Only a provably dead order
         /// state deletes.
         #[test]
         fn witness_kept_while_settlement_can_still_land() {

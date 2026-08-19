@@ -102,12 +102,33 @@ Use the trade form on the right panel to place orders:
 
 Matched orders settle in two phases. First the two traders **jointly
 prove the comparison of their hidden quantities** ([cozk2p](cozk2p/):
-malicious-secure SPDZ + collaborative TurboPlonk, no helper node) and
-anchor it on chain — nothing is revealed before that anchor lands. Then
-each side proves its own settlement circuit, the signed legs are
-exchanged, and one **atomic `SettlePair`** writing applies both sides
-together: the fully filled order closes, the surviving order is relisted
-in place with fresh residual commitments (keeping its time priority),
+2-party SPDZ fabric + collaborative TurboPlonk, no helper node; the current
+Beaver source is explicitly dev-only) and
+submit one identity/round/deadline-bound native proof-share payload each.
+Both payloads repeat the same Fiat–Shamir-opened canonical template; only the
+final two unopened KZG G1 points are native SPDZ value shares (MAC shares
+never leave the MPC). The comparison-share deadline is the current round's
+`MatchHeight + 10`, not either order's original admission height. No explicit
+quantity opening `(q, r_locked)` is disclosed until the chain checks the
+templates, adds each pair of point shares, reconstructs the standard proof,
+and verifies it; that verification also
+creates an absolute ten-block settlement-leg deadline. Both parties exchange
+and durably record both payout-note key pairs before the smaller opening is
+revealed. This WAL barrier currently assumes compliant clients: the pairs are
+not owner-signed or committed on chain, and the settle circuits do not
+publicly bind the counterparty's choice, so a malicious payer can redirect a
+payout. After reveal, each owner can construct and submit its settlement
+proof with no further peer/MPC dependency. At the deadline, zero legs release
+both owners without blame. For `cmp != 0`, a lone valid **large-side** leg
+proves that its owner knew the smaller opening, so the chain releases that
+owner and freezes the missing small owner. A lone small-side leg cannot prove
+delivery to the large owner; only-small, zero-leg, and every incomplete
+`cmp = 0` round therefore release both without blame. This timeout rule is
+conservative against false blame but asymmetric; the overall prototype claims
+only compliant-until-fail-stop security (see the threat-model note in the
+protocol reference). After both verify, the chain applies both sides atomically:
+the fully filled order closes, the surviving order is relisted in place with
+fresh residual commitments (keeping its time priority),
 and both payout notes mint in one step. See
 [docs/cozk2p_design.md](docs/cozk2p_design.md) for the protocol and
 threat model, and [docs/cozk_experiments.md](docs/cozk_experiments.md)

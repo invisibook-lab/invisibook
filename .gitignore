@@ -23,6 +23,7 @@ chain/cfg/tests/pool_e2e_test.toml
 
 # Experiment logs (the JSON, CSV and Markdown records are kept)
 experiments/results/*.log
+experiments/results/**/*.log
 
 # Scratch drafts
 .tmp/

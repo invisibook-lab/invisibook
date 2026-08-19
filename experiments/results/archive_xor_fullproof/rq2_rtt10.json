@@ -1,0 +1,314 @@
+{
+  "baseline_single_prover": {
+    "prove_ms": [],
+    "verify_ms": []
+  },
+  "bench_process_peak_rss_bytes": 26763264,
+  "circuit_gates": 2048,
+  "cozk2p_mock_inprocess": [],
+  "cozk2p_quic_2process": [
+    {
+      "per_party": [
+        {
+          "build_ms": 1201.540814,
+          "cmp": 1,
+          "compare_onchain_wait_ms": 0.322917,
+          "leg_exchange_ms": 0.0,
+          "open_ms": 13124.377971,
+          "peak_rss_bytes": 1800507392,
+          "proof_size_bytes_compressed": 769,
+          "prove_ms": 1325.4927670000002,
+          "role": "trader-a",
+          "steps": [
+            [
+              "1 preamble fingerprint",
+              13.335128
+            ],
+            [
+              "2 share inputs + collateral binding",
+              1174.193878
+            ],
+            [
+              "3 three-way compare",
+              411.945646
+            ],
+            [
+              "4 signature ferry + exchange",
+              12.179857
+            ],
+            [
+              "5 collaborative prove + local verify",
+              15658.615824
+            ],
+            [
+              "6 on-chain compare anchor (host wait)",
+              0.3772390000000001
+            ],
+            [
+              "7 smaller-side reveal",
+              34.09135
+            ],
+            [
+              "8 payout-note keys + WAL",
+              12.433502
+            ]
+          ],
+          "total_ms": 17419.834794,
+          "verify_ms": 7.02263
+        },
+        {
+          "build_ms": 1201.490427,
+          "cmp": 1,
+          "compare_onchain_wait_ms": 0.186261,
+          "leg_exchange_ms": 0.0,
+          "open_ms": 13117.843576,
+          "peak_rss_bytes": 1833054208,
+          "proof_size_bytes_compressed": 769,
+          "prove_ms": 1343.548825,
+          "role": "trader-b",
+          "steps": [
+            [
+              "1 preamble fingerprint",
+              0.230464
+            ],
+            [
+              "2 share inputs + collateral binding",
+              1174.121285
+            ],
+            [
+              "3 three-way compare",
+              423.75275
+            ],
+            [
+              "4 signature ferry + exchange",
+              0.386672
+            ],
+            [
+              "5 collaborative prove + local verify",
+              15669.792105
+            ],
+            [
+              "6 on-chain compare anchor (host wait)",
+              0.233407
+            ],
+            [
+              "7 smaller-side reveal",
+              23.143506
+            ],
+            [
+              "8 payout-note keys + WAL",
+              12.453583
+            ]
+          ],
+          "total_ms": 17414.197469000002,
+          "verify_ms": 6.754982
+        }
+      ],
+      "total_ms": 17477.872589
+    },
+    {
+      "per_party": [
+        {
+          "build_ms": 1191.585242,
+          "cmp": 1,
+          "compare_onchain_wait_ms": 0.212666,
+          "leg_exchange_ms": 0.0,
+          "open_ms": 13486.878815,
+          "peak_rss_bytes": 1801957376,
+          "proof_size_bytes_compressed": 769,
+          "prove_ms": 1164.994456,
+          "role": "trader-a",
+          "steps": [
+            [
+              "1 preamble fingerprint",
+              13.096296
+            ],
+            [
+              "2 share inputs + collateral binding",
+              1186.24016
+            ],
+            [
+              "3 three-way compare",
+              411.958808
+            ],
+            [
+              "4 signature ferry + exchange",
+              11.817364
+            ],
+            [
+              "5 collaborative prove + local verify",
+              15850.411361
+            ],
+            [
+              "6 on-chain compare anchor (host wait)",
+              0.253955
+            ],
+            [
+              "7 smaller-side reveal",
+              22.915765
+            ],
+            [
+              "8 payout-note keys + WAL",
+              12.071753
+            ]
+          ],
+          "total_ms": 17662.953595000003,
+          "verify_ms": 6.761627
+        },
+        {
+          "build_ms": 1191.786151,
+          "cmp": 1,
+          "compare_onchain_wait_ms": 0.227233,
+          "leg_exchange_ms": 0.0,
+          "open_ms": 13426.90607,
+          "peak_rss_bytes": 1798565888,
+          "proof_size_bytes_compressed": 769,
+          "prove_ms": 1223.193573,
+          "role": "trader-b",
+          "steps": [
+            [
+              "1 preamble fingerprint",
+              0.26131499999999996
+            ],
+            [
+              "2 share inputs + collateral binding",
+              1186.288054
+            ],
+            [
+              "3 three-way compare",
+              423.572128
+            ],
+            [
+              "4 signature ferry + exchange",
+              0.407626
+            ],
+            [
+              "5 collaborative prove + local verify",
+              15849.728969
+            ],
+            [
+              "6 on-chain compare anchor (host wait)",
+              0.26666100000000004
+            ],
+            [
+              "7 smaller-side reveal",
+              23.459525
+            ],
+            [
+              "8 payout-note keys + WAL",
+              12.044375
+            ]
+          ],
+          "total_ms": 17657.226548000002,
+          "verify_ms": 7.672259
+        }
+      ],
+      "total_ms": 17734.040915
+    },
+    {
+      "per_party": [
+        {
+          "build_ms": 1210.447203,
+          "cmp": 1,
+          "compare_onchain_wait_ms": 0.304808,
+          "leg_exchange_ms": 0.0,
+          "open_ms": 14029.870285,
+          "peak_rss_bytes": 1794555904,
+          "proof_size_bytes_compressed": 769,
+          "prove_ms": 1244.341387,
+          "role": "trader-a",
+          "steps": [
+            [
+              "1 preamble fingerprint",
+              13.744837
+            ],
+            [
+              "2 share inputs + collateral binding",
+              1184.296626
+            ],
+            [
+              "3 three-way compare",
+              411.545939
+            ],
+            [
+              "4 signature ferry + exchange",
+              11.814779
+            ],
+            [
+              "5 collaborative prove + local verify",
+              16490.776186000003
+            ],
+            [
+              "6 on-chain compare anchor (host wait)",
+              0.34388799999999997
+            ],
+            [
+              "7 smaller-side reveal",
+              35.794604
+            ],
+            [
+              "8 payout-note keys + WAL",
+              11.711802
+            ]
+          ],
+          "total_ms": 18268.088878,
+          "verify_ms": 5.931617
+        },
+        {
+          "build_ms": 1210.031951,
+          "cmp": 1,
+          "compare_onchain_wait_ms": 0.17488,
+          "leg_exchange_ms": 0.0,
+          "open_ms": 13988.093996,
+          "peak_rss_bytes": 1782018048,
+          "proof_size_bytes_compressed": 769,
+          "prove_ms": 1297.85562,
+          "role": "trader-b",
+          "steps": [
+            [
+              "1 preamble fingerprint",
+              0.299102
+            ],
+            [
+              "2 share inputs + collateral binding",
+              1184.1523249999998
+            ],
+            [
+              "3 three-way compare",
+              423.177708
+            ],
+            [
+              "4 signature ferry + exchange",
+              0.438868
+            ],
+            [
+              "5 collaborative prove + local verify",
+              16503.036458
+            ],
+            [
+              "6 on-chain compare anchor (host wait)",
+              0.216082
+            ],
+            [
+              "7 smaller-side reveal",
+              23.404326
+            ],
+            [
+              "8 payout-note keys + WAL",
+              11.783667
+            ]
+          ],
+          "total_ms": 18262.402553,
+          "verify_ms": 6.878190999999999
+        }
+      ],
+      "total_ms": 18351.947925
+    }
+  ],
+  "proof_size_bytes": {
+    "compressed": 769,
+    "uncompressed": 1185
+  },
+  "public_signals": 6,
+  "vk_size_bytes_compressed": 938
+}

@@ -108,15 +108,16 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 		sendOrderVK:    sendOrderVK,
 		claimFeesVK:    claimFeesVK,
 	}
-	// Settlement is EXCLUSIVELY atomic (F2) through SettlePair: the
-	// unilateral SettleSmall/SettleLarge writings are not registered, so a
-	// party that holds only the counterparty's signed leg cannot collect
-	// its payout alone. The per-leg verify helpers stay internal to
-	// SettlePair.
-	ot.SetWritings(ot.SendOrder, ot.SubmitCompareCoZk, ot.SubmitCompareCoZk2p,
-		ot.SettlePair, ot.ClaimFees, ot.RegisterSettleAddr,
-		ot.SubmitSettleCheckpoint, ot.AbortSettleRound)
-	ot.SetReadings(ot.QueryOrders, ot.QuerySettleAddr, ot.QueryFees, ot.QuerySettleCheckpoint)
+	// Each owner submits only its own identity-bound settlement leg. Comparison
+	// verification has already opened the absolute leg deadline; the chain
+	// invokes the internal atomic pair executor only after both owner proofs
+	// verify. The old
+	// one-shot compare/SettlePair and unilateral writings are not registered.
+	ot.SetWritings(ot.SendOrder, ot.SubmitCompareCoZk2pShare,
+		ot.SubmitSettleLeg, ot.FinalizeSettleLegs, ot.ClaimFees, ot.RegisterSettleAddr,
+		ot.ExpireCompareCoZk2pShares, ot.ExpireSettleLegs)
+	ot.SetReadings(ot.QueryOrders, ot.QuerySettleAddr, ot.QueryFees,
+		ot.QueryCompareCoZk2pShares, ot.QuerySettleLegs)
 	return ot
 }
 
@@ -382,7 +383,7 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 		return fmt.Errorf("failed to emit order created event: %w", err)
 	}
 
-	matched, err := ot.matchOrder(order)
+	matched, err := ot.matchOrder(order, uint64(ctx.Block.Height))
 	if err != nil {
 		return fmt.Errorf("failed to match order: %w", err)
 	}
@@ -549,7 +550,7 @@ func (ot *OrderBook) QueryOrders(ctx *context.ReadContext) {
 //
 // If matched, both orders' Status is set to Matched and MatchOrder is set
 // to each other.
-func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
+func (ot *OrderBook) matchOrder(order *Order, matchHeight uint64) (*Order, error) {
 	// Determine counter side
 	counterType := Sell
 	if order.Type == Sell {
@@ -593,6 +594,8 @@ func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
 	round++
 	order.MatchRound = round
 	bestMatch.MatchRound = round
+	order.MatchHeight = matchHeight
+	bestMatch.MatchHeight = matchHeight
 	exec := matchExecutionPrice(order, bestMatch)
 	order.ExecutionPrice = new(big.Int).Set(exec)
 	bestMatch.ExecutionPrice = new(big.Int).Set(exec)
@@ -601,7 +604,8 @@ func (ot *OrderBook) matchOrder(order *Order) (*Order, error) {
 		for _, o := range []*Order{order, bestMatch} {
 			updates := map[string]interface{}{
 				"status": int(Matched), "match_order": string(o.MatchOrder),
-				"match_round": o.MatchRound, "execution_price": o.ExecutionPrice.String(),
+				"match_round": o.MatchRound, "match_height": o.MatchHeight,
+				"execution_price": o.ExecutionPrice.String(),
 			}
 			if err := tx.Model(&OrderScheme{}).Where("id = ?", string(o.ID)).Updates(updates).Error; err != nil {
 				return err

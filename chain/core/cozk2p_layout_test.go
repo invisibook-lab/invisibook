@@ -20,6 +20,8 @@ type cozk2pFixture struct {
 	PriceB     uint64          `json:"price_b"`
 	AIsSeller  bool            `json:"a_is_seller"`
 	ProofHex   string          `json:"proof_hex"`
+	ShareAHex  string          `json:"proof_share_a_hex"`
+	ShareBHex  string          `json:"proof_share_b_hex"`
 	Public     json.RawMessage `json:"public"`
 	VKPath     string          `json:"vk_path"`
 }

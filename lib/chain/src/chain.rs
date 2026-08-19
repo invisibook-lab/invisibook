@@ -1,6 +1,7 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use yu_sdk::{KeyPair, YuClient};
 
 use crate::types::*;
@@ -159,9 +160,8 @@ pub fn send_order_signing_message(params: &SendOrderParams) -> Vec<u8> {
 }
 
 /// Mirror of chain Go `CompareRequest` — the dual-signed comparison result
-/// (paper π_cmp phase). `zk_proof` is snarkjs Groth16 JSON for
-/// `SubmitCompareCoZk`, hex-encoded ark-compressed PLONK bytes for
-/// `SubmitCompareCoZk2p`.
+/// (paper π_cmp phase). `zk_proof` is used by the legacy Groth16 path;
+/// native cozk2p proof material travels in owner-bound shares instead.
 #[derive(Debug, Clone, Serialize)]
 pub struct CompareParams {
     /// The maker's order ID (lower block height; ties broken by the
@@ -175,6 +175,103 @@ pub struct CompareParams {
     pub sig_a: String,
     pub sig_b: String,
     pub zk_proof: String,
+}
+
+/// One owner's independently authenticated native share of the collaborative
+/// PLONK proof. The chain reconstructs the proof only after both canonical
+/// owners have submitted for the same match round.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompareShareParams {
+    pub chain_id: u64,
+    pub order_a_id: OrderID,
+    pub order_b_id: OrderID,
+    pub owner_order_id: OrderID,
+    pub match_round: u64,
+    pub cmp: i8,
+    /// Absolute block-height deadline fixed as this round's
+    /// `MatchHeight + 10`. It is part of the owner's signature, so a relay cannot extend the
+    /// submission window or move the share into a different round.
+    pub deadline_height: u64,
+    pub proof_share: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ExpireCompareSharesParams {
+    chain_id: u64,
+    order_a_id: OrderID,
+    order_b_id: OrderID,
+    owner_order_id: OrderID,
+    match_round: u64,
+    signature: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct QueryCompareSharesParams {
+    order_a_id: OrderID,
+    order_b_id: OrderID,
+    owner_order_id: OrderID,
+    match_round: u64,
+}
+
+/// On-chain progress for one identity-bound comparison-share round.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompareShareProgress {
+    #[serde(default)]
+    pub state_commitment: String,
+    #[serde(default)]
+    pub my_submitted: bool,
+    #[serde(default)]
+    pub peer_submitted: bool,
+    #[serde(default)]
+    pub ready: bool,
+    #[serde(default)]
+    pub deadline_height: u64,
+    #[serde(default)]
+    pub verified_height: u64,
+    #[serde(default)]
+    pub expired_at_height: u64,
+    #[serde(default)]
+    pub missing_order_id: String,
+}
+
+fn compare_share_signing_message(params: &CompareShareParams) -> Result<Vec<u8>, String> {
+    let share =
+        hex::decode(&params.proof_share).map_err(|e| format!("invalid proof share hex: {e}"))?;
+    if share.is_empty() {
+        return Err("proof share is empty".into());
+    }
+    let share_digest = hex::encode(Sha256::digest(&share));
+    let mut msg = Vec::with_capacity(256);
+    for field in [
+        "invisibook-cozk2p-proof-share-v3".to_string(),
+        params.chain_id.to_string(),
+        params.order_a_id.clone(),
+        params.order_b_id.clone(),
+        params.owner_order_id.clone(),
+        params.match_round.to_string(),
+        params.cmp.to_string(),
+        params.deadline_height.to_string(),
+        share_digest,
+    ] {
+        put_signing_field(&mut msg, &field);
+    }
+    Ok(msg)
+}
+
+fn expire_compare_shares_message(params: &ExpireCompareSharesParams) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(192);
+    for field in [
+        "invisibook-expire-compare-shares-v1".to_string(),
+        params.chain_id.to_string(),
+        params.order_a_id.clone(),
+        params.order_b_id.clone(),
+        params.owner_order_id.clone(),
+        params.match_round.to_string(),
+    ] {
+        put_signing_field(&mut msg, &field);
+    }
+    msg
 }
 
 /// Builds the canonical compare byte string with the given domain `prefix`,
@@ -224,9 +321,10 @@ pub fn verify_compare_cozk2p_sig(params: &CompareParams, pubkey_hex: &str, sig_h
         .is_ok()
 }
 
-/// The fully filled side's settle-leg fields (paper π_A). There is no
-/// standalone writing for it — the signed message authenticates one leg
-/// of the atomic `SettlePair`.
+/// The fully filled side's settle-leg fields (paper π_A). The inner
+/// signature binds the proof outputs to this order and its matched peer;
+/// the outer `SubmitSettleLeg` signature additionally binds the owner,
+/// canonical pair, match round, and proof digest.
 #[derive(Debug, Clone, Serialize)]
 pub struct SettleSmallParams {
     pub order_id: OrderID,
@@ -237,9 +335,7 @@ pub struct SettleSmallParams {
     pub zk_proof: String,
 }
 
-/// The partially filled side's settle-leg fields (paper π_B). There is no
-/// standalone writing for it — the signed message authenticates one leg
-/// of the atomic `SettlePair`.
+/// The partially filled side's settle-leg fields (paper π_B).
 #[derive(Debug, Clone, Serialize)]
 pub struct SettleLargeParams {
     pub order_id: OrderID,
@@ -251,12 +347,11 @@ pub struct SettleLargeParams {
     pub zk_proof: String,
 }
 
-/// One leg of a `SettlePair` — mirror of Go `SettlePairLeg`. The residual
+/// One independently submitted settlement leg — mirror of Go
+/// `SettlePairLeg`. The residual
 /// field is set ONLY for the larger side (π_B); a fully filled leg (π_A,
 /// and both legs when cmp == 0) leaves it empty, and it is omitted from
-/// the wire JSON to match the Go `omitempty` tag. Each leg carries its own
-/// owner signature (over the SettleSmall/SettleLarge message), so a pair
-/// needs no new signed message.
+/// the wire JSON to match the Go `omitempty` tag.
 #[derive(Debug, Clone, Serialize)]
 pub struct SettlePairLegParams {
     pub cm_note_out: String,
@@ -265,6 +360,66 @@ pub struct SettlePairLegParams {
     pub zk_proof: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub cm_locked_residual: String,
+}
+
+/// One owner's identity- and round-bound settlement-proof submission.
+/// Comparison verification has already created the absolute ten-block leg
+/// window; the chain executes only after the peer owner submits a valid leg
+/// within that window.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubmitSettleLegParams {
+    pub chain_id: u64,
+    pub order_a_id: OrderID,
+    pub order_b_id: OrderID,
+    pub owner_order_id: OrderID,
+    pub match_round: u64,
+    pub leg: SettlePairLegParams,
+    pub submission_signature: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ExpireSettleLegsParams {
+    chain_id: u64,
+    order_a_id: OrderID,
+    order_b_id: OrderID,
+    owner_order_id: OrderID,
+    match_round: u64,
+    signature: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct QuerySettleLegsParams {
+    order_a_id: OrderID,
+    order_b_id: OrderID,
+    owner_order_id: OrderID,
+    match_round: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FinalizeSettleLegsParams {
+    chain_id: u64,
+    order_a_id: OrderID,
+    order_b_id: OrderID,
+    match_round: u64,
+}
+
+/// On-chain progress for one identity-bound settlement-leg round.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SettleLegProgress {
+    #[serde(default)]
+    pub my_submitted: bool,
+    #[serde(default)]
+    pub peer_submitted: bool,
+    #[serde(default)]
+    pub complete: bool,
+    #[serde(default)]
+    pub deadline_height: u64,
+    #[serde(default)]
+    pub completed_height: u64,
+    #[serde(default)]
+    pub expired_at_height: u64,
+    #[serde(default)]
+    pub missing_order_id: String,
 }
 
 impl SettlePairLegParams {
@@ -304,17 +459,40 @@ impl SettlePairLegParams {
     }
 }
 
-/// Mirror of chain Go `SettlePairRequest` — settles BOTH sides of a matched
-/// pair in one atomic writing (both proofs verified, both payout notes minted
-/// together, so neither side is paid without the other). A/B are the
-/// canonical maker/taker order ids; the recorded cmp decides which leg is
-/// the larger one.
-#[derive(Debug, Clone, Serialize)]
-pub struct SettlePairParams {
-    pub order_a_id: OrderID,
-    pub order_b_id: OrderID,
-    pub a: SettlePairLegParams,
-    pub b: SettlePairLegParams,
+fn settle_leg_submission_message(params: &SubmitSettleLegParams) -> Vec<u8> {
+    let proof_digest = hex::encode(Sha256::digest(params.leg.zk_proof.as_bytes()));
+    let mut msg = Vec::with_capacity(512);
+    for field in [
+        "invisibook-submit-settle-leg-v1".to_string(),
+        params.chain_id.to_string(),
+        params.order_a_id.clone(),
+        params.order_b_id.clone(),
+        params.owner_order_id.clone(),
+        params.match_round.to_string(),
+        params.leg.cm_note_out.clone(),
+        params.leg.cm_refund_out.clone(),
+        params.leg.cm_locked_residual.clone(),
+        params.leg.signature.clone(),
+        proof_digest,
+    ] {
+        put_signing_field(&mut msg, &field);
+    }
+    msg
+}
+
+fn expire_settle_legs_message(params: &ExpireSettleLegsParams) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(192);
+    for field in [
+        "invisibook-expire-settle-legs-v1".to_string(),
+        params.chain_id.to_string(),
+        params.order_a_id.clone(),
+        params.order_b_id.clone(),
+        params.owner_order_id.clone(),
+        params.match_round.to_string(),
+    ] {
+        put_signing_field(&mut msg, &field);
+    }
+    msg
 }
 
 /// Length-prefixed settle signing message, lockstep with Go
@@ -405,41 +583,6 @@ fn settle_addr_message(params: &RegisterSettleAddrParams) -> Vec<u8> {
     buf
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SettleCheckpointParams {
-    pub order_id: OrderID,
-    pub match_order_id: OrderID,
-    pub match_round: u64,
-    pub signature: String,
-}
-
-#[derive(Debug, Serialize)]
-struct QuerySettleCheckpointParams {
-    order_id: OrderID,
-    match_order_id: OrderID,
-    match_round: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SettleCheckpointStatus {
-    pub state_commitment: String,
-    pub my_submitted: bool,
-    pub peer_submitted: bool,
-    pub ready: bool,
-    pub deadline_height: u64,
-    #[serde(default)]
-    pub aborted_order_id: String,
-}
-
-fn checkpoint_message(domain: &str, params: &SettleCheckpointParams) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(128);
-    put_signing_field(&mut buf, domain);
-    put_signing_field(&mut buf, &params.order_id);
-    put_signing_field(&mut buf, &params.match_order_id);
-    put_signing_field(&mut buf, &params.match_round.to_string());
-    buf
-}
-
 #[derive(Debug, Serialize)]
 struct QueryOrdersParams {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -479,6 +622,8 @@ pub struct QueryOrderItem {
     pub execution_price: Option<u64>,
     #[serde(default)]
     pub match_round: u64,
+    #[serde(default)]
+    pub match_height: u64,
     pub pubkey: String,
     #[serde(default)]
     pub locked_commitment: String,
@@ -667,19 +812,80 @@ impl ChainClient {
         self.sign(&compare_cozk2p_message(params))
     }
 
-    /// Submits the dual-signed comparison result with its collaboratively
-    /// generated PLONK π_cmp; either party may submit.
-    pub async fn submit_compare_cozk2p(
+    /// Signs and uploads this client's proof share, including this round's
+    /// deterministic `MatchHeight + 10` deadline. Only the second accepted
+    /// share can trigger proof reconstruction, verification, the transition
+    /// to Settling, and creation of the separate settlement-leg deadline.
+    pub async fn submit_compare_cozk2p_share(
         &self,
-        params: &CompareParams,
+        mut params: CompareShareParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if params.chain_id != self.chain_id {
+            return Err(format!("wrong share chain_id {}", params.chain_id).into());
+        }
+        params.signature = self.sign(
+            &compare_share_signing_message(&params)
+                .map_err(|e| format!("building comparison share signature: {e}"))?,
+        );
         self.client
             .write_chain(
                 "orderbook",
-                "SubmitCompareCoZk2p",
-                params,
+                "SubmitCompareCoZk2pShare",
+                &params,
                 self.chain_id,
                 100,
+                0,
+            )
+            .await
+    }
+
+    /// Returns both owner-presence bits and the chain-assigned deadline for
+    /// this comparison-share round.
+    pub async fn query_compare_cozk2p_shares(
+        &self,
+        order_a_id: OrderID,
+        order_b_id: OrderID,
+        owner_order_id: OrderID,
+        match_round: u64,
+    ) -> Result<CompareShareProgress, Box<dyn std::error::Error>> {
+        let params = QueryCompareSharesParams {
+            order_a_id,
+            order_b_id,
+            owner_order_id,
+            match_round,
+        };
+        let value: Value = self
+            .client
+            .read_chain("orderbook", "QueryCompareCoZk2pShares", &params)
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Close an incomplete pre-reveal share round after its chain-derived
+    /// deadline. Both orders are released without a privacy penalty.
+    pub async fn expire_compare_cozk2p_shares(
+        &self,
+        order_a_id: OrderID,
+        order_b_id: OrderID,
+        owner_order_id: OrderID,
+        match_round: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut params = ExpireCompareSharesParams {
+            chain_id: self.chain_id,
+            order_a_id,
+            order_b_id,
+            owner_order_id,
+            match_round,
+            signature: String::new(),
+        };
+        params.signature = self.sign(&expire_compare_shares_message(&params));
+        self.client
+            .write_chain(
+                "orderbook",
+                "ExpireCompareCoZk2pShares",
+                &params,
+                self.chain_id,
+                30,
                 0,
             )
             .await
@@ -695,19 +901,111 @@ impl ChainClient {
         self.sign(&settle_large_message(params))
     }
 
-    /// Submits BOTH sides' settlements as one atomic `SettlePair` writing —
-    /// either the whole pair settles or nothing does. The two legs' proofs
-    /// and per-leg signatures are exchanged over the settlement channel,
-    /// then either party submits the pair. This is the ONLY settlement
-    /// writing the chain registers (the unilateral variants were removed to
-    /// close the fair-exchange gap).
-    pub async fn settle_pair(
+    /// Submits this client's own settlement proof. The outer signature is
+    /// identity-, pair-, and round-bound; the chain verifies the inner proof
+    /// immediately, but applies settlement only after both owners' legs have
+    /// arrived before the comparison-created absolute deadline.
+    pub async fn submit_settle_leg(
         &self,
-        params: &SettlePairParams,
+        mut params: SubmitSettleLegParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if params.chain_id != self.chain_id {
+            return Err(format!("wrong settlement leg chain_id {}", params.chain_id).into());
+        }
+        params.submission_signature = self.sign(&settle_leg_submission_message(&params));
         self.client
-            .write_chain("orderbook", "SettlePair", params, self.chain_id, 100, 0)
+            .write_chain(
+                "orderbook",
+                "SubmitSettleLeg",
+                &params,
+                self.chain_id,
+                100,
+                0,
+            )
             .await
+    }
+
+    /// Permissionlessly resumes the deterministic atomic executor after both
+    /// owner-authenticated legs were stored by their absolute deadline. The
+    /// request carries no payout data, proofs, or signatures, so the caller
+    /// cannot change either owner's authorized settlement.
+    pub async fn finalize_settle_legs(
+        &self,
+        order_a_id: OrderID,
+        order_b_id: OrderID,
+        match_round: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let params = FinalizeSettleLegsParams {
+            chain_id: self.chain_id,
+            order_a_id,
+            order_b_id,
+            match_round,
+        };
+        self.client
+            .write_chain(
+                "orderbook",
+                "FinalizeSettleLegs",
+                &params,
+                self.chain_id,
+                100,
+                0,
+            )
+            .await
+    }
+
+    /// After the comparison-created leg deadline, either owner may trigger
+    /// the deterministic timeout. Zero legs, only-small, and incomplete
+    /// equal-size rounds release both owners without attribution. Only a lone
+    /// large-side proof demonstrates receipt of the small opening and freezes
+    /// the missing small owner.
+    pub async fn expire_settle_legs(
+        &self,
+        order_a_id: OrderID,
+        order_b_id: OrderID,
+        owner_order_id: OrderID,
+        match_round: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut params = ExpireSettleLegsParams {
+            chain_id: self.chain_id,
+            order_a_id,
+            order_b_id,
+            owner_order_id,
+            match_round,
+            signature: String::new(),
+        };
+        params.signature = self.sign(&expire_settle_legs_message(&params));
+        self.client
+            .write_chain(
+                "orderbook",
+                "ExpireSettleLegs",
+                &params,
+                self.chain_id,
+                30,
+                0,
+            )
+            .await
+    }
+
+    /// Returns both owner-presence bits and the chain-assigned deadline for
+    /// this settlement-leg round.
+    pub async fn query_settle_legs(
+        &self,
+        order_a_id: OrderID,
+        order_b_id: OrderID,
+        owner_order_id: OrderID,
+        match_round: u64,
+    ) -> Result<SettleLegProgress, Box<dyn std::error::Error>> {
+        let params = QuerySettleLegsParams {
+            order_a_id,
+            order_b_id,
+            owner_order_id,
+            match_round,
+        };
+        let value: Value = self
+            .client
+            .read_chain("orderbook", "QuerySettleLegs", &params)
+            .await?;
+        Ok(serde_json::from_value(value)?)
     }
 
     /// Registers this party's QUIC address on-chain for MPC peer discovery.
@@ -769,87 +1067,6 @@ impl ChainClient {
                 encryption_pubkey: resp.encryption_pubkey,
             }))
         }
-    }
-
-    /// Uploads this owner's durable pre-open checkpoint. The chain derives
-    /// and stores the exact state commitment from the matched rows.
-    pub async fn submit_settle_checkpoint(
-        &self,
-        order_id: OrderID,
-        match_order_id: OrderID,
-        match_round: u64,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut params = SettleCheckpointParams {
-            order_id,
-            match_order_id,
-            match_round,
-            signature: String::new(),
-        };
-        params.signature = self.sign(&checkpoint_message(
-            "invisibook-settle-checkpoint-v1",
-            &params,
-        ));
-        self.client
-            .write_chain(
-                "orderbook",
-                "SubmitSettleCheckpoint",
-                &params,
-                self.chain_id,
-                20,
-                0,
-            )
-            .await
-    }
-
-    pub async fn query_settle_checkpoint(
-        &self,
-        order_id: OrderID,
-        match_order_id: OrderID,
-        match_round: u64,
-    ) -> Result<SettleCheckpointStatus, Box<dyn std::error::Error>> {
-        let value: Value = self
-            .client
-            .read_chain(
-                "orderbook",
-                "QuerySettleCheckpoint",
-                &QuerySettleCheckpointParams {
-                    order_id,
-                    match_order_id,
-                    match_round,
-                },
-            )
-            .await?;
-        Ok(serde_json::from_value(value)?)
-    }
-
-    /// After the checkpoint deadline, requeues this order and freezes the
-    /// peer that failed to upload its checkpoint.
-    pub async fn abort_settle_round(
-        &self,
-        order_id: OrderID,
-        match_order_id: OrderID,
-        match_round: u64,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut params = SettleCheckpointParams {
-            order_id,
-            match_order_id,
-            match_round,
-            signature: String::new(),
-        };
-        params.signature = self.sign(&checkpoint_message(
-            "invisibook-abort-settle-round-v1",
-            &params,
-        ));
-        self.client
-            .write_chain(
-                "orderbook",
-                "AbortSettleRound",
-                &params,
-                self.chain_id,
-                30,
-                0,
-            )
-            .await
     }
 
     /// Queries orders from the chain with optional filters and pagination.
@@ -1169,6 +1386,7 @@ fn query_item_to_order(item: QueryOrderItem) -> Order {
         protection_price: item.protection_price,
         execution_price: item.execution_price,
         match_round: item.match_round,
+        match_height: item.match_height,
         pubkey: item.pubkey,
         locked_commitment: item.locked_commitment,
         fee: item.fee,
@@ -1218,6 +1436,53 @@ mod tests {
         assert_ne!(compare_cozk_message(&p), compare_cozk2p_message(&p));
     }
 
+    #[test]
+    fn native_comparison_share_message_is_v3_and_binds_deadline_and_payload() {
+        let params = CompareShareParams {
+            chain_id: 1926,
+            order_a_id: "order-a-id".into(),
+            order_b_id: "order-b-id".into(),
+            owner_order_id: "order-a-id".into(),
+            match_round: 7,
+            cmp: -1,
+            deadline_height: 99,
+            proof_share: "01020304".into(),
+            signature: String::new(),
+        };
+        let digest = hex::encode(Sha256::digest([1u8, 2, 3, 4]));
+        let mut expected = Vec::new();
+        for field in [
+            "invisibook-cozk2p-proof-share-v3".to_string(),
+            "1926".to_string(),
+            "order-a-id".to_string(),
+            "order-b-id".to_string(),
+            "order-a-id".to_string(),
+            "7".to_string(),
+            "-1".to_string(),
+            "99".to_string(),
+            digest,
+        ] {
+            put_signing_field(&mut expected, &field);
+        }
+        assert_eq!(compare_share_signing_message(&params).unwrap(), expected);
+
+        let mut changed = params.clone();
+        changed.proof_share = "01020305".into();
+        assert_ne!(
+            compare_share_signing_message(&params).unwrap(),
+            compare_share_signing_message(&changed).unwrap()
+        );
+        changed.proof_share = "not-hex".into();
+        assert!(compare_share_signing_message(&changed).is_err());
+
+        let mut changed_deadline = params.clone();
+        changed_deadline.deadline_height += 1;
+        assert_ne!(
+            compare_share_signing_message(&params).unwrap(),
+            compare_share_signing_message(&changed_deadline).unwrap()
+        );
+    }
+
     /// The settle signing messages are length-prefixed and domain-separated
     /// (lockstep with Go core.settleSigMessage: u32-BE length per field).
     #[test]
@@ -1256,9 +1521,8 @@ mod tests {
         assert_ne!(settle_large_message(&large), settle_small_message(&small));
     }
 
-    /// SettlePair wire JSON must match the Go request: a fully filled leg
-    /// omits the residual field (Go `omitempty`), a larger leg includes
-    /// it, and the field names line up with the Go json tags.
+    /// Settlement-leg wire JSON must match Go: a fully filled leg omits the
+    /// residual field (`omitempty`) and a larger leg includes it.
     #[test]
     fn settle_pair_leg_json_lockstep() {
         let small = SettlePairLegParams::small(
@@ -1284,16 +1548,44 @@ mod tests {
         let lj = serde_json::to_value(&large).unwrap();
         assert_eq!(lj["cm_locked_residual"], "44".repeat(32));
 
-        let pair = SettlePairParams {
+        let submit = SubmitSettleLegParams {
+            chain_id: 1926,
             order_a_id: "order-a".into(),
             order_b_id: "order-b".into(),
-            a: large,
-            b: small,
+            owner_order_id: "order-a".into(),
+            match_round: 7,
+            leg: large,
+            submission_signature: String::new(),
         };
-        let pj = serde_json::to_value(&pair).unwrap();
+        let pj = serde_json::to_value(&submit).unwrap();
         assert_eq!(pj["order_a_id"], "order-a");
         assert_eq!(pj["order_b_id"], "order-b");
-        assert!(pj.get("a").is_some() && pj.get("b").is_some());
+        assert_eq!(pj["owner_order_id"], "order-a");
+        assert_eq!(pj["match_round"], 7);
+        assert_eq!(pj["leg"]["cm_locked_residual"], "44".repeat(32));
+
+        let first = settle_leg_submission_message(&submit);
+        let mut changed = submit.clone();
+        changed.owner_order_id = "order-b".into();
+        assert_ne!(first, settle_leg_submission_message(&changed));
+        changed = submit.clone();
+        changed.match_round += 1;
+        assert_ne!(first, settle_leg_submission_message(&changed));
+        changed = submit;
+        changed.leg.zk_proof.push('x');
+        assert_ne!(first, settle_leg_submission_message(&changed));
+
+        let finalize = FinalizeSettleLegsParams {
+            chain_id: 1926,
+            order_a_id: "order-a".into(),
+            order_b_id: "order-b".into(),
+            match_round: 7,
+        };
+        let fj = serde_json::to_value(finalize).unwrap();
+        assert_eq!(fj["chain_id"], 1926);
+        assert_eq!(fj["order_a_id"], "order-a");
+        assert_eq!(fj["order_b_id"], "order-b");
+        assert_eq!(fj["match_round"], 7);
     }
 
     /// sign_compare_cozk2p output must verify under verify_compare_cozk2p_sig,

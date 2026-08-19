@@ -1,7 +1,7 @@
 # Chain Design
 
-> **Status:** Current (2026-08-18, crossing prices + native fees +
-> pre-open checkpoints). For every place
+> **Status:** Current (2026-08-19, crossing prices + native fees +
+> identity-bound proof submissions). For every place
 > this design differs from the paper, see
 > [paper_deviations.md](paper_deviations.md).
 
@@ -49,16 +49,27 @@ Design invariants:
    applies market flag → best price → block height → fee → intra-block
    index → id, persists one common execution price, and never pairs two
    market orders because neither supplies an execution price.
-   Matching is strictly pairwise; all quantity work is deferred to
-   settlement.
-5. **Anchored disclosure (F1).** The smaller trader's encrypted opening is
-   released only after the pair is `Settling` and both owners have uploaded
-   the exact match round's pre-open checkpoint. A missing uploader can be
-   frozen after the deadline while the compliant order is requeued.
-6. **Atomic settlement (F2).** The main settle path is one `SettlePair`
-   writing: both legs verify and both payout plus both hiding refund
-   commitments mint together, or
-   nothing changes.
+   Matching is strictly pairwise. Every match/rematch refreshes a per-round
+   `MatchHeight`; the original `BlockHeight` stays unchanged for time
+   priority. All quantity work is deferred to settlement.
+5. **Anchored disclosure.** Each owner uploads its identity-, round-, and
+   deadline-bound comparison proof payload: the same canonical
+   Fiat–Shamir-common template
+   plus its own native SPDZ value shares of the two final KZG G1 points. The
+   smaller opening is released only after Rust checks template equality,
+   group-adds those two point-share pairs, constructs the standard proof, and
+   verifies π_cmp on chain. Comparison shares must arrive by
+   `MatchHeight + 10`. An incomplete comparison round releases both orders
+   without punishment.
+6. **Independent proof submission, atomic settlement.** Each owner uploads
+   only its own settlement proof. Comparison verification itself creates the
+   absolute settlement deadline `verification_height + 10`, before payout
+   keys or quantities are exchanged. The second leg triggers one atomic
+   payout/update. At expiry, only a non-equal round with a lone valid
+   large-side leg is punitive: the proof requires the smaller opening, so the
+   missing small owner is frozen. Zero-leg, only-small, and incomplete
+   `cmp = 0` rounds release both without blame. This is conservative but
+   asymmetric attribution.
 
 ## 2. Main Components
 
@@ -78,9 +89,9 @@ Design invariants:
 │ │ PoA      │  │ SendOrder        │  │ (shielded pool)    │             │
 │ │ (VDF /   │  │ SubmitCompare*   │  │ NoteDeposit        │             │
 │ │  PoBuy   │  │ SettleSmall/Large│  │ NoteWithdraw       │             │
-│ │  stubs)  │  │ SettlePair       │  │ GetNotes/PoolInfo  │             │
+│ │  stubs)  │  │ SubmitSettleLeg │  │ GetNotes/PoolInfo  │             │
 │ └──────────┘  │ ClaimFees        │  │ GetNullifiers      │             │
-│               │ Checkpoint/Abort  │ │ GetNoteByCm        │             │
+│               │ Share/Leg expiry  │ │ GetNoteByCm        │             │
 │               │ RegisterSettleAddr│ │                    │             │
 │               │ QueryOrders/Fees │  │ ApplyPoolMutation  │             │
 │               └──────┬───────────┘  └─────────┬──────────┘             │
@@ -134,37 +145,71 @@ A
 match links exactly two orders and sets both to `Matched`. Matched pairs
 are locked (no cancel path).
 
-**`SubmitCompareCoZk2p`** ([orderbook_cozk.go](../chain/core/orderbook_cozk.go),
-[orderbook_cozk2p.go](../chain/core/orderbook_cozk2p.go)) — records the
-2-party comparison: verifies both traders' ed25519 signatures over the
-canonical compare message and the collaborative PLONK π_cmp (6 publics:
+**`SubmitCompareCoZk2pShare`**
+([orderbook_compare_share.go](../chain/core/orderbook_compare_share.go)) —
+accepts exactly one share from each canonical order owner. Each signature
+binds chain id, pair, owner, match round, `cmp`, the chain-derived absolute
+deadline, and share digest under `invisibook-cozk2p-proof-share-v3`. The
+deadline is exactly this round's `MatchHeight + 10`, not an order's original
+`BlockHeight` and not a first-uploader-selected window. Each versioned payload repeats
+the same canonical template for components already public in the
+Fiat–Shamir transcript and carries that party's native value share for only
+`opening_proof` and `shifted_opening_proof`. The SPDZ MAC shares are not
+uploaded. On the second submission, the Rust bridge requires template
+equality (common components are not re-shared or added), group-adds the two
+pairs of final G1 shares, constructs the standard proof, and verifies
+collaborative PLONK π_cmp (6 publics:
 `cmp`, the two collateral commitments, both own public prices,
 `a_is_seller`; verifier
 linked via cgo behind the `cozk2p` build tag), stores `cmp`, and moves
-both orders to `Settling`.
-`SubmitCompareCoZk` is the Groth16 single-prover variant of the same
-gate (fixtures/tests).
+both orders to `Settling`. In the same transaction it creates the
+settlement-leg row with absolute deadline `verification_height + 10`, before
+the parties exchange payout-note keys or reveal a quantity.
+`ExpireCompareCoZk2pShares` releases both sides
+without a freeze because no smaller quantity opening was disclosed.
+The Groth16 twin remains as an internal fixture/test helper but is not a
+registered writing; production comparison accepts only owner-bound share
+submissions.
 
-**`SettlePair`** — the ONLY settlement writing (F2; the unilateral
-`SettleSmall`/`SettleLarge` writings are not registered, so one signed
-leg alone can never pay out — [paper_deviations.md](paper_deviations.md)
-D3). It verifies BOTH legs before touching state: each leg's owner
-signature plus its `settle_small` (π_A) or `settle_large` (π_B) proof,
-with publics rebuilt from the order rows (the single `LockedCommitment`,
+**`SubmitSettleLeg` / `FinalizeSettleLegs`** — the owner submission writing
+accepts only the submitting order owner's leg and verifies its outer identity/round
+signature, inner owner signature, and `settle_small` (π_A) or
+`settle_large` (π_B) proof. Its submission neither starts nor extends a
+deadline: the absolute window was created when comparison verification
+succeeded. Public inputs are
+rebuilt from the order rows (the single `LockedCommitment`,
 own and execution prices, side, pay asset, payout/refund outputs, bind;
 π_B additionally opens the
-counterparty's `LockedCommitment`). The pipeline is journaled for
-crash consistency across the two
-databases: a settlement-journal row (orders.db) records the intent, the
+counterparty's `LockedCommitment`). The current payout opening
+`(npk_ctr, r_note)` is private and is not bound to an owner-signed on-chain
+pre-reveal key commitment. Thus a malicious payer can redirect its output
+while satisfying the circuit; until the key choice is owner-signed, anchored,
+and added as a public circuit binding, this path assumes compliant clients.
+The pipeline is journaled for crash consistency across the two
+databases once both verified owner legs are present: a settlement-journal row (orders.db) records the intent, the
 payout mint is idempotent per settlement id (accounts.db, one
 transaction with a settlement-seen row), and the order-side transitions
 commit in one orders.db transaction with the journal — a crash between
 the databases is completed exactly once by a retry or by the boot-time
-recovery (`recoverPendingSettlements`). The fully filled side closes;
+recovery (`recoverPendingSettlements`). If both legs landed but the inline
+executor returned before completion, the
+permissionless `FinalizeSettleLegs` writing reuses only the stored verified
+legs and resumes the same idempotent journal. Its caller cannot replace any
+proof, output, or signature.
+The fully filled side closes;
 the larger side relists **in place**: same order id, `LockedCommitment`
 swapped to the residual collateral commitment, match link cleared,
 status back to `Pending`, block height (time priority) retained,
-immediate re-match attempted.
+immediate re-match attempted. At the comparison-created deadline, zero legs
+release both owners without blame. If `cmp != 0` and only the large-side leg
+exists, `ExpireSettleLegs` releases its owner and freezes the missing small
+owner: the valid large proof requires knowledge of the smaller opening. If
+only the small-side leg exists, both are released because that proof can be
+generated without delivering the opening. Every incomplete `cmp = 0` round
+also releases both. This is conservative but asymmetric; symmetric
+Byzantine attribution requires verifiable encrypted reveal or an equivalent
+chain-checkable artifact. A receiver-withholdable signed receipt does not
+solve fair exchange.
 
 **`ClaimFees`** ([fees.go](../chain/core/fees.go)) — a block producer
 mints its accrued plaintext fees as a pool note with a `claim_fees`
@@ -174,17 +219,18 @@ proof.
 match round, and X25519 key rendezvous. Addresses remain public (dev only),
 while the smaller opening is ChaCha20-Poly1305 encrypted end-to-end.
 
-**`SubmitSettleCheckpoint` / `AbortSettleRound`** — durable pre-open
-barrier and 10-block attribution deadline. A sole uploader is requeued;
-the missing uploader is frozen.
-
-**Readings:** `QueryOrders` (filtered, paginated), `QueryFees`.
+**Readings:** `QueryOrders` (filtered, paginated), `QueryFees`,
+`QueryCompareCoZk2pShares`, and `QuerySettleLegs` (owner presence and
+chain-assigned deadlines).
 
 ### 2.3 Proof verification
 
 [zkverify.go](../chain/core/zkverify.go) wraps `go-rapidsnark` for the
 Groth16 circuits; [plonkverify.go](../chain/core/plonkverify.go) calls
-the cozk2p Rust staticlib over cgo for π_cmp. Every VK path comes from
+the cozk2p Rust staticlib over cgo for π_cmp. Go treats the two native
+payloads as opaque canonical bytes; Rust validates their version/party tags,
+matches the common template, reconstructs the final two KZG points with G1
+addition, and verifies the resulting standard proof. Every VK path comes from
 `core.toml`. The posture is FAIL-CLOSED: `require_proofs` defaults to
 true, so a missing VK path refuses to boot; dev/test configs must opt
 out explicitly with `require_proofs = false`. A missing or malformed
@@ -210,13 +256,18 @@ prove send_order        ──SendOrder──────▶ verify sig + proof,
  locked_commitment)                        match → both orders Matched
 
 ⟨2-party MPC compare session over QUIC (cozk2p)⟩
-π_cmp + dual signatures ──SubmitCompareCoZk2p──▶ verify sigs + π_cmp,
-                                           record cmp, both → Settling
-⟨session blocks until Settling is confirmed — F1 gate⟩
+same common template +    ──SubmitCompareCoZk2pShare──▶ match template; add only
+each owner's 2 G1 shares                                  final G1 shares; verify π_cmp,
+                                           record cmp, both → Settling;
+                                           create leg deadline H_verify+10
+⟨session blocks until both shares verify and Settling is confirmed⟩
+⟨both sides exchange + persist BOTH payout-note key pairs⟩
 ⟨smaller side reveals (q, r_locked) to the larger side, P2P⟩
-⟨each side proves its own settle circuit; legs exchanged P2P⟩
+⟨no peer/MPC dependency remains after reveal⟩
+⟨each side proves its own settle circuit⟩
 
-either party            ──SettlePair─────▶ verify BOTH legs, mint BOTH
+each owner              ──SubmitSettleLeg──▶ verify/store own leg; after both,
+                                           mint BOTH
                                            payout notes atomically,
                                            Bob's order → Done,
                                            Alice's order relisted in
@@ -239,6 +290,8 @@ type Order struct {
     Type             TradeType  // Buy=0, Sell=1
     Subject          TradePair  // {Token1, Token2}
     Price            *big.Int   // plaintext; must fit u64
+    MatchRound       uint64     // increments on every match/rematch
+    MatchHeight      uint64     // current round height; deadline source
     Pubkey           string     // owner ed25519, authenticates updates
     LockedCommitment string     // the order's ONLY commitment: P2(needed, r)
     Fee              uint64     // plaintext, accrues to the producer
@@ -258,12 +311,14 @@ its own. `LockedCommitment` pins it through the collateral equation
 | Tripod | Kind | Name | Purpose |
 |---|---|---|---|
 | orderbook | writing | `SendOrder` | admit + match an order (spends pool notes) |
-| orderbook | writing | `SubmitCompareCoZk2p` | record the dual-signed 2-party comparison (PLONK) |
-| orderbook | writing | `SubmitCompareCoZk` | Groth16 variant of the compare gate |
-| orderbook | writing | `SettlePair` | **atomic** two-leg settlement (the ONLY settle writing) |
+| orderbook | writing | `SubmitCompareCoZk2pShare` | submit one identity-bound PLONK proof share |
+| orderbook | writing | `ExpireCompareCoZk2pShares` | release an incomplete pre-reveal share round |
+| orderbook | writing | `SubmitSettleLeg` | submit one owner's verified settlement proof |
+| orderbook | writing | `FinalizeSettleLegs` | permissionlessly resume atomic execution once both in-deadline legs are stored |
+| orderbook | writing | `ExpireSettleLegs` | after the comparison-created deadline: freeze missing small only for `cmp != 0` + only-large; otherwise release both without blame |
 | orderbook | writing | `ClaimFees` | producer mints accrued fees as a note |
 | orderbook | writing | `RegisterSettleAddr` | QUIC rendezvous (dev) |
-| orderbook | reading | `QueryOrders`, `QuerySettleAddr`, `QueryFees` | |
+| orderbook | reading | `QueryOrders`, `QuerySettleAddr`, `QueryFees`, `QueryCompareCoZk2pShares`, `QuerySettleLegs` | |
 | account | writing | `NoteDeposit` / `NoteWithdraw` | bridge in / out of the pool |
 | account | reading | `GetNotes`, `GetPoolInfo`, `GetNullifiers`, `GetNoteByCm` | |
 
@@ -273,8 +328,10 @@ its own. `LockedCommitment` pins it through the collateral equation
 |---|---|
 | [chain/main.go](../chain/main.go) | kernel bootstrap, tripod wiring |
 | [chain/core/orderbook.go](../chain/core/orderbook.go) | `SendOrder`, matching, rendezvous, `QueryOrders` |
-| [chain/core/orderbook_cozk.go](../chain/core/orderbook_cozk.go) | compare + settle writings incl. `SettlePair` |
-| [chain/core/orderbook_cozk2p.go](../chain/core/orderbook_cozk2p.go) | PLONK compare gate (`-tags cozk2p`) |
+| [chain/core/orderbook_cozk.go](../chain/core/orderbook_cozk.go) | legacy Groth16 compare + internal atomic settlement executor |
+| [chain/core/orderbook_compare_share.go](../chain/core/orderbook_compare_share.go) | owner-bound PLONK proof shares + pre-reveal expiry |
+| [chain/core/orderbook_settle_leg.go](../chain/core/orderbook_settle_leg.go) | owner-bound settlement legs + post-reveal expiry |
+| [chain/core/orderbook_cozk2p.go](../chain/core/orderbook_cozk2p.go) | PLONK public-statement builder (`-tags cozk2p` verifier) |
 | [chain/core/order.go](../chain/core/order.go), [order_scheme.go](../chain/core/order_scheme.go) | order model + GORM CRUD |
 | [chain/core/order_sign.go](../chain/core/order_sign.go) | canonical SendOrder signing message |
 | [chain/core/account.go](../chain/core/account.go) | Account tripod (pool only) |
