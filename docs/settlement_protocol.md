@@ -223,9 +223,65 @@ so every incomplete round is also non-punitive.
 > only-small timeout. Fully Byzantine symmetric attribution needs a verifiable
 > encrypted reveal or another chain-checkable delivery artifact. An ordinary
 > signed receipt is insufficient: a receiver may obtain the opening and then
-> withhold the receipt, recreating the fair-exchange problem.
+> withhold the receipt, recreating the fair-exchange problem. §2.4 gives the
+> planned repair, which is not implemented.
 
-### 2.4 Measured latency, step by step
+### 2.4 TODO — on-chain reveal challenge (planned, not implemented)
+
+> **Status: design only.** No code, request type, or circuit for this
+> section exists. The rules of §2.3 are what the chain does today.
+
+The limit above has one cause: the chain never sees the quantity
+disclosure. The disclosure happens off chain, so the chain cannot know
+if the round entered the post-disclosure phase. A penalty before that
+proof is unsafe, and an owner who did the correct work can get the blame.
+The planned repair makes the disclosure itself a chain-checkable step.
+
+**The mechanism.** The large owner starts it only when the small owner
+does not send the opening off chain.
+
+1. The large owner sends a signed `ChallengeReveal` writing for the pair
+   and the match round. The writing includes one fresh encryption public
+   key of the large owner. Only the large owner of a `Settling` pair with
+   `cmp != 0` can send it, and only one challenge stays open in a round.
+2. The chain records the challenge and starts a second absolute deadline.
+   The settlement-leg deadline of §2.3 waits for the result of the
+   challenge.
+3. The small owner answers with an `AnswerReveal` writing. The writing
+   has a ciphertext and a zero-knowledge proof. The proof shows two
+   facts together:
+   - the ciphertext is an encryption of `(q, r_locked)` under the public
+     key from the challenge, and
+   - the same `(q, r_locked)` opens the locked commitment of the small
+     order, which π_cmp already bound on chain.
+4. If the chain accepts the answer, the large owner decrypts the
+   ciphertext with its private key, makes its leg, and submits it in a
+   new leg window. No owner gets the blame, because the small owner
+   delivered the opening.
+5. If no valid answer comes before the challenge deadline, the missing
+   disclosure is now objective and on chain. The chain releases the large
+   owner and freezes the small owner.
+
+**Why this closes the gap.** The chain gets the delivery evidence that a
+signed receipt cannot give. An honest small owner always holds
+`(q, r_locked)`, so it can always answer and clear itself. A false
+challenge therefore costs the large owner one more round, but it cannot
+frame an honest owner. The chain punishes only after it sees a failure to
+answer. The state machine therefore proves entry into the post-disclosure
+phase before any penalty.
+
+**Open points before implementation.**
+
+- Select the encryption scheme. It must be efficient in a circuit and
+  must use the field of the settlement proof system.
+- Set the challenge window, and decide if a challenge is permitted
+  before the leg deadline or only at it.
+- Add the paper's automatic unfreeze (§VI-D, 72 hours) so a freeze
+  cannot stay forever.
+- This mechanism does not repair the payout-recipient binding of §3.4.
+  The two gaps are independent.
+
+### 2.5 Measured latency, step by step
 
 Medians of 5 `settle_e2e_relist` trades (24-core box, 3 s blocks, 2 s
 polling, dev SRS and mock Beaver triples), trader A's column; B differs
@@ -532,3 +588,4 @@ round also releases both.
 | abort after verification but before reveal | comparison verification already started the settlement deadline; 0 legs at expiry release both without blame |
 | abort after reveal | for `cmp != 0`, only a lone large-side leg proves knowledge of the opening and freezes the missing small owner; only-small remains unattributed and releases both |
 | Byzantine attribution limit | the rule is conservative and asymmetric: a small leg alone does not prove delivery of `q`; symmetric Byzantine accountability requires verifiable encrypted reveal/objective delivery evidence, and a withholdable signed receipt is not enough |
+| planned: on-chain reveal challenge | **TODO, design only (§2.4)**: the large owner challenges with a fresh encryption key; the small owner answers with a ciphertext plus a proof that it encrypts the opening of the commitment π_cmp bound; no answer before the challenge deadline gives objective, non-framing evidence for a freeze |

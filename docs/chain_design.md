@@ -209,7 +209,10 @@ generated without delivering the opening. Every incomplete `cmp = 0` round
 also releases both. This is conservative but asymmetric; symmetric
 Byzantine attribution requires verifiable encrypted reveal or an equivalent
 chain-checkable artifact. A receiver-withholdable signed receipt does not
-solve fair exchange.
+solve fair exchange. A planned `ChallengeReveal` / `AnswerReveal` writing
+pair makes the disclosure chain-checkable and closes this asymmetry, but it
+is **TODO, design only**; see
+[settlement_protocol.md](settlement_protocol.md) §2.4.
 
 **`ClaimFees`** ([fees.go](../chain/core/fees.go)) — a block producer
 mints its accrued plaintext fees as a pool note with a `claim_fees`

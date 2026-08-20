@@ -31,7 +31,7 @@ Legend for the **Effect** column:
 | D1 | Compare submission | Two-step on-chain share assembly of π_cmp and `b` (§VI-B) | Each owner signs and submits the same Fiat–Shamir-common canonical template plus its native SPDZ value shares of the two final KZG G1 points. The chain checks template equality, group-adds only those points, and verifies the constructed proof after both identity/round/deadline-bound submissions arrive | Equal for proof assembly/integrity; **Weaker** for `cmp` timing (see D1) |
 | D2 | Reveal ordering | Reveal after the chain publishes `b` (§VI-C) | After comparison verification, both owners exchange and durably record both payout-note key pairs; only then may the smaller opening be revealed. There is no checkpoint and no peer/MPC dependency after disclosure | Equal for ordering; payout authorization is **Weaker** (D18) |
 | D3 | Settlement updates | Two independent per-side updates (§V-C, §VI-C) | Each owner independently submits only its own proof. The chain buffers the first and atomically mints/updates after the second verifies | **Stronger** for atomicity; intended-recipient binding is **Weaker** (D18) |
-| D4 | Liveness / challenge | Per-submission deadlines and encrypted on-chain reveal challenge with temporary freeze (§VI-D) | Comparison expires at the current round's `MatchHeight + 10`. Verification creates the absolute settlement deadline. At expiry, only `cmp != 0` plus a lone valid large-side leg freezes the missing small owner; zero-leg, only-small, and incomplete `cmp = 0` rounds release both. Attribution is conservative but asymmetric; encrypted adjudication and timed unfreeze remain missing | **Weaker / Partial** |
+| D4 | Liveness / challenge | Per-submission deadlines and encrypted on-chain reveal challenge with temporary freeze (§VI-D) | Comparison expires at the current round's `MatchHeight + 10`. Verification creates the absolute settlement deadline. At expiry, only `cmp != 0` plus a lone valid large-side leg freezes the missing small owner; zero-leg, only-small, and incomplete `cmp = 0` rounds release both. Attribution is conservative but asymmetric; encrypted adjudication and timed unfreeze remain missing (planned challenge mechanism: settlement_protocol.md §2.4, not implemented) | **Weaker / Partial** |
 | D5 | Collateral shape | Order spends shielded value `p·q + f`; `f` is the native-token miner fee (§V-B) | Side-dependent collateral (`q` token1 for a sell, `q·p` token2 for a buy) is `LockedCommitment`; separate note banks conserve the collateral asset and native `invis` fee independently (or one combined bank when collateral is `invis`) | Equal (concretization) |
 | D6 | Execution price | Crossing prices match; the executed price is not pinned (§V-C) | Crossing orders match. The maker's limit price is persisted as a common execution price; if the maker is market, the taker's limit is used. Settle proofs pay at execution price and return buy-side price improvement as a shielded refund note | Stronger/different (deterministic execution price) |
 | D7 | Partial-fill relist | The residual becomes a **new** order `o'_B` (§V-C) | The chain relists the **same** order id in place with the residual collateral commitment; block height (time priority) is retained | **Stronger** (keeps priority; same privacy: fresh blinding) |
@@ -163,6 +163,18 @@ weaker than the paper despite the phase-specific deadlines.
 
 This does not yet implement the paper's later encrypted on-chain reveal
 challenge/re-encryption adjudication, nor its 72-hour automatic unfreeze.
+
+**Planned repair (TODO, design only).** The large owner sends a signed
+on-chain challenge with a fresh encryption public key. The small owner must
+answer with a ciphertext and a zero-knowledge proof. The proof shows that the
+ciphertext encrypts `(q, r_locked)` under that key, and that the same opening
+matches the locked commitment which π_cmp already bound. An answer gives the
+large owner the opening and clears the small owner. No answer before the
+challenge deadline is objective evidence, so the chain can then release the
+large owner and freeze the small owner. An honest small owner always holds
+the opening, so a false challenge cannot frame it. The full design and its
+open points are in
+[settlement_protocol.md](settlement_protocol.md) §2.4.
 
 ### D5/D6 — Native fees and crossing-price settlement
 
