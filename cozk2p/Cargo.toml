@@ -54,5 +54,11 @@ mpc-relation = { git = "https://github.com/invisibook-lab/mpc-jellyfish", rev = 
 [patch."https://github.com/renegade-fi/ark-mpc"]
 ark-mpc = { git = "https://github.com/invisibook-lab/ark-mpc-1", rev = "178b66b6e9e5c7ff9217fa3ab236865770917cf1" }
 
+[dev-dependencies]
+# The traffic_census example implements ark-mpc's MpcNetwork trait, which
+# needs the same `futures` Stream/Sink traits ark-mpc itself uses. The
+# version matches the one already pinned in Cargo.lock.
+futures = "0.3"
+
 [profile.release]
 opt-level = 3
