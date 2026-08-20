@@ -108,8 +108,49 @@ Reading the numbers:
 - **Memory stays near 1.7 GiB per trader.** The signed on-chain request is
   larger than the 771-byte share itself, but both are constant-sized.
 - **Traffic remains large for the circuit size:** roughly 61–62 MiB sent by
-  each trader for 2 048 gates, in more than 55 000 datagrams.
+  each trader for 2 048 gates, in more than 55 000 datagrams. The census
+  below shows what these bytes contain.
 
+### What the 62 MiB of traffic contains
+
+```bash
+cd cozk2p && cargo run --release --example traffic_census
+```
+
+The census example runs the real `prove_collaborative_share_timed` flow
+over an in-process duplex channel. A counting wrapper frames every fabric
+message exactly as the QUIC transport does — an 8-byte length prefix plus
+the `serde_json` body — and tallies the messages by payload type.
+Measured 2026-08-19:
+
+| direction | messages | field elements | on-wire | raw binary | RQ1 relay |
+|---|---:|---:|---:|---:|---:|
+| trader A sends | 49 998 | 521 936 | 60.0 MiB | 15.9 MiB | 62.2 MiB |
+| trader B sends | 49 998 | 521 936 | 58.7 MiB | 15.9 MiB | 61.0 MiB |
+
+- **Almost all bytes are SPDZ multiplication openings.** 99.97 % of the
+  on-wire bytes are `ScalarBatch` messages: 49 868 messages per direction
+  that carry 521 806 BN254 scalar shares (32 B each). Each shared×shared
+  multiplication opens the two masked Beaver values (`d = x − a`,
+  `e = y − b`), and the MAC checks add a small remainder. The count matches
+  the quotient-polynomial computation: the collaborative TurboPlonk prover
+  evaluates the gate equation and the permutation product pointwise on the
+  8 × 2 048 = 16 384-point coset domain, at roughly 16 such multiplications
+  per point. The traffic is therefore proportional to the circuit size, at
+  about 30 KiB per gate.
+- **The transport encoding multiplies the bytes by 3.8.** ark-mpc's QUIC
+  layer serializes every message with `serde_json`, and the `Scalar`
+  serializer emits each 32-byte element as a JSON array of numbers
+  (~118 characters). The raw binary content is only 15.9 MiB per
+  direction. A binary codec (for example `bincode`) in the ark-mpc fork
+  would cut the traffic to ~16 MiB with no protocol change.
+- **The remaining ~3.5 % gap to the relay numbers is QUIC overhead:**
+  packet headers, acknowledgements, the TLS handshake, and retransmissions
+  on top of the application bytes.
+
+This composition also explains the RQ2 conclusion that the protocol is
+round-bound, not bandwidth-bound: the openings are many small dependent
+batches (average ~10 elements), not a few large transfers.
 
 ## RQ2 — the effect of the round-trip time
 
