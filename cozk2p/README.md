@@ -6,11 +6,20 @@ no helper node — using [mpc-jellyfish](https://github.com/invisibook-lab/mpc-j
 (malicious-secure 2-party SPDZ). Design: [docs/cozk2p_design.md](../docs/cozk2p_design.md).
 Results: [docs/cozk_experiments.md](../docs/cozk_experiments.md).
 
+Two settlement flavors coexist (select with `settle2p_session --mode`):
+
+- **split** (default): the MPC proves only the comparison (pi_cmp);
+  each side then proves its own Groth16 settle leg and the chain runs
+  the atomic `SettlePair`.
+- **merged**: ONE collaborative proof covers the comparison AND both
+  settle legs (`relation_pair.rs`, 15 publics, 16 384 gates); the chain
+  runs `SettlePairCoZk2p` and no quantity is revealed before the
+  settlement is final. See design doc §8.
+
 This is a **separate workspace** from `lib/` on purpose: it pins
 `nightly-2025-02-20` (rustup auto-installs it) because ark-mpc uses the
 unstable `inherent_associated_types` feature that regressed on newer
 nightlies, and it lives on the ark 0.4 ecosystem while `lib/` is on 0.5.
-The 3-party path (`lib/cozk`) is unchanged; the two coexist.
 
 ## Test
 

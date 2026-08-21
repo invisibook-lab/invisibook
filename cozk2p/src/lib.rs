@@ -26,8 +26,11 @@ pub mod mpc_poseidon;
 pub mod net;
 pub mod poseidon;
 pub mod prove;
+pub mod prove_pair;
 pub mod relation;
+pub mod relation_pair;
 pub mod session;
+pub mod session_pair;
 pub mod setup;
 pub mod stats;
 
@@ -35,5 +38,10 @@ pub use prove::{
     build_mpc_circuit, build_single_prover_circuit, prove_collaborative, prove_single,
     verify_settle,
 };
+pub use prove_pair::{
+    build_pair_mpc_circuit, build_pair_single_prover_circuit, prove_pair_collaborative,
+    prove_pair_single, verify_settle_pair,
+};
 pub use relation::{SettlePublic, SidePrivate, compute_public, needed_collateral};
-pub use setup::{default_cache_dir, dev_keys, sample_trade};
+pub use relation_pair::{PairPublic, PairSidePrivate, PairStatementInputs, compute_pair_public};
+pub use setup::{default_cache_dir, dev_keys, dev_keys_pair, sample_pair_trade, sample_trade};

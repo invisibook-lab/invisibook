@@ -9,7 +9,11 @@
 2. [paper_deviations.md](paper_deviations.md) — **every place the code
    deviates from the paper**, why, and with what effect. Read this
    before you trust either the paper or a design doc.
-3. The component designs: [chain_design.md](chain_design.md),
+3. [settlement_protocol.md](settlement_protocol.md) — the settlement
+   protocols step by step (split and merged): what trader A and trader
+   B each do and submit, with the full constraint list of every MPC
+   check and ZK relation.
+4. The component designs: [chain_design.md](chain_design.md),
    [zk_design.md](zk_design.md), [cozk2p_design.md](cozk2p_design.md),
    [app_design.md](app_design.md).
 
@@ -18,6 +22,7 @@
 | Document | Language | Status | Content |
 |---|---|---|---|
 | [paper_deviations.md](paper_deviations.md) | EN | **Current** | Implementation vs. the paper, item by item (D1–D17) |
+| [settlement_protocol.md](settlement_protocol.md) | EN | **Current** | Both settlement flavors step by step: A/B walkthroughs, sequence diagrams, exact submissions, every MPC/ZK constraint |
 | [chain_design.md](chain_design.md) | EN | **Current** | L2 chain: tripods, note pool, matching, compare gate, atomic `SettlePair` |
 | [zk_design.md](zk_design.md) | EN | **Current** | Note primitives (golden spec), Groth16 circuit catalog, binds, proving/verifying toolchain |
 | [cozk2p_design.md](cozk2p_design.md) | EN | **Current** | 2-party SPDZ + collaborative PLONK compare session, stdio protocol, trust caveats |
@@ -25,8 +30,6 @@
 | [cozk_experiments.md](cozk_experiments.md) | EN | **Current** (record) | Benchmark record: historical 3-party vs 2-party experiments + the current hardened-flow numbers |
 | [settlement_hardening_plan_zh.md](settlement_hardening_plan_zh.md) | ZH | **Current** (plan) | rev.4 hardening plan (F1–F4) with the implementation-status table (§六点五) |
 | [spdz_itmac_theory_zh.md](spdz_itmac_theory_zh.md) | ZH | **Current** (notes) | SPDZ / IT-MAC theory study notes |
-| [cozk_design.md](cozk_design.md) | EN | *Historical* | 3-party co-snarks (REP3) experiment and the old joint settle relation — superseded by cozk2p |
-| [milestones/test_guide_1.md](milestones/test_guide_1.md), [test_guide_2.md](milestones/test_guide_2.md) | EN | *Historical* | Milestone acceptance guides (cash-model era) |
 
 Binary assets: `invisibook_protocol.pdf` (early protocol sketch),
 `invisibook_desktop.png`, `logo.png`.

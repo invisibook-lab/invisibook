@@ -2,14 +2,15 @@
 
 > **Status:** Current as a measurement record (last updated 2026-08-16).
 > Early sections measure the historical 3-party REP3 path and the old
-> joint settle relation ([cozk_design.md](cozk_design.md), historical);
+> joint settle relation (removed with the cash model; see the
+> `cozk-settlement` branch in git history);
 > the final section measures the current hardened note flow. Each
 > section states its own setup.
 
 
 Two collaborative provers are measured: the **3-party REP3** path
-(`lib/cozk`, co-snarks, Groth16 — a historical experiment, not on this
-branch; see [cozk_design.md](cozk_design.md)) and the **2-party SPDZ**
+(`lib/cozk`, co-snarks, Groth16 — a historical experiment that lives
+only on the `cozk-settlement` branch) and the **2-party SPDZ**
 path (`cozk2p/`, mpc-jellyfish, TurboPlonk — see
 [cozk2p_design.md](cozk2p_design.md)). §"2-party" compares them.
 
@@ -95,7 +96,7 @@ go-rapidsnark — the chain's verification path, on-chain proof size, and gas
 cost are identical to the single-prover circuits. The entire cost of hiding
 the amounts is on the proving side; the verifier sees nothing different. This
 is exactly what the indistinguishability argument in
-[cozk_design.md](cozk_design.md) §7 needs: a constant-size proof plus public
+the historical design needs: a constant-size proof plus public
 commitments, simulatable and hiding.
 
 ### Communication (co-zk, per node, in-memory accounting)
@@ -247,3 +248,154 @@ verification ON on chain; 3 s block interval):
 Block waits (~2 blocks per on-chain step) dominate the end-to-end time;
 the cryptographic cost of the whole settlement is ~4 s of MPC/PLONK plus
 ~0.5 s of rapidsnark proofs per side.
+
+### Merged vs split settlement (A/B, `settle_e2e_relist` twins)
+
+The merged path ([cozk2p_design.md](cozk2p_design.md) §8) proves the
+comparison AND both settle legs in ONE collaborative proof
+(`relation_pair`, 6 259 gates / 8 192 padded), against the split path's
+compare-only relation (1 519 / 2 048) plus two single-prover settle
+legs.
+
+**Experimental setup.** All measurements run on one host: an Intel Core
+i9-12900HX (8 performance and 8 efficiency cores, 24 hardware threads)
+with 29 GB of RAM, under Linux 6.18 (WSL2), otherwise idle. Both traders
+execute as separate operating-system processes on that host and speak
+QUIC over the loopback interface, so the figures carry no wide-area
+network latency. The chain is a third process — a single-node PoA
+deployment of the yu framework, chain id 1926, RPC over loopback — whose
+block interval we measured at 3.0 s; the wallet polls order state every
+2 s, so every chain-wait row is quantized by both periods. The
+cryptographic stack is BN254 throughout: single-prover statements are
+circom 2.2.3 circuits set up with snarkjs 0.7.6 and proved with
+rapidsnark, while the two-party statements use collaborative TurboPlonk
+(mpc-jellyfish) over ark-mpc's malicious-secure SPDZ on Rust
+nightly-2025-02-20, and the Go 1.26.2 chain links the PLONK verifier
+over cgo. The KZG structured reference string is a fixed-seed
+development SRS of maximum degree 2^15; proving and verifying keys are
+generated once and warmed before measurement, so no measured run pays
+key generation. The shielded pool is a depth-20 Poseidon Merkle tree
+seeded with exactly two notes. The workload is a single trade: trader A,
+the maker, sells 2 ETH at price 3 and locks 2 ETH; trader B buys 1 ETH
+at the same price and locks 3 USDT. Collateral covers each order
+exactly and the fee is zero, so `cmp = +1` and the run exercises the
+cross-quantity path — B closes fully while A is relisted with its
+residual. Both traders' settlement drivers run concurrently, on-chain
+proof verification is enabled for both flavors, and we report trader A's
+column from one run of each flavor; per-step figures come from a
+stopwatch inside the session process (written to `stats.json`), and the
+steps before the session are timed by the harness.
+
+**Setup caveats.** Two development substitutions make these numbers
+optimistic rather than conservative. Beaver triples come from a mock
+source instead of a real SPDZ offline phase, and the SRS is publicly
+reproducible, so the proofs carry no soundness. Loopback transport also
+removes the round-trip latency that dominates the open phase; because
+that phase is network-round bound, a wide-area deployment would move the
+merged flow's cost up, not down.
+
+Numbers below are from one run of each twin, back to back, on the
+locked-only model (2026-08-18, branch `cozk-merged-settle`):
+
+| phase (ms) | split alice | split bob | merged alice | merged bob |
+|---|---|---|---|---|
+| MPC circuit build | 53 | 53 | 223 | 224 |
+| collaborative prove | 977 | 989 | 4 357 | 4 447 |
+| proof open (drain + MAC-checked reveal) | 2 678 | 2 671 | 16 033 | 15 944 |
+| on-chain anchor wait (host, not crypto) | 6 011 | 6 008 | 6 009 | 6 008 |
+| settle-leg exchange | 1 | 142 | — | — |
+| session subprocess total | 10 206 | 10 207 | 27 015 | 27 015 |
+| run_settle total (concurrent) | 22 353 | 22 353 | 33 268 | 33 268 |
+
+Per protocol step, aligned so each row is the SAME piece of work in both
+flows. The circled number is that step's index in
+[settlement_protocol.md](settlement_protocol.md) §2.2 (split) and §3.2
+(merged); `—` means the flow has no such step. Trader A's column, in
+protocol order:
+
+| step | what happens | split | merged |
+|---|---|---:|---:|
+| ⓪ | `SendOrder` prove (rapidsnark) | 202 | 327 |
+| ⓪ | `SendOrder` submit → `Pending` (block wait) | 4 008 | 4 008 |
+| ⓪ | matching → both `Matched` (block wait) | 4 007 | 4 006 |
+| ① | preamble fingerprint | 2 | 2 |
+| ② | share inputs + collateral binding (2 Poseidon over shares) | 59 | 66 |
+| ③ | three-way compare | 20 | 16 |
+| ④ | output commitments in MPC + opens (10 Poseidon over shares) | — | **200** |
+| ④/⑤ | signature ferry + exchange | 1 | 1 |
+| ⑤/⑥ | collaborative prove + local verify | **3 716** | **20 618** |
+| ⑥/⑦ | on-chain anchor (block wait) | 6 011 | 6 010 |
+| ⑦/⑧ | reveal — split `(q, r_locked)` before settling, merged fill only after finality | 5 | 2 |
+| ⑧ | payout-note keys + WAL (merged: inside ⑥/⑧, no key exchange) | 1 | — |
+| ⑨⑨′ | own settle leg (rapidsnark) + leg exchange | 1 | — |
+| Ⓡ⑩ | rendezvous + `SettlePair` submit + confirm (block waits) | 12 147 | 6 253 |
+| | **session subprocess total** (① … ⑧) | **10 206** | **27 015** |
+| | **`run_settle` total** (Ⓡ … ⑩) | **22 353** | **33 268** |
+| | **full trade** (⓪ … ⑩, both orders) | **36 798** | **47 814** |
+
+The `Ⓡ⑩` row is one measured span (`run_settle` minus the session), so it
+holds the rendezvous at the front and the settle submission and
+confirmation at the back. In the merged flow the submission itself sits
+inside ⑦, so its span is only the rendezvous plus the final confirm.
+
+Rolled up by category:
+
+| category | split | merged |
+|---|---|---|
+| collaborative MPC / PLONK | 3.7 s (**17 %**) | 20.6 s (**62 %**) |
+| chain block waits | 18.2 s (**81 %**) | 12.3 s (**37 %**) |
+| everything else (preamble, binding, compare, sig ferry, reveal, WAL, local Groth16 legs) | 0.2 s (1 %) | 0.3 s (1 %) |
+| **settlement total** | **22.4 s** | **33.3 s** |
+
+Reading of the numbers:
+
+- **One step dominates each flow, and it is the same step.** The split
+  session spends 3 716 ms in its collaborative prove and under 100 ms in
+  every other cryptographic step; the merged session spends 20 618 ms in
+  its prove and 285 ms in all the rest. Everything else in both flows is
+  a block wait.
+- **Computing a hash over shares costs ~100x less than proving it.**
+  Merged step 4 runs 10 Poseidon hashes over SPDZ shares in 200 ms;
+  merged step 6 proves a relation whose 12 Poseidon gadgets are ~5 650
+  of its 6 259 gates, and costs 20 618 ms. This single ratio explains
+  the whole A/B: the split flow keeps hashing either over shares
+  (step 2) or in single-prover rapidsnark (step 9, ~90 ms), and sends
+  only a 2 048-gate comparison through collaborative proving.
+- **Cryptographic wall clock: ~3.7 s split vs ~20.6 s merged (~5.6x)**
+  for 4x the gates, i.e. 1.81 vs 2.52 ms per gate. The open phase drains
+  the lazy dataflow, so it carries most Beaver-triple network rounds and
+  stays ~3x the prove phase in both flavors: the collaborative prove
+  over QUIC is network-round bound, not CPU bound.
+- **The locked-only model closed most of the gap.** Against the earlier
+  15-signal statement (16 384 gates) the same comparison read ~3.7 s vs
+  ~68 s of cryptography and 20.2 s vs 80.8 s end to end. Dropping the
+  quantity commitments halved the padded domain, cutting merged
+  cryptography ~3.3x and the settlement from ~4x slower to ~1.5x.
+  Against that 16 384-gate run the per-gate cost read 1.78 vs
+  4.14 ms/gate, so most of the old superlinearity came from that
+  domain's memory pressure (~10 GB peak RSS, now ~5 GB), not from
+  collaborative proving itself.
+- **On-chain interaction halves.** The merged flow needs ONE writing
+  (`SettlePairCoZk2p`) where the split flow needs two (compare +
+  `SettlePair`), which removes one block wait and the settle-leg
+  exchange — visible as 6.3 s against 12.1 s in the `Ⓡ⑩` row.
+- **Proof size is identical** (769 B compressed — PLONK proofs are
+  constant size), so on-chain verification cost is flat; the chain
+  verified `settle_pair_cozk2p` in ~40 ms.
+- **Privacy is strictly stronger in the merged flow**: no quantity is
+  revealed to anyone before the settlement is final, and the
+  post-finality reveal shrinks from the smaller side's `(q, r_locked)`
+  opening to the fill value alone.
+- The two flows are bottlenecked by different things: split is 81 %
+  chain latency, so faster blocks or WebSocket confirmation instead of
+  2 s polling would cut it materially; merged is 62 % MPC, where block
+  tuning buys little.
+
+CAVEAT: one run per flavor on a dev SRS with mock Beaver triples. Every
+block-wait row is quantized by the 3 s block interval and the 2 s poll
+granularity — treat it as +/- one block. Split's absolute cryptographic
+figure moves ~40 % between runs (3.7-5.2 s across two) because it is
+small; merged's moves ~7 %. The robust signals are the ratios, not the
+milliseconds. A run under heavy CPU contention (load ~49 on 24 cores)
+did not finish the merged prove inside 15 minutes, which is why the
+app's watchdog for the merged mode is 60 minutes.

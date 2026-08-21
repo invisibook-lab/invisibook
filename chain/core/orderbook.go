@@ -31,15 +31,16 @@ type OrderEvent struct {
 // Account tripod (injected via the `tripod` struct tag) for Cash state changes.
 type OrderBook struct {
 	*tripod.Tripod
-	Account        *Account `tripod:"account"`
-	db             *gorm.DB
-	chainID        uint64
-	settleCoZkVK   *CircuitVK
-	settleCoZk2pVK *PlonkVK
-	settleSmallVK  *CircuitVK
-	settleLargeVK  *CircuitVK
-	sendOrderVK    *CircuitVK
-	claimFeesVK    *CircuitVK
+	Account            *Account `tripod:"account"`
+	db                 *gorm.DB
+	chainID            uint64
+	settleCoZkVK       *CircuitVK
+	settleCoZk2pVK     *PlonkVK
+	settlePairCoZk2pVK *PlonkVK
+	settleSmallVK      *CircuitVK
+	settleLargeVK      *CircuitVK
+	sendOrderVK        *CircuitVK
+	claimFeesVK        *CircuitVK
 }
 
 // NewOrderBook constructs the OrderBook tripod and registers its writings and
@@ -55,13 +56,17 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	if err != nil {
 		panic(fmt.Sprintf("loading settle_cozk2p VK: %v", err))
 	}
+	settlePairCoZk2pVK, err := LoadPlonkVK("settle_pair_cozk2p", cfg.SettlePairCoZk2pVKPath)
+	if err != nil {
+		panic(fmt.Sprintf("loading settle_pair_cozk2p VK: %v", err))
+	}
 	// A node configured for collaborative settlement must be able to verify
 	// it. Booting a stub binary here would accept orders that can never
 	// settle ("starts but cannot settle") — refuse instead.
-	if settleCoZk2pVK != nil && !PlonkVerifierAvailable() {
-		panic("settle_cozk2p_vk_path is configured but this binary was built " +
+	if (settleCoZk2pVK != nil || settlePairCoZk2pVK != nil) && !PlonkVerifierAvailable() {
+		panic("a PLONK VK path is configured but this binary was built " +
 			"without the cozk2p PLONK verifier; build with `make build-chain` " +
-			"(go build -tags cozk2p) or remove the PLONK VK from the config")
+			"(go build -tags cozk2p) or remove the PLONK VKs from the config")
 	}
 	settleSmallVK, err := LoadVK("settle_small", cfg.SettleSmallVKPath)
 	if err != nil {
@@ -84,12 +89,13 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	// so a misconfigured node never accepts unverified settlements.
 	if cfg.RequireProofs {
 		for name, missing := range map[string]bool{
-			"settle_cozk":   settleCoZkVK == nil,
-			"settle_cozk2p": settleCoZk2pVK == nil,
-			"settle_small":  settleSmallVK == nil,
-			"settle_large":  settleLargeVK == nil,
-			"send_order":    sendOrderVK == nil,
-			"claim_fees":    claimFeesVK == nil,
+			"settle_cozk":        settleCoZkVK == nil,
+			"settle_cozk2p":      settleCoZk2pVK == nil,
+			"settle_pair_cozk2p": settlePairCoZk2pVK == nil,
+			"settle_small":       settleSmallVK == nil,
+			"settle_large":       settleLargeVK == nil,
+			"send_order":         sendOrderVK == nil,
+			"claim_fees":         claimFeesVK == nil,
 		} {
 			if missing {
 				panic(fmt.Sprintf("require_proofs is set but %s VK path is empty; refusing to start with proof verification disabled", name))
@@ -97,22 +103,24 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 		}
 	}
 	ot := &OrderBook{
-		Tripod:         tri,
-		db:             InitOrderDB(cfg.DBPath, ParseGormLogLevel(cfg.DBLogLevel)),
-		chainID:        cfg.ChainID,
-		settleCoZkVK:   settleCoZkVK,
-		settleCoZk2pVK: settleCoZk2pVK,
-		settleSmallVK:  settleSmallVK,
-		settleLargeVK:  settleLargeVK,
-		sendOrderVK:    sendOrderVK,
-		claimFeesVK:    claimFeesVK,
+		Tripod:             tri,
+		db:                 InitOrderDB(cfg.DBPath, ParseGormLogLevel(cfg.DBLogLevel)),
+		chainID:            cfg.ChainID,
+		settleCoZkVK:       settleCoZkVK,
+		settleCoZk2pVK:     settleCoZk2pVK,
+		settlePairCoZk2pVK: settlePairCoZk2pVK,
+		settleSmallVK:      settleSmallVK,
+		settleLargeVK:      settleLargeVK,
+		sendOrderVK:        sendOrderVK,
+		claimFeesVK:        claimFeesVK,
 	}
-	// Settlement is EXCLUSIVELY the atomic SettlePair (F2): the unilateral
+	// Settlement is EXCLUSIVELY atomic (F2): the split path's SettlePair
+	// and the merged path's SettlePairCoZk2p; the unilateral
 	// SettleSmall/SettleLarge writings are not registered, so a party that
 	// holds only the counterparty's signed leg cannot collect its payout
 	// alone. The per-leg verify helpers remain internal to SettlePair.
 	ot.SetWritings(ot.SendOrder, ot.SubmitCompareCoZk, ot.SubmitCompareCoZk2p,
-		ot.SettlePair, ot.ClaimFees, ot.RegisterSettleAddr)
+		ot.SettlePair, ot.SettlePairCoZk2p, ot.ClaimFees, ot.RegisterSettleAddr)
 	ot.SetReadings(ot.QueryOrders, ot.QuerySettleAddr, ot.QueryFees)
 	return ot
 }

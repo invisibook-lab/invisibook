@@ -54,7 +54,7 @@ pub struct SidePrivate {
 }
 
 /// Serde adapter: Fr as the chain's 64-char big-endian hex string.
-mod fr_hex {
+pub(crate) mod fr_hex {
     use ark_bn254::Fr;
     use ark_ff::PrimeField;
     use serde::{Deserialize, Deserializer, Serializer};
@@ -72,7 +72,7 @@ mod fr_hex {
 
 /// Deserialize `cmp` and reject anything outside {-1, 0, 1} at the trust
 /// boundary (the JSON may come from the counterparty).
-fn de_cmp<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i8, D::Error> {
+pub(crate) fn de_cmp<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i8, D::Error> {
     let v = i8::deserialize(d)?;
     if matches!(v, -1 | 0 | 1) {
         Ok(v)
@@ -131,7 +131,7 @@ impl SettlePublic {
 }
 
 /// Fr of a 32-byte blinding, wallet convention (big-endian reduction).
-fn rand_fr(r: &[u8; 32]) -> Fr {
+pub(crate) fn rand_fr(r: &[u8; 32]) -> Fr {
     use ark_ff::PrimeField;
     Fr::from_be_bytes_mod_order(r)
 }
@@ -242,7 +242,7 @@ pub fn build_settle_relation<Cs: Circuit<Fr>>(
     b: &SideWires,
 ) -> Result<(), CircuitError> {
     let mut sat = SatisfiabilityWitness::default();
-    settle_relation_impl(cs, public, a, b, &mut sat)
+    settle_relation_impl(cs, public, a, b, &mut sat, &mut |_, _| {})
 }
 
 /// [`build_settle_relation`] that also returns the [`SatisfiabilityWitness`]
@@ -255,20 +255,37 @@ pub fn build_settle_relation_collecting<Cs: Circuit<Fr>>(
     b: &SideWires,
 ) -> Result<SatisfiabilityWitness, CircuitError> {
     let mut sat = SatisfiabilityWitness::default();
-    settle_relation_impl(cs, public, a, b, &mut sat)?;
+    settle_relation_impl(cs, public, a, b, &mut sat, &mut |_, _| {})?;
     Ok(sat)
 }
 
-/// Shared body of the two builders. Every `enforce_equal`/`enforce_bool` is
+/// [`build_settle_relation`] with a step tracer: after each constraint
+/// group, `trace` receives (step label, current gate count). For the gate
+/// census (docs) — the counts are MEASURED, never estimated.
+pub fn build_settle_relation_traced<Cs: Circuit<Fr>>(
+    cs: &mut Cs,
+    public: &PublicWires,
+    a: &SideWires,
+    b: &SideWires,
+    trace: &mut dyn FnMut(&str, usize),
+) -> Result<(), CircuitError> {
+    let mut sat = SatisfiabilityWitness::default();
+    settle_relation_impl(cs, public, a, b, &mut sat, trace)
+}
+
+/// Shared body of the builders. Every `enforce_equal`/`enforce_bool` is
 /// mirrored into `sat` so the exact set of checks that make the circuit
-/// satisfiable can be re-tested on the witness shares.
+/// satisfiable can be re-tested on the witness shares. `trace` is called
+/// after each step with the running gate count (no-op in production).
 fn settle_relation_impl<Cs: Circuit<Fr>>(
     cs: &mut Cs,
     public: &PublicWires,
     a: &SideWires,
     b: &SideWires,
     sat: &mut SatisfiabilityWitness,
+    trace: &mut dyn FnMut(&str, usize),
 ) -> Result<(), CircuitError> {
+    trace("start", cs.num_gates());
     // 1. Booleanity of every quantity bit (both sides) — these ARE secret
     //    witnesses, and their 64-bit ranges keep the comparison an integer
     //    one and the collateral products integer-exact. The public `price`
@@ -277,6 +294,7 @@ fn settle_relation_impl<Cs: Circuit<Fr>>(
         enforce_bits(cs, bits)?;
         sat.bool_vars.extend_from_slice(bits);
     }
+    trace("1 booleanity q_a+q_b (128 bits)", cs.num_gates());
 
     let mut eq = |cs: &mut Cs, x: Variable, y: Variable| -> Result<(), CircuitError> {
         cs.enforce_equal(x, y)?;
@@ -287,6 +305,7 @@ fn settle_relation_impl<Cs: Circuit<Fr>>(
     // 2. Reconstruct the quantities from their bits.
     let q_a = le_bits_to_field(cs, &a.amount_bits)?;
     let q_b = le_bits_to_field(cs, &b.amount_bits)?;
+    trace("2 recomposition q_a+q_b", cs.num_gates());
 
     // 3. The compared quantities back the on-chain collateral commitments
     //    (paper Property 1(i): input legitimacy). Per side s in {0, 1}:
@@ -303,14 +322,17 @@ fn settle_relation_impl<Cs: Circuit<Fr>>(
         cs.add(q_price, term)
     };
     let needed_a = needed(cs, q_a, s_a)?;
-    let needed_b = needed(cs, q_b, s_b)?;
     let locked_a_hash = poseidon_hash2(cs, needed_a, a.r_locked)?;
     eq(cs, locked_a_hash, public.locked_a)?;
+    trace("3 needed(q_a) + OPEN locked_a", cs.num_gates());
+    let needed_b = needed(cs, q_b, s_b)?;
     let locked_b_hash = poseidon_hash2(cs, needed_b, b.r_locked)?;
     eq(cs, locked_b_hash, public.locked_b)?;
+    trace("4 needed(q_b) + OPEN locked_b", cs.num_gates());
 
     // 4. cmp = (q_a > q_b) - (q_a < q_b) must equal the public claim.
     let (lt, eq_flag) = cmp_from_bits(cs, &a.amount_bits, &b.amount_bits)?;
+    trace("5 MSB-first compare scan", cs.num_gates());
     // gt = 1 - lt - eq
     let gt = cs.lc(
         &[one_var, lt, eq_flag, zero],
@@ -323,6 +345,7 @@ fn settle_relation_impl<Cs: Circuit<Fr>>(
     )?;
     let cmp_expected = cs.sub(gt, lt)?;
     eq(cs, cmp_expected, public.cmp)?;
+    trace("6 cmp equality", cs.num_gates());
 
     Ok(())
 }
