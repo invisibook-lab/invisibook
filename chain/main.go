@@ -12,8 +12,11 @@ import (
 
 // main boots the Invisibook chain node: it loads kernel and core configs,
 // constructs the PoA, Account, and OrderBook tripods, then starts the kernel.
-// `cfgPath` and `coreCfgPath` must point at readable TOML files (or core falls
-// back to defaults if its file is missing/unreadable).
+// `cfgPath` and `coreCfgPath` must point at readable, well-formed TOML files.
+// A missing or malformed core config is FATAL: falling back to defaults would
+// silently disable proof verification (defaults carry no verifying keys), so
+// the node refuses to start instead. Dev mode (no proof verification) must be
+// requested explicitly with `require_proofs = false` in the config file.
 func main() {
 	cfgPath := flag.String("config", "cfg/chain.toml", "path to chain config file")
 	coreCfgPath := flag.String("core-config", "cfg/core.toml", "path to core tripod config file")
@@ -22,12 +25,11 @@ func main() {
 	yuCfg := startup.InitKernelConfigFromPath(*cfgPath)
 	poaCfg := poa.SingleNodeCfg()
 
-	// Core config is optional: missing or malformed files fall back to defaults
-	// so a fresh node can boot without a hand-written core.toml.
 	coreCfg, err := core.LoadConfig(*coreCfgPath)
 	if err != nil {
-		log.Printf("WARN: failed to load core config (%s), using defaults: %v", *coreCfgPath, err)
-		coreCfg = core.DefaultConfig()
+		log.Fatalf("FATAL: failed to load core config (%s): %v\n"+
+			"Refusing to start: a default configuration would skip all ZK proof "+
+			"verification. Fix the config file or pass --core-config.", *coreCfgPath, err)
 	}
 
 	poaTri := poa.NewPoa(poaCfg)

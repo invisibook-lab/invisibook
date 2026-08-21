@@ -18,7 +18,7 @@ pub struct ClientConfig {
     pub chain: ChainConfig,
     #[serde(default)]
     pub keypair: KeypairConfig,
-    /// Local data directory for mnemonic, cash.json, etc.
+    /// Local data directory for mnemonic, notes.json, orders.json, etc.
     /// Defaults to `~/.invisibook`.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
@@ -27,6 +27,11 @@ pub struct ClientConfig {
     /// lookup chain.
     #[serde(default)]
     pub settle2p_bin: Option<PathBuf>,
+    /// Settlement flavor: "split" (default; compare-only MPC + per-side
+    /// Groth16 legs) or "merged" (one collaborative proof for compare +
+    /// both settle legs). Benchmark switch; see `settle2p_mode()`.
+    #[serde(default)]
+    pub settle2p_mode: Option<String>,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -93,7 +98,7 @@ pub struct CliArgs {
     #[arg(long)]
     pub mnemonic: Option<String>,
 
-    /// Local data directory (mnemonic, cash.json, etc.)
+    /// Local data directory (mnemonic, notes.json, etc.)
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
 }
@@ -146,9 +151,15 @@ impl ClientConfig {
         self.data_dir.join("mnemonic")
     }
 
-    /// Path to the cash store file inside the data directory.
-    pub fn cash_path(&self) -> PathBuf {
-        self.data_dir.join("cash.json")
+    /// Path to the note ledger inside the data directory (this file IS the
+    /// wallet's money — see `note_store`).
+    pub fn notes_path(&self) -> PathBuf {
+        self.data_dir.join("notes.json")
+    }
+
+    /// Path to the order-opening ledger inside the data directory.
+    pub fn orders_path(&self) -> PathBuf {
+        self.data_dir.join("orders.json")
     }
 
     /// Resolves the 2-party settlement helper binary path, in order:
@@ -171,6 +182,18 @@ impl ClientConfig {
             }
         }
         None
+    }
+
+    /// Resolves the settlement flavor: the `settle2p_mode` config field,
+    /// then the `INVISIBOOK_SETTLE2P_MODE` env var, defaulting to "split".
+    /// Returns the normalized lowercase mode string.
+    pub fn settle2p_mode(&self) -> String {
+        let raw = self
+            .settle2p_mode
+            .clone()
+            .or_else(|| env::var("INVISIBOOK_SETTLE2P_MODE").ok())
+            .unwrap_or_else(|| "split".to_string());
+        raw.trim().to_lowercase()
     }
 
     /// Directory for 2-party settlement key material inside the data

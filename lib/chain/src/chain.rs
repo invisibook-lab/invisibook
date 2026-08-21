@@ -8,166 +8,335 @@ use crate::types::*;
 // Re-export KeyPair so consumers don't need to depend on yu-sdk directly.
 pub use yu_sdk::KeyPair as YuKeyPair;
 
+// ────────────────────── Submission outcome ──────────────────────
+
+/// Why a writing submission did not return success. The two variants demand
+/// OPPOSITE wallet reactions, so the distinction is part of the API:
+///
+/// - `Rejected`: the node processed the request and refused it — the
+///   transaction will not land, local records may be rolled back.
+/// - `Uncertain`: the transport failed (timeout, broken connection…) — the
+///   transaction MAY have reached the node and may still land. Local
+///   records (spent-note markers, order openings) MUST be kept until the
+///   chain is queried and the outcome is known.
+#[derive(Debug)]
+pub enum SubmitError {
+    Rejected(String),
+    Uncertain(String),
+}
+
+impl std::fmt::Display for SubmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubmitError::Rejected(m) => write!(f, "rejected by the node: {m}"),
+            SubmitError::Uncertain(m) => write!(f, "submission outcome uncertain: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for SubmitError {}
+
+/// Classify a transport-layer error message. Conservative by design: only
+/// an error that PROVES the node processed and refused the request is
+/// `Rejected`; every network-shaped or unknown failure is `Uncertain`
+/// (never destroy wallet records on an unknown outcome).
+pub fn classify_submit_error(msg: &str) -> SubmitError {
+    let lower = msg.to_lowercase();
+    // Transport failures: the request may or may not have arrived.
+    const UNCERTAIN: &[&str] = &[
+        "timed out",
+        "timeout",
+        "connection",
+        "connect",
+        "broken pipe",
+        "reset by peer",
+        "unexpected eof",
+        "error sending request",
+        "dns",
+        "channel closed",
+        "temporarily unavailable",
+        "incomplete message",
+    ];
+    if UNCERTAIN.iter().any(|p| lower.contains(p)) {
+        return SubmitError::Uncertain(msg.to_string());
+    }
+    // A completed HTTP exchange whose body the node filled with an error:
+    // the node saw the request and refused it.
+    const REJECTED: &[&str] = &[
+        "writing failed",
+        "status code",
+        "bad request",
+        "rejected",
+        "invalid",
+    ];
+    if REJECTED.iter().any(|p| lower.contains(p)) {
+        return SubmitError::Rejected(msg.to_string());
+    }
+    SubmitError::Uncertain(msg.to_string())
+}
+
 // ────────────────────── Request/Response Types ──────────────────────
 
-#[derive(Debug, Serialize)]
-struct CashChangeParam {
-    cash_id: String,
-    amount: CipherText,
-}
-
-#[derive(Debug, Serialize)]
-struct SendOrderParams {
-    id: OrderID,
+/// Mirror of chain Go `SendOrderRequest` (v2): spend two pool notes, lock
+/// the order's collateral (its ONLY commitment — locked-only model),
+/// destroy the plaintext `fee`, and mint the change note.
+#[derive(Debug, Clone, Serialize)]
+pub struct SendOrderParams {
+    pub id: OrderID,
     #[serde(rename = "type")]
-    trade_type: u8,
-    subject: TradePairJson,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    price: Option<u64>,
-    amount: CipherText,
-    pubkey: String,    // sender's ed25519 pubkey (64-char hex)
-    signature: String, // ed25519 sig over order ID bytes (128-char hex)
-    input_cash_ids: Vec<String>,
-    handling_fee: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    change: Option<CashChangeParam>,
-    /// snarkjs `proof.json` for the split conservation proof. Only required
-    /// when `change.is_some()`; chain rejects empty proof in split mode.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    zk_proof: Option<String>,
-    /// For buy orders in split mode: the actual cash commitment (poseidon(usdt_total, r_cash)).
-    /// Split proof and locked cash use this instead of `amount` (which is the token1 qty commitment).
-    /// Omitted for sell orders or no-split mode (chain falls back to `amount`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    locked_commitment: Option<CipherText>,
-}
-
-#[derive(Debug, Serialize)]
-struct TradePairJson {
-    token1: TokenID,
-    token2: TokenID,
-}
-
-/// Per-party MPC share submission for the comparison phase.
-#[derive(Debug, Serialize)]
-struct CompareOrderParams {
-    order_id: OrderID,
-    match_order_id: OrderID,
-    mpc_share: MpcShareParamJson,
-}
-
-/// Per-party settle submission sent to chain after comparison.
-/// `leg` is required for the larger party, omitted for the smaller party.
-#[derive(Debug, Serialize)]
-struct SettleOrderParams {
-    order_id: OrderID,
-    match_order_id: OrderID,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    leg: Option<SettleTokenLegParam>,
-}
-
-/// Serializable form of MpcShareParam for the chain JSON API.
-#[derive(Debug, Serialize)]
-struct MpcShareParamJson {
-    cmp_share: String,
-    cmp_mac: String,
-    r_smaller_share: String,
-    r_smaller_mac: String,
-    mac_key_share: String,
-}
-
-/// Mirror of chain Go `SettleTokenLeg`. `side` is `"larger"` or `"smaller"`;
-/// only the fields applicable to that side need to be populated (the rest are
-/// `None` and skipped from the JSON via `serde`).
-#[derive(Debug, Serialize)]
-pub struct SettleTokenLegParam {
-    pub side: String,
-    pub token: TokenID,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub my_match_commitment: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub other_match_commitment: Option<String>,
+    pub trade_type: u8,
+    pub subject: TradePairJson,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_token2_sender: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub change_commitment: Option<String>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub change_pubkey: String,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub match_commitment: Option<String>,
-
-    pub recv_commitment: String,
-    pub recv_pubkey: String,
+    pub pubkey: String,
+    pub signature: String,
+    pub anchor: String,
+    pub input_nullifiers: Vec<String>,
+    pub locked_commitment: String,
+    pub fee: u64,
+    pub change_commitment: String,
     pub zk_proof: String,
 }
 
-/// Mirror of chain Go `CoZkSettleRequest` — the single-submission co-zk
-/// settlement message. `order_a_id` must be the maker's order (earlier block
-/// height; ties broken by the smaller order ID), `cmp` the public three-way
-/// comparison sign(a - b), and the six commitments the circuit's public
-/// outputs. `sig_a`/`sig_b` are ed25519 signatures over
-/// `settle_cozk_message` by each order's key.
 #[derive(Debug, Clone, Serialize)]
-pub struct SettleCoZkParams {
+pub struct TradePairJson {
+    pub token1: TokenID,
+    pub token2: TokenID,
+}
+
+// ────────────────────── SendOrder Signing Message ──────────────────────
+
+/// Domain tag separating the SendOrder signing message from every other
+/// ed25519 message in the system (e.g. the co-zk settle messages).
+const SEND_ORDER_SIGNING_DOMAIN: &str = "invisibook-send-order-v2";
+
+/// Appends `s` to `buf` prefixed with its u32 big-endian byte length, so
+/// consecutive fields of arbitrary content concatenate without ambiguity.
+fn put_signing_field(buf: &mut Vec<u8>, s: &str) {
+    buf.extend_from_slice(&(s.len() as u32).to_be_bytes());
+    buf.extend_from_slice(s.as_bytes());
+}
+
+/// Canonical byte string the order owner ed25519-signs to authorize a
+/// SendOrder request. Covers every request field except the signature itself
+/// and the zk proof (already bound to its commitments through public-input
+/// verification). The `signature` field of `params` is not part of the
+/// message and may be empty. Must stay in lockstep with Go
+/// `core.SendOrderSigningMessage`.
+pub fn send_order_signing_message(params: &SendOrderParams) -> Vec<u8> {
+    let price = params.price.map(|p| p.to_string()).unwrap_or_default();
+    let mut buf = Vec::with_capacity(256);
+    put_signing_field(&mut buf, SEND_ORDER_SIGNING_DOMAIN);
+    put_signing_field(&mut buf, &params.id);
+    put_signing_field(&mut buf, &params.trade_type.to_string());
+    put_signing_field(&mut buf, &params.subject.token1);
+    put_signing_field(&mut buf, &params.subject.token2);
+    put_signing_field(&mut buf, &price);
+    put_signing_field(&mut buf, &params.pubkey);
+    put_signing_field(&mut buf, &params.anchor);
+    put_signing_field(&mut buf, &params.input_nullifiers[0]);
+    put_signing_field(&mut buf, &params.input_nullifiers[1]);
+    put_signing_field(&mut buf, &params.locked_commitment);
+    // Fee as a raw u64-BE 8-byte field (matches Go's binary.BigEndian).
+    let fee_bytes = params.fee.to_be_bytes();
+    buf.extend_from_slice(&(fee_bytes.len() as u32).to_be_bytes());
+    buf.extend_from_slice(&fee_bytes);
+    put_signing_field(&mut buf, &params.change_commitment);
+    buf
+}
+
+/// Mirror of chain Go `CompareRequest` — the dual-signed comparison result
+/// (paper π_cmp phase). `zk_proof` is snarkjs Groth16 JSON for
+/// `SubmitCompareCoZk`, hex-encoded ark-compressed PLONK bytes for
+/// `SubmitCompareCoZk2p`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompareParams {
+    /// The maker's order ID (lower block height; ties broken by the
+    /// lexicographically smaller ID) — always the circuit's a-side.
     pub order_a_id: OrderID,
+    /// The taker's order ID — the circuit's b-side.
     pub order_b_id: OrderID,
+    /// Public three-way comparison of the hidden order amounts,
+    /// `sign(a - b)`.
     pub cmp: i8,
-    pub new_order_a_commitment: String,
-    pub new_order_b_commitment: String,
-    pub new_locked_a_commitment: String,
-    pub new_locked_b_commitment: String,
-    pub recv_a_commitment: String,
-    pub recv_b_commitment: String,
     pub sig_a: String,
     pub sig_b: String,
     pub zk_proof: String,
 }
 
-/// Builds the canonical co-zk settlement byte string with the given domain
-/// `prefix`, in lockstep with Go `core.coZkSettleMessage`. The signature
-/// fields of `params` are not part of the message and may be empty.
-fn settle_cozk_message_with_prefix(prefix: &str, params: &SettleCoZkParams) -> Vec<u8> {
-    let msg = format!(
-        "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
-        prefix,
-        params.order_a_id,
-        params.order_b_id,
-        params.cmp,
-        params.new_order_a_commitment,
-        params.new_order_b_commitment,
-        params.new_locked_a_commitment,
-        params.new_locked_b_commitment,
-        params.recv_a_commitment,
-        params.recv_b_commitment,
-    );
-    msg.into_bytes()
+/// Builds the canonical compare byte string with the given domain `prefix`,
+/// in lockstep with Go `core.compareMessage`. The signature fields of
+/// `params` are not part of the message and may be empty.
+fn compare_message_with_prefix(prefix: &str, params: &CompareParams) -> Vec<u8> {
+    format!(
+        "{}:{}:{}:{}",
+        prefix, params.order_a_id, params.order_b_id, params.cmp
+    )
+    .into_bytes()
 }
 
-/// Canonical byte string both traders ed25519-sign for a 3-party co-zk
-/// settlement. Must stay in lockstep with Go `core.CoZkSettleMessage`. The
-/// signature fields of `params` are not part of the message and may be empty.
-pub fn settle_cozk_message(params: &SettleCoZkParams) -> Vec<u8> {
-    settle_cozk_message_with_prefix("invisibook-cozk-settle", params)
+/// Canonical byte string both traders ed25519-sign for the Groth16 compare
+/// variant. Lockstep with Go `core.CoZkCompareMessage`.
+pub fn compare_cozk_message(params: &CompareParams) -> Vec<u8> {
+    compare_message_with_prefix("invisibook-cozk-compare-v2", params)
 }
 
-/// Canonical byte string both traders ed25519-sign for a 2-party co-zk
-/// settlement. Must stay in lockstep with Go `core.CoZk2pSettleMessage`; the
-/// distinct prefix domain-separates the 2-party variant from the 3-party one.
-/// The signature fields of `params` are not part of the message and may be empty.
-pub fn settle_cozk2p_message(params: &SettleCoZkParams) -> Vec<u8> {
-    settle_cozk_message_with_prefix("invisibook-cozk2p-settle", params)
+/// Canonical byte string both traders ed25519-sign for the 2-party PLONK
+/// compare variant. Lockstep with Go `core.CoZk2pCompareMessage`.
+pub fn compare_cozk2p_message(params: &CompareParams) -> Vec<u8> {
+    compare_message_with_prefix("invisibook-cozk2p-compare-v2", params)
 }
 
-/// Verifies an ed25519 signature over `settle_cozk2p_message(params)`.
-/// `pubkey_hex` must be the signer's raw ed25519 public key as a 64-char hex
-/// string and `sig_hex` the 64-byte signature as a 128-char hex string.
+/// Verifies an ed25519 signature over `compare_cozk2p_message(params)`.
 /// Returns `false` (never panics) on any malformed input.
-pub fn verify_settle_cozk2p_sig(
-    params: &SettleCoZkParams,
+pub fn verify_compare_cozk2p_sig(params: &CompareParams, pubkey_hex: &str, sig_hex: &str) -> bool {
+    let Ok(pk_bytes) = hex::decode(pubkey_hex) else {
+        return false;
+    };
+    let Ok(sig_bytes) = hex::decode(sig_hex) else {
+        return false;
+    };
+    let Ok(pk_arr) = <[u8; 32]>::try_from(pk_bytes.as_slice()) else {
+        return false;
+    };
+    let Ok(sig_arr) = <[u8; 64]>::try_from(sig_bytes.as_slice()) else {
+        return false;
+    };
+    let Ok(verifying_key) = VerifyingKey::from_bytes(&pk_arr) else {
+        return false;
+    };
+    let signature = Signature::from_bytes(&sig_arr);
+    verifying_key
+        .verify(&compare_cozk2p_message(params), &signature)
+        .is_ok()
+}
+
+/// The fully filled side's settle-leg fields (paper π_A). There is no
+/// standalone writing for it — the signed message authenticates one leg
+/// of the atomic `SettlePair`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettleSmallParams {
+    pub order_id: OrderID,
+    pub match_order_id: OrderID,
+    pub cm_note_out: String,
+    pub signature: String,
+    pub zk_proof: String,
+}
+
+/// The partially filled side's settle-leg fields (paper π_B). There is no
+/// standalone writing for it — the signed message authenticates one leg
+/// of the atomic `SettlePair`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettleLargeParams {
+    pub order_id: OrderID,
+    pub match_order_id: OrderID,
+    pub cm_locked_residual: String,
+    pub cm_note_out: String,
+    pub signature: String,
+    pub zk_proof: String,
+}
+
+/// One leg of a `SettlePair` — mirror of Go `SettlePairLeg`. The residual
+/// field is set ONLY for the larger side (π_B); a fully filled leg (π_A,
+/// and both legs when cmp == 0) leaves it empty, and it is omitted from
+/// the wire JSON to match the Go `omitempty` tag. Each leg carries its own
+/// owner signature (over the SettleSmall/SettleLarge message), so a pair
+/// needs no new signed message.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlePairLegParams {
+    pub cm_note_out: String,
+    pub signature: String,
+    pub zk_proof: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub cm_locked_residual: String,
+}
+
+impl SettlePairLegParams {
+    /// A fully filled leg (π_A): the whole collateral transfers as one note;
+    /// no residual. `signature` is over the SettleSmall message.
+    pub fn small(cm_note_out: String, signature: String, zk_proof: String) -> Self {
+        Self {
+            cm_note_out,
+            signature,
+            zk_proof,
+            cm_locked_residual: String::new(),
+        }
+    }
+
+    /// A larger leg (π_B): pays the fill as a note and relists the residual
+    /// collateral. `signature` is over the SettleLarge message.
+    pub fn large(
+        cm_note_out: String,
+        cm_locked_residual: String,
+        signature: String,
+        zk_proof: String,
+    ) -> Self {
+        Self {
+            cm_note_out,
+            signature,
+            zk_proof,
+            cm_locked_residual,
+        }
+    }
+}
+
+/// Mirror of chain Go `SettlePairRequest` — settles BOTH sides of a matched
+/// pair in one atomic writing (both proofs verified, both payout notes minted
+/// together, so neither side is paid without the other). A/B are the
+/// canonical maker/taker order ids; the recorded cmp decides which leg is
+/// the larger one.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlePairParams {
+    pub order_a_id: OrderID,
+    pub order_b_id: OrderID,
+    pub a: SettlePairLegParams,
+    pub b: SettlePairLegParams,
+}
+
+/// Mirror of chain Go `SettlePairCoZk2pRequest` — the MERGED settlement:
+/// one collaborative PLONK proof covers the comparison and both settle
+/// legs, so a Matched pair settles in a single writing. Locked-only model:
+/// each side carries ONE residual commitment (its collateral), and both are
+/// always present — the fully filled side's commits to zero. `zk_proof` is
+/// hex of the ark-compressed PLONK proof.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlePairCoZk2pParams {
+    pub order_a_id: OrderID,
+    pub order_b_id: OrderID,
+    pub cmp: i8,
+    pub cm_note_out_a: String,
+    pub cm_note_out_b: String,
+    pub cm_locked_residual_a: String,
+    pub cm_locked_residual_b: String,
+    pub sig_a: String,
+    pub sig_b: String,
+    pub zk_proof: String,
+}
+
+/// The dual-signed message for the merged settlement (Go
+/// `core.SettlePairCoZk2pMessage`): length-prefixed, domain-separated,
+/// covering the pair ids, cmp, and every output commitment. The signature
+/// and proof fields of `params` are not part of the message.
+pub fn settle_pair_cozk2p_message(params: &SettlePairCoZk2pParams) -> Vec<u8> {
+    let cmp = params.cmp.to_string();
+    settle_sig_message(
+        "invisibook-settle-pair-cozk2p-v1",
+        &[
+            &params.order_a_id,
+            &params.order_b_id,
+            &cmp,
+            &params.cm_note_out_a,
+            &params.cm_note_out_b,
+            &params.cm_locked_residual_a,
+            &params.cm_locked_residual_b,
+        ],
+    )
+}
+
+/// Verifies an ed25519 signature over `settle_pair_cozk2p_message(params)`.
+/// Returns `false` (never panics) on any malformed input.
+pub fn verify_settle_pair_cozk2p_sig(
+    params: &SettlePairCoZk2pParams,
     pubkey_hex: &str,
     sig_hex: &str,
 ) -> bool {
@@ -188,8 +357,48 @@ pub fn verify_settle_cozk2p_sig(
     };
     let signature = Signature::from_bytes(&sig_arr);
     verifying_key
-        .verify(&settle_cozk2p_message(params), &signature)
+        .verify(&settle_pair_cozk2p_message(params), &signature)
         .is_ok()
+}
+
+/// Length-prefixed settle signing message, lockstep with Go
+/// `core.settleSigMessage`.
+fn settle_sig_message(domain: &str, fields: &[&str]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(256);
+    let mut put = |f: &[u8]| {
+        msg.extend_from_slice(&(f.len() as u32).to_be_bytes());
+        msg.extend_from_slice(f);
+    };
+    put(domain.as_bytes());
+    for f in fields {
+        put(f.as_bytes());
+    }
+    msg
+}
+
+/// The owner-signed message for SettleSmall (Go `core.SettleSmallSigMessage`).
+pub fn settle_small_message(params: &SettleSmallParams) -> Vec<u8> {
+    settle_sig_message(
+        "invisibook-settle-small-v1",
+        &[
+            &params.order_id,
+            &params.match_order_id,
+            &params.cm_note_out,
+        ],
+    )
+}
+
+/// The owner-signed message for SettleLarge (Go `core.SettleLargeSigMessage`).
+pub fn settle_large_message(params: &SettleLargeParams) -> Vec<u8> {
+    settle_sig_message(
+        "invisibook-settle-large-v1",
+        &[
+            &params.order_id,
+            &params.match_order_id,
+            &params.cm_locked_residual,
+            &params.cm_note_out,
+        ],
+    )
 }
 
 /// Register settle address request params.
@@ -245,18 +454,18 @@ pub struct QueryOrderItem {
     pub subject: QueryTradePair,
     #[serde(default, deserialize_with = "deserialize_price")]
     pub price: Option<u64>,
-    pub amount: CipherText,
     pub pubkey: String,
-    pub input_cash_ids: Vec<String>,
     #[serde(default)]
-    pub handling_fee: Vec<String>,
+    pub locked_commitment: String,
+    #[serde(default)]
+    pub fee: u64,
     #[serde(default)]
     pub block_height: u32,
+    #[serde(default)]
+    pub intra_block_index: u32,
     pub status: u8,
     #[serde(default)]
     pub match_order: Option<String>,
-    #[serde(default)]
-    pub is_smaller: bool,
 }
 
 /// Go's `*big.Int` serializes as a JSON string (e.g. `"100"`) via `MarshalText`,
@@ -280,67 +489,50 @@ pub struct QueryTradePair {
     pub token2: TokenID,
 }
 
-// ────────────────────── Account Request/Response Types ──────────────────────
-
+/// Mirror of chain Go `NoteDepositRequest` (shielded pool).
 #[derive(Debug, Serialize)]
-struct GetAccountParams {
-    pubkey: String,
-    token: TokenID,
-}
-
-#[derive(Debug, Serialize)]
-struct DepositParams {
-    pubkey: String,
-    token: TokenID,
-    /// Hex commitment to the (hidden) plaintext amount the source-chain bridge
-    /// attested. Until the bridge proof is verified on-chain, this field is
-    /// trusted blindly (testnet/demo only).
+struct NoteDepositParams {
+    token: String,
     bridge_commitment: String,
-    /// Hex commitment that becomes the new `Cash.Amount`.
     output_commitment: String,
-    /// snarkjs `proof.json` produced by rapidsnark.
-    zk_proof: String,
-}
-
-#[derive(Debug, Serialize)]
-struct WithdrawParams {
-    pubkey: String,
-    token: TokenID,
-    inputs: Vec<String>,
-    /// Hex commitment to the (hidden) withdrawn amount. Trusted by chain
-    /// until the destination-chain bridge release proof lands.
-    bridge_out_commitment: String,
-    /// Always length 2: `[change_commitment, zero_pad_commitment]`. When the
-    /// withdrawal has no change, slot 0 is the well-known `Poseidon(0,0)` hex.
-    output_commitments: Vec<String>,
-    /// Empty string means "mint change back to the withdrawer" (chain
-    /// substitutes `pubkey`).
     #[serde(skip_serializing_if = "String::is_empty")]
-    change_pubkey: String,
-    /// snarkjs `proof.json` produced by rapidsnark.
+    bridge_sig: String,
     zk_proof: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct AccountResponse {
-    pubkey: String,
-    token: TokenID,
-    #[serde(default)]
-    cash: Vec<CashItemResponse>,
+/// Mirror of chain Go `NoteWithdrawRequest` (shielded pool).
+#[derive(Debug, Serialize)]
+struct NoteWithdrawParams {
+    token: String,
+    anchor: String,
+    nullifiers: Vec<String>,
+    bridge_out_commitment: String,
+    change_commitment: String,
+    zk_proof: String,
 }
 
+/// One leaf in a GetNotes response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NoteLeaf {
+    pub leaf_index: u64,
+    pub cm: String,
+    pub height: u64,
+}
+
+/// GetNotes response: leaves plus the pool head for cross-checking the
+/// client-side tree root after syncing.
 #[derive(Debug, Deserialize)]
-struct CashItemResponse {
-    id: String,
-    pubkey: String,
-    token: TokenID,
-    amount: CipherText,
-    #[serde(default)]
-    zk_proof: String,
-    #[serde(default)]
-    status: u8,
-    #[serde(default)]
-    by: String,
+pub struct NotesResponse {
+    pub leaf_count: u64,
+    pub latest_root: String,
+    pub notes: Vec<NoteLeaf>,
+}
+
+/// GetPoolInfo response.
+#[derive(Debug, Deserialize)]
+pub struct PoolInfoResponse {
+    pub leaf_count: u64,
+    pub latest_root: String,
 }
 
 // ────────────────────── Chain Client ──────────────────────
@@ -411,6 +603,11 @@ impl ChainClient {
     }
 
     /// Returns the owner's raw ed25519 pubkey as a 64-char hex string.
+    /// The chain id this client signs and binds against.
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
     pub fn pubkey_hex(&self) -> &str {
         &self.pubkey_hex
     }
@@ -422,122 +619,38 @@ impl ChainClient {
         hex::encode(kp.sign(message))
     }
 
-    /// Submits a new order to the chain. When `change` is provided (split
-    /// mode), `split_proof_json` must contain the ZK proof proving
-    /// sum(inputs) == sum(outputs).
-    ///
-    /// `locked_commitment` is required for buy orders in split mode: the actual
-    /// cash commitment (poseidon(usdt_total, r_cash)). The chain uses it for
-    /// split proof verification and locked cash creation, while `order.amount`
-    /// stores the token1 quantity commitment for MPC comparison.
-    pub async fn send_order(
-        &self,
-        order: &Order,
-        change: Option<&CashChange>,
-        split_proof_json: Option<String>,
-        locked_commitment: Option<CipherText>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if change.is_some() && split_proof_json.is_none() {
-            return Err("split mode requires a zk_proof".into());
-        }
-        let type_int = match order.trade_type {
-            TradeType::Buy => 0u8,
-            TradeType::Sell => 1u8,
-        };
-        let signature = self.sign(order.id.as_bytes());
-        let params = SendOrderParams {
-            id: order.id.clone(),
-            trade_type: type_int,
-            subject: TradePairJson {
-                token1: order.subject.token1.clone(),
-                token2: order.subject.token2.clone(),
-            },
-            price: order.price,
-            amount: order.amount.clone(),
-            pubkey: self.pubkey_hex.clone(),
-            signature,
-            input_cash_ids: order.input_cash_ids.clone(),
-            handling_fee: order.handling_fee.clone(),
-            change: change.map(|c| CashChangeParam {
-                cash_id: c.cash_id.clone(),
-                amount: c.amount.clone(),
-            }),
-            zk_proof: split_proof_json,
-            locked_commitment,
-        };
+    /// Submits a SendOrder v2 request. The caller assembles `params`
+    /// (nullifiers, locked commitment, fee, change commitment) and the
+    /// send_order proof; this method signs the canonical message and submits.
+    /// The error is CLASSIFIED (see `SubmitError`): the caller must keep its
+    /// wallet records on an `Uncertain` outcome — the transaction may have
+    /// landed despite the transport failure.
+    pub async fn send_order(&self, mut params: SendOrderParams) -> Result<(), SubmitError> {
+        params.pubkey = self.pubkey_hex.clone();
+        params.signature = self.sign(&send_order_signing_message(&params));
         self.client
             .write_chain("orderbook", "SendOrder", &params, self.chain_id, 100, 0)
             .await
+            .map_err(|e| classify_submit_error(&e.to_string()))
     }
 
-    /// Submits this party's MPC shares for order comparison.
-    /// The chain collects both parties' shares and verifies the MAC,
-    /// then sets both orders to Compared status.
-    #[deprecated(
-        note = "legacy settlement path; use the 2-party collaborative settle_orders_cozk2p flow"
-    )]
-    pub async fn compare_orders(
-        &self,
-        order_id: OrderID,
-        match_order_id: OrderID,
-        mpc_share: MpcShareParam,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let params = CompareOrderParams {
-            order_id,
-            match_order_id,
-            mpc_share: MpcShareParamJson {
-                cmp_share: mpc_share.cmp_share,
-                cmp_mac: mpc_share.cmp_mac,
-                r_smaller_share: mpc_share.r_smaller_share,
-                r_smaller_mac: mpc_share.r_smaller_mac,
-                mac_key_share: mpc_share.mac_key_share,
-            },
-        };
-        self.client
-            .write_chain("orderbook", "CompareOrders", &params, self.chain_id, 100, 0)
-            .await
-    }
-
-    /// Submits this party's settlement confirmation (after comparison).
-    /// The larger party (IsSmaller=false) must provide a ZK `leg`; the smaller
-    /// party (IsSmaller=true) confirms without proof (`leg` is `None`).
-    #[deprecated(
-        note = "legacy settlement path; use the 2-party collaborative settle_orders_cozk2p flow"
-    )]
-    pub async fn settle_orders(
-        &self,
-        order_id: OrderID,
-        match_order_id: OrderID,
-        leg: Option<SettleTokenLegParam>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let params = SettleOrderParams {
-            order_id,
-            match_order_id,
-            leg,
-        };
-        self.client
-            .write_chain("orderbook", "SettleOrders", &params, self.chain_id, 100, 0)
-            .await
-    }
-
-    /// ed25519-signs the canonical co-zk settlement message with this
+    /// ed25519-signs the canonical 2-party compare message with this
     /// client's key, returning the 128-char hex signature. The signature
     /// fields of `params` are ignored (they are not part of the message).
-    pub fn sign_settle_cozk(&self, params: &SettleCoZkParams) -> String {
-        self.sign(&settle_cozk_message(params))
+    pub fn sign_compare_cozk2p(&self, params: &CompareParams) -> String {
+        self.sign(&compare_cozk2p_message(params))
     }
 
-    /// Submits the jointly generated co-zk settlement in a single writing.
-    /// `params` must carry both traders' signatures (`sig_a`, `sig_b`) and
-    /// the collaboratively generated proof; either party may submit.
-    pub async fn settle_orders_cozk(
+    /// Submits the dual-signed comparison result with its collaboratively
+    /// generated PLONK π_cmp; either party may submit.
+    pub async fn submit_compare_cozk2p(
         &self,
-        params: &SettleCoZkParams,
+        params: &CompareParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.client
             .write_chain(
                 "orderbook",
-                "SettleOrdersCoZk",
+                "SubmitCompareCoZk2p",
                 params,
                 self.chain_id,
                 100,
@@ -546,25 +659,47 @@ impl ChainClient {
             .await
     }
 
-    /// ed25519-signs the canonical 2-party co-zk settlement message with this
-    /// client's key, returning the 128-char hex signature. The signature
-    /// fields of `params` are ignored (they are not part of the message).
-    pub fn sign_settle_cozk2p(&self, params: &SettleCoZkParams) -> String {
-        self.sign(&settle_cozk2p_message(params))
+    /// ed25519-signs the SettleSmall message with this client's key.
+    pub fn sign_settle_small(&self, params: &SettleSmallParams) -> String {
+        self.sign(&settle_small_message(params))
     }
 
-    /// Submits the jointly generated 2-party co-zk settlement in a single
-    /// writing. `params` must carry both traders' signatures (`sig_a`,
-    /// `sig_b`) and the collaboratively generated proof; either party may
-    /// submit.
-    pub async fn settle_orders_cozk2p(
+    /// ed25519-signs the SettleLarge message with this client's key.
+    pub fn sign_settle_large(&self, params: &SettleLargeParams) -> String {
+        self.sign(&settle_large_message(params))
+    }
+
+    /// Submits BOTH sides' settlements as one atomic `SettlePair` writing —
+    /// either the whole pair settles or nothing does. The two legs' proofs
+    /// and per-leg signatures are exchanged over the settlement channel,
+    /// then either party submits the pair. This is the ONLY settlement
+    /// writing the chain registers (the unilateral variants were removed to
+    /// close the fair-exchange gap).
+    pub async fn settle_pair(
         &self,
-        params: &SettleCoZkParams,
+        params: &SettlePairParams,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.client
+            .write_chain("orderbook", "SettlePair", params, self.chain_id, 100, 0)
+            .await
+    }
+
+    /// ed25519-signs the merged settle message with this client's key.
+    pub fn sign_settle_pair_cozk2p(&self, params: &SettlePairCoZk2pParams) -> String {
+        self.sign(&settle_pair_cozk2p_message(params))
+    }
+
+    /// Submits the MERGED settlement: one collaborative proof for compare
+    /// plus both settle legs, settling a Matched pair in a single writing.
+    /// Either party may submit.
+    pub async fn settle_pair_cozk2p(
+        &self,
+        params: &SettlePairCoZk2pParams,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.client
             .write_chain(
                 "orderbook",
-                "SettleOrdersCoZk2p",
+                "SettlePairCoZk2p",
                 params,
                 self.chain_id,
                 100,
@@ -661,200 +796,160 @@ impl ChainClient {
         Ok(resp.orders.into_iter().map(query_item_to_order).collect())
     }
 
-    /// Gets account details for the given pubkey and token.
-    pub async fn get_account(
-        &self,
-        pubkey: &str,
-        token: &str,
-    ) -> Result<AccountRecord, Box<dyn std::error::Error>> {
-        let params = GetAccountParams {
-            pubkey: pubkey.to_string(),
-            token: token.to_string(),
-        };
-        let value: Value = self
-            .client
-            .read_chain("account", "GetAccount", &params)
-            .await?;
-        let resp: AccountResponse = serde_json::from_value(value)?;
-        Ok(AccountRecord {
-            pubkey: resp.pubkey,
-            token: resp.token,
-            cash: resp
-                .cash
-                .into_iter()
-                .map(|c| CashItem {
-                    id: c.id,
-                    pubkey: c.pubkey,
-                    token: c.token,
-                    amount: c.amount,
-                    zk_proof: c.zk_proof,
-                    status: c.status,
-                    by: c.by,
-                })
-                .collect(),
-        })
-    }
+    // ────────────────────── Shielded pool ──────────────────────
 
-    /// Deposits `plaintext_amount` of `token` into the depositor's account.
-    ///
-    /// Generates a fresh blinding factor for the new Cash and a separate one
-    /// for the (placeholder) bridge commitment, runs rapidsnark to produce the
-    /// deposit proof, sends the writing request to chain, and on success
-    /// appends the new Cash to the local store so the wallet can spend it.
-    ///
-    /// `circuit_handle` carries the compiled `deposit.circom` artifacts;
-    /// `zkey` is the path to the rapidsnark proving key. Both come from a
-    /// `lib_zk::setup::DevSetup` (or a production ceremony output).
-    ///
-    /// Returns `(cash_id, output_random_hex)` so the caller can persist the
-    /// random alongside the cash for future spend operations.
-    pub async fn deposit(
+    /// Submits a NoteDeposit writing: mint one shielded note from a bridged
+    /// value. The caller pre-computes the commitments and proof (see
+    /// `note_prover::prove_note_deposit`) and MUST have durably persisted
+    /// the note's opening before calling (persist-before-publish).
+    pub async fn note_deposit(
         &self,
         token: &str,
-        plaintext_amount: u64,
-        circuit_handle: &zk::test_circuit::TestCircuitHandle,
-        zkey: &std::path::Path,
-    ) -> Result<(String, String), Box<dyn std::error::Error>> {
-        use rand::RngCore;
-
-        let mut output_random = [0u8; 32];
-        let mut r_bridge = [0u8; 32];
-        rand::rng().fill_bytes(&mut output_random);
-        rand::rng().fill_bytes(&mut r_bridge);
-
-        let dp = zk::wallet::prove_deposit(
-            zk::wallet::DepositWitness {
-                deposit_amount: plaintext_amount,
-                r_bridge,
-                output_amount: plaintext_amount,
-                output_random,
-            },
-            circuit_handle,
-            zkey,
-        )?;
-
-        let cash_id =
-            crate::orderbook::compute_cash_id(&self.pubkey_hex, token, &dp.output_commitment_hex);
-
-        let params = DepositParams {
-            pubkey: self.pubkey_hex.clone(),
+        bridge_commitment_hex: &str,
+        output_commitment_hex: &str,
+        bridge_sig_hex: &str,
+        zk_proof_json: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let params = NoteDepositParams {
             token: token.to_string(),
-            bridge_commitment: dp.bridge_commitment_hex,
-            output_commitment: dp.output_commitment_hex,
-            zk_proof: serde_json::to_string(&dp.proof_json)?,
+            bridge_commitment: bridge_commitment_hex.to_string(),
+            output_commitment: output_commitment_hex.to_string(),
+            bridge_sig: bridge_sig_hex.to_string(),
+            zk_proof: zk_proof_json.to_string(),
         };
         self.client
-            .write_chain("account", "Deposit", &params, self.chain_id, 100, 0)
-            .await?;
-
-        Ok((cash_id, hex::encode(output_random)))
+            .write_chain("account", "NoteDeposit", &params, self.chain_id, 100, 0)
+            .await
     }
 
-    /// Withdraws `plaintext_amount` of `token` to the destination chain.
-    /// Spends `input_records` (must total ≥ `plaintext_amount`), generates a
-    /// rapidsnark withdraw proof binding the hidden amount to a fresh
-    /// bridge_out commitment, and submits the writing request.
-    ///
-    /// On success returns `Some((change_cash_id, change_random_hex))` if a
-    /// change Cash was minted, or `None` if the inputs covered the withdraw
-    /// exactly. The caller is responsible for updating the local CashStore.
-    ///
-    /// Errors out (without touching chain) if `input_records` is empty, has
-    /// more than 2 entries (matches the N=2 circuit), or doesn't cover the
-    /// requested amount.
-    pub async fn withdraw(
+    /// Submits a NoteWithdraw writing: spend two note slots, withdraw
+    /// through the bridge, mint the change note. Same persist-before-publish
+    /// obligation for the change note's opening.
+    pub async fn note_withdraw(
         &self,
         token: &str,
-        plaintext_amount: u64,
-        input_records: &[crate::cash_store::CashRecord],
-        circuit_handle: &zk::test_circuit::TestCircuitHandle,
-        zkey: &std::path::Path,
-    ) -> Result<Option<(String, String)>, Box<dyn std::error::Error>> {
-        use rand::RngCore;
+        anchor_hex: &str,
+        nullifiers_hex: [String; 2],
+        bridge_out_commitment_hex: &str,
+        change_commitment_hex: &str,
+        zk_proof_json: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let params = NoteWithdrawParams {
+            token: token.to_string(),
+            anchor: anchor_hex.to_string(),
+            nullifiers: nullifiers_hex.to_vec(),
+            bridge_out_commitment: bridge_out_commitment_hex.to_string(),
+            change_commitment: change_commitment_hex.to_string(),
+            zk_proof: zk_proof_json.to_string(),
+        };
+        self.client
+            .write_chain("account", "NoteWithdraw", &params, self.chain_id, 100, 0)
+            .await
+    }
 
-        if input_records.is_empty() || input_records.len() > 2 {
-            return Err(format!(
-                "withdraw circuit takes 1..=2 inputs, got {}",
-                input_records.len()
+    /// Reads a range of pool leaves (limit 0 = all from `start_index`).
+    pub async fn get_notes(
+        &self,
+        start_index: u64,
+        limit: i64,
+    ) -> Result<NotesResponse, Box<dyn std::error::Error>> {
+        let value: Value = self
+            .client
+            .read_chain(
+                "account",
+                "GetNotes",
+                &serde_json::json!({"start_index": start_index, "limit": limit}),
             )
-            .into());
-        }
-        let input_total: u64 = input_records.iter().map(|r| r.amount).sum();
-        if input_total < plaintext_amount {
-            return Err(format!(
-                "input cash totals {input_total}, need at least {plaintext_amount}"
-            )
-            .into());
-        }
-        let change_amount = input_total - plaintext_amount;
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
 
-        // Decode each record's stored random hex back into 32-byte BE form.
-        let mut inputs_for_witness: Vec<(u64, [u8; 32])> = Vec::with_capacity(input_records.len());
-        for rec in input_records {
-            let raw = hex::decode(&rec.random)?;
-            if raw.len() != 32 {
+    /// Fetches every pool leaf and rebuilds the note tree locally,
+    /// cross-checking the rebuilt root against the chain's reported head.
+    /// The returned tree's `root()` is a valid anchor for new spends and
+    /// `path(i)` yields Merkle paths for the spend circuits.
+    #[cfg(not(target_os = "android"))]
+    pub async fn fetch_note_tree(
+        &self,
+    ) -> Result<crate::note_tree::NoteTree, Box<dyn std::error::Error>> {
+        use crate::note::note_fr_to_hex;
+        use ark_ff::PrimeField;
+
+        let resp = self.get_notes(0, 0).await?;
+        let mut tree = crate::note_tree::NoteTree::new();
+        for leaf in &resp.notes {
+            if leaf.leaf_index != tree.len() {
                 return Err(format!(
-                    "cash {} random must decode to 32 bytes, got {}",
-                    rec.cash_id,
-                    raw.len()
+                    "pool leaves out of order: got index {} at position {}",
+                    leaf.leaf_index,
+                    tree.len()
                 )
                 .into());
             }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&raw);
-            inputs_for_witness.push((rec.amount, arr));
+            let raw = hex::decode(&leaf.cm)?;
+            tree.append(ark_bn254::Fr::from_be_bytes_mod_order(&raw));
         }
+        if tree.len() != resp.leaf_count {
+            return Err(format!(
+                "pool returned {} leaves but reports leaf_count {}",
+                tree.len(),
+                resp.leaf_count
+            )
+            .into());
+        }
+        let root_hex = note_fr_to_hex(&tree.root());
+        if root_hex != resp.latest_root {
+            return Err(format!(
+                "rebuilt tree root {root_hex} does not match the chain head {}",
+                resp.latest_root
+            )
+            .into());
+        }
+        Ok(tree)
+    }
 
-        let mut r_bridge_out = [0u8; 32];
-        let mut change_random = [0u8; 32];
-        rand::rng().fill_bytes(&mut r_bridge_out);
-        rand::rng().fill_bytes(&mut change_random);
-
-        let wp = zk::wallet::prove_withdraw(
-            zk::wallet::WithdrawWitness {
-                withdraw_amount: plaintext_amount,
-                r_bridge_out,
-                inputs: inputs_for_witness,
-                change_amount,
-                change_random,
-            },
-            circuit_handle,
-            zkey,
-        )?;
-
-        // Always M=2 outputs: slot[0] = change (or zero pad if no change),
-        // slot[1] = zero pad. The chain detects "no change" by comparing
-        // slot[0] against the well-known PoseidonZeroCommitmentHex constant.
-        let zero_commitment_hex =
-            zk::wallet::fr_to_hex(&zk::wallet::poseidon_commit(0, &[0u8; 32]));
-        let output_commitments = vec![
-            wp.change_commitment_hex.clone(),
-            zero_commitment_hex.clone(),
-        ];
-
-        let params = WithdrawParams {
-            pubkey: self.pubkey_hex.clone(),
-            token: token.to_string(),
-            inputs: input_records.iter().map(|r| r.cash_id.clone()).collect(),
-            bridge_out_commitment: wp.bridge_out_commitment_hex,
-            output_commitments,
-            change_pubkey: String::new(), // chain defaults to req.Pubkey
-            zk_proof: serde_json::to_string(&wp.proof_json)?,
-        };
-        self.client
-            .write_chain("account", "Withdraw", &params, self.chain_id, 100, 0)
+    /// Reads the pool's current leaf count and root.
+    pub async fn get_pool_info(&self) -> Result<PoolInfoResponse, Box<dyn std::error::Error>> {
+        let value: Value = self
+            .client
+            .read_chain("account", "GetPoolInfo", &serde_json::json!({}))
             .await?;
+        Ok(serde_json::from_value(value)?)
+    }
 
-        if change_amount == 0 {
-            Ok(None)
-        } else {
-            let change_cash_id = crate::orderbook::compute_cash_id(
-                &self.pubkey_hex,
-                token,
-                &wp.change_commitment_hex,
-            );
-            Ok(Some((change_cash_id, hex::encode(change_random))))
+    /// Reads spent-ness for each queried nullifier.
+    pub async fn get_nullifiers(
+        &self,
+        nullifiers: &[String],
+    ) -> Result<Vec<bool>, Box<dyn std::error::Error>> {
+        let value: Value = self
+            .client
+            .read_chain(
+                "account",
+                "GetNullifiers",
+                &serde_json::json!({"nullifiers": nullifiers}),
+            )
+            .await?;
+        #[derive(Deserialize)]
+        struct Resp {
+            spent: Vec<bool>,
         }
+        let resp: Resp = serde_json::from_value(value)?;
+        Ok(resp.spent)
+    }
+
+    /// Looks up a commitment's leaf index (recovery flows; -1 = absent).
+    pub async fn get_note_by_cm(&self, cm_hex: &str) -> Result<i64, Box<dyn std::error::Error>> {
+        let value: Value = self
+            .client
+            .read_chain("account", "GetNoteByCm", &serde_json::json!({"cm": cm_hex}))
+            .await?;
+        #[derive(Deserialize)]
+        struct Resp {
+            leaf_index: i64,
+        }
+        let resp: Resp = serde_json::from_value(value)?;
+        Ok(resp.leaf_index)
     }
 
     /// Subscribe to on-chain order events via WebSocket.
@@ -971,14 +1066,13 @@ fn query_item_to_order(item: QueryOrderItem) -> Order {
             token2: item.subject.token2,
         },
         price: item.price,
-        amount: item.amount,
         pubkey: item.pubkey,
-        input_cash_ids: item.input_cash_ids,
-        handling_fee: item.handling_fee,
+        locked_commitment: item.locked_commitment,
+        fee: item.fee,
         block_height: item.block_height,
+        intra_block_index: item.intra_block_index,
         status,
         match_order: item.match_order,
-        is_smaller: item.is_smaller,
     }
 }
 
@@ -988,105 +1082,284 @@ mod tests {
 
     /// Builds a SettleCoZkParams with the given `cmp` and six distinct dummy
     /// 64-char commitments; signature and proof fields are left empty.
-    fn test_params(cmp: i8) -> SettleCoZkParams {
-        SettleCoZkParams {
+    fn test_params(cmp: i8) -> CompareParams {
+        CompareParams {
             order_a_id: "order-a-id".to_string(),
             order_b_id: "order-b-id".to_string(),
             cmp,
-            new_order_a_commitment: "11".repeat(32),
-            new_order_b_commitment: "22".repeat(32),
-            new_locked_a_commitment: "33".repeat(32),
-            new_locked_b_commitment: "44".repeat(32),
-            recv_a_commitment: "55".repeat(32),
-            recv_b_commitment: "66".repeat(32),
             sig_a: String::new(),
             sig_b: String::new(),
             zk_proof: String::new(),
         }
     }
 
-    /// Byte-lockstep check against a hand-concatenated 2p message for every
-    /// `cmp` sign; `cmp_str` is written out explicitly to mirror Go's
-    /// `strconv.Itoa` rendering rather than reusing Rust formatting.
+    /// Byte-lockstep check against a hand-concatenated 2p compare message
+    /// for every `cmp` sign; `cmp_str` mirrors Go's `strconv.Itoa`.
     #[test]
-    fn settle_cozk2p_message_lockstep() {
+    fn compare_cozk2p_message_lockstep() {
         for (cmp, cmp_str) in [(-1i8, "-1"), (0i8, "0"), (1i8, "1")] {
             let p = test_params(cmp);
-            let expected = String::from("invisibook-cozk2p-settle:")
+            let expected = String::from("invisibook-cozk2p-compare-v2:")
                 + &p.order_a_id
                 + ":"
                 + &p.order_b_id
                 + ":"
-                + cmp_str
-                + ":"
-                + &p.new_order_a_commitment
-                + ":"
-                + &p.new_order_b_commitment
-                + ":"
-                + &p.new_locked_a_commitment
-                + ":"
-                + &p.new_locked_b_commitment
-                + ":"
-                + &p.recv_a_commitment
-                + ":"
-                + &p.recv_b_commitment;
-            assert_eq!(settle_cozk2p_message(&p), expected.into_bytes());
+                + cmp_str;
+            assert_eq!(compare_cozk2p_message(&p), expected.into_bytes());
         }
     }
 
-    /// The 3-party builder must keep its original prefix (domain separation).
     #[test]
-    fn settle_cozk_message_keeps_3p_prefix() {
+    fn compare_messages_are_domain_separated() {
         let p = test_params(1);
-        let msg = settle_cozk_message(&p);
-        assert!(msg.starts_with(b"invisibook-cozk-settle:"));
-        assert!(!msg.starts_with(b"invisibook-cozk2p-settle:"));
+        assert_ne!(compare_cozk_message(&p), compare_cozk2p_message(&p));
     }
 
-    /// sign_settle_cozk2p output must verify under verify_settle_cozk2p_sig,
-    /// and any tampering (signature bit-flip, different params, wrong domain,
-    /// malformed inputs) must fail verification without panicking.
+    /// The settle signing messages are length-prefixed and domain-separated
+    /// (lockstep with Go core.settleSigMessage: u32-BE length per field).
     #[test]
-    fn sign_verify_settle_cozk2p_roundtrip() {
+    fn settle_messages_lockstep() {
+        let small = SettleSmallParams {
+            order_id: "order-b-id".into(),
+            match_order_id: "order-a-id".into(),
+            cm_note_out: "77".repeat(32),
+            signature: String::new(),
+            zk_proof: String::new(),
+        };
+        let msg = settle_small_message(&small);
+        let mut expected = Vec::new();
+        for f in [
+            "invisibook-settle-small-v1",
+            "order-b-id",
+            "order-a-id",
+            &"77".repeat(32),
+        ] {
+            expected.extend_from_slice(&(f.len() as u32).to_be_bytes());
+            expected.extend_from_slice(f.as_bytes());
+        }
+        assert_eq!(msg, expected);
+
+        let large = SettleLargeParams {
+            order_id: "order-a-id".into(),
+            match_order_id: "order-b-id".into(),
+            cm_locked_residual: "99".repeat(32),
+            cm_note_out: "aa".repeat(32),
+            signature: String::new(),
+            zk_proof: String::new(),
+        };
+        assert_ne!(settle_large_message(&large), settle_small_message(&small));
+    }
+
+    /// The merged settle message is length-prefixed, covers every output
+    /// commitment, and is domain-separated from the other settle messages
+    /// (lockstep with Go core.SettlePairCoZk2pMessage).
+    #[test]
+    fn settle_pair_cozk2p_message_lockstep() {
+        let p = SettlePairCoZk2pParams {
+            order_a_id: "order-a-id".into(),
+            order_b_id: "order-b-id".into(),
+            cmp: -1,
+            cm_note_out_a: "11".repeat(32),
+            cm_note_out_b: "22".repeat(32),
+            cm_locked_residual_a: "44".repeat(32),
+            cm_locked_residual_b: "66".repeat(32),
+            sig_a: String::new(),
+            sig_b: String::new(),
+            zk_proof: String::new(),
+        };
+        let msg = settle_pair_cozk2p_message(&p);
+        let mut expected = Vec::new();
+        for f in [
+            "invisibook-settle-pair-cozk2p-v1",
+            "order-a-id",
+            "order-b-id",
+            "-1",
+            &"11".repeat(32),
+            &"22".repeat(32),
+            &"44".repeat(32),
+            &"66".repeat(32),
+        ] {
+            expected.extend_from_slice(&(f.len() as u32).to_be_bytes());
+            expected.extend_from_slice(f.as_bytes());
+        }
+        assert_eq!(msg, expected);
+
+        // Signature round-trip through the verify helper.
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let sig = hex::encode(sk.sign(&msg).to_bytes());
+        let pk = hex::encode(sk.verifying_key().to_bytes());
+        assert!(verify_settle_pair_cozk2p_sig(&p, &pk, &sig));
+        let mut tampered = p.clone();
+        tampered.cmp = 1;
+        assert!(!verify_settle_pair_cozk2p_sig(&tampered, &pk, &sig));
+    }
+
+    /// SettlePair wire JSON must match the Go request: a fully filled leg
+    /// omits the residual field (Go `omitempty`), a larger leg includes
+    /// it, and the field names line up with the Go json tags.
+    #[test]
+    fn settle_pair_leg_json_lockstep() {
+        let small = SettlePairLegParams::small("11".repeat(32), "sig-b".into(), "pf".into());
+        let sj = serde_json::to_value(&small).unwrap();
+        assert!(
+            sj.get("cm_locked_residual").is_none(),
+            "small leg must omit residual collateral"
+        );
+        assert_eq!(sj["cm_note_out"], "11".repeat(32));
+
+        let large = SettlePairLegParams::large(
+            "22".repeat(32),
+            "44".repeat(32),
+            "sig-a".into(),
+            "pf".into(),
+        );
+        let lj = serde_json::to_value(&large).unwrap();
+        assert_eq!(lj["cm_locked_residual"], "44".repeat(32));
+
+        let pair = SettlePairParams {
+            order_a_id: "order-a".into(),
+            order_b_id: "order-b".into(),
+            a: large,
+            b: small,
+        };
+        let pj = serde_json::to_value(&pair).unwrap();
+        assert_eq!(pj["order_a_id"], "order-a");
+        assert_eq!(pj["order_b_id"], "order-b");
+        assert!(pj.get("a").is_some() && pj.get("b").is_some());
+    }
+
+    /// sign_compare_cozk2p output must verify under verify_compare_cozk2p_sig,
+    /// and any tampering must fail verification without panicking.
+    #[test]
+    fn sign_verify_compare_cozk2p_roundtrip() {
         let seed = [7u8; 32];
         let client = ChainClient::new("http://localhost:7999", "ws://localhost:8999", seed, 1926);
         let params = test_params(1);
 
-        let sig = client.sign_settle_cozk2p(&params);
-        assert!(verify_settle_cozk2p_sig(&params, client.pubkey_hex(), &sig));
+        let sig = client.sign_compare_cozk2p(&params);
+        assert!(verify_compare_cozk2p_sig(
+            &params,
+            client.pubkey_hex(),
+            &sig
+        ));
 
-        // Flipping one bit of the signature must break verification.
         let mut bad_sig = hex::decode(&sig).unwrap();
         bad_sig[0] ^= 0x01;
-        assert!(!verify_settle_cozk2p_sig(
+        assert!(!verify_compare_cozk2p_sig(
             &params,
             client.pubkey_hex(),
             &hex::encode(bad_sig)
         ));
 
-        // A signature over different params must not verify.
         let other = test_params(-1);
-        assert!(!verify_settle_cozk2p_sig(&other, client.pubkey_hex(), &sig));
+        assert!(!verify_compare_cozk2p_sig(
+            &other,
+            client.pubkey_hex(),
+            &sig
+        ));
 
-        // A 3-party signature must not verify in the 2-party domain.
-        let sig_3p = client.sign_settle_cozk(&params);
-        assert!(!verify_settle_cozk2p_sig(
+        // A Groth16-domain signature must not verify in the 2p domain.
+        let sig_3p = client.sign(&compare_cozk_message(&params));
+        assert!(!verify_compare_cozk2p_sig(
             &params,
             client.pubkey_hex(),
             &sig_3p
         ));
 
-        // Malformed inputs must return false, not panic.
-        assert!(!verify_settle_cozk2p_sig(&params, "zz", &sig));
-        assert!(!verify_settle_cozk2p_sig(
+        assert!(!verify_compare_cozk2p_sig(&params, "zz", &sig));
+        assert!(!verify_compare_cozk2p_sig(
             &params,
             client.pubkey_hex(),
             "zz"
         ));
-        assert!(!verify_settle_cozk2p_sig(
-            &params,
-            client.pubkey_hex(),
-            "deadbeef"
+    }
+
+    /// P1-7 regression: transport-shaped failures classify as Uncertain
+    /// (records must be kept), completed-exchange refusals as Rejected,
+    /// and UNKNOWN messages default to Uncertain (fail-safe).
+    #[test]
+    fn submit_error_classification_is_conservative() {
+        let uncertain = [
+            "operation timed out",
+            "error sending request for url (http://x): connection refused",
+            "Connection reset by peer",
+            "unexpected EOF during handshake",
+            "request timeout after 30s",
+        ];
+        for msg in uncertain {
+            assert!(
+                matches!(classify_submit_error(msg), SubmitError::Uncertain(_)),
+                "{msg:?} must classify as Uncertain"
+            );
+        }
+        let rejected = [
+            "writing failed (400): duplicate nullifier in request",
+            "bad request: signature verification failed",
+            "invalid pubkey: must be 32-byte ed25519 key",
+        ];
+        for msg in rejected {
+            assert!(
+                matches!(classify_submit_error(msg), SubmitError::Rejected(_)),
+                "{msg:?} must classify as Rejected"
+            );
+        }
+        // Unknown shapes NEVER roll back wallet records.
+        assert!(matches!(
+            classify_submit_error("some completely novel failure"),
+            SubmitError::Uncertain(_)
         ));
+    }
+
+    fn full_send_order_params() -> SendOrderParams {
+        SendOrderParams {
+            id: "order-1".to_string(),
+            trade_type: 0,
+            subject: TradePairJson {
+                token1: "ETH".to_string(),
+                token2: "USDT".to_string(),
+            },
+            price: Some(3500),
+            pubkey: "alice-pk".to_string(),
+            signature: String::new(),
+            anchor: "b".repeat(64),
+            input_nullifiers: vec!["c".repeat(64), "d".repeat(64)],
+            locked_commitment: "e".repeat(64),
+            fee: 7,
+            change_commitment: "f".repeat(64),
+            zk_proof: String::new(),
+        }
+    }
+
+    /// Byte-lockstep with Go core.SendOrderSigningMessage (v2): the frozen
+    /// vector below was recomputed from the shared layout and the Go test
+    /// asserts the identical bytes.
+    #[test]
+    fn send_order_signing_message_lockstep_vectors() {
+        let want = "00000018696e76697369626f6f6b2d73656e642d6f726465722d7632000000076f726465722d310000000130000000034554480000000455534454000000043335303000000008616c6963652d706b00000040626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262620000004063636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363000000406464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646400000040656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565650000000800000000000000070000004066666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666";
+        assert_eq!(
+            hex::encode(send_order_signing_message(&full_send_order_params())),
+            want
+        );
+    }
+
+    /// The signature and zk proof are excluded from the message; every
+    /// order-defining field changes it.
+    #[test]
+    fn send_order_signing_message_field_coverage() {
+        let base = send_order_signing_message(&full_send_order_params());
+
+        let mut signed = full_send_order_params();
+        signed.signature = "ff".repeat(64);
+        signed.zk_proof = "proof".to_string();
+        assert_eq!(send_order_signing_message(&signed), base);
+
+        let mut priced = full_send_order_params();
+        priced.price = Some(1);
+        assert_ne!(send_order_signing_message(&priced), base);
+
+        let mut refeed = full_send_order_params();
+        refeed.fee = 999_999;
+        assert_ne!(send_order_signing_message(&refeed), base);
     }
 }

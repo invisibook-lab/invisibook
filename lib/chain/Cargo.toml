@@ -25,3 +25,4 @@ futures-util = "0.3"
 zk = { path = "../zk" }
 ark-bn254 = "0.5"
 ark-ff = "0.5"
+anyhow = "1"

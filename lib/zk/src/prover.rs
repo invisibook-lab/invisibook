@@ -71,301 +71,38 @@ mod tests {
     use crate::{
         setup::dev_setup_snarkjs,
         test_circuit::TestCircuitHandle,
-        wallet::{
-            DepositWitness, SettleCoZkSide, SettleCoZkWitness, SettleLargerWitness,
-            SettleSmallerWitness, SplitWitness, WithdrawWitness, fr_to_hex, poseidon_commit,
-            prove_deposit, prove_settle_cozk, prove_settle_larger, prove_settle_smaller,
-            prove_split, prove_withdraw,
-        },
+        wallet::{SettleCmpWitness, fr_to_hex, poseidon_commit, prove_settle_cmp},
     };
 
     #[test]
-    fn deposit_proof_round_trips_through_rapidsnark() {
-        let setup = dev_setup_snarkjs("deposit").expect("snarkjs setup");
-        let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir).expect("circuit handle");
-        let witness = DepositWitness {
-            deposit_amount: 150,
-            r_bridge: [0x11u8; 32],
-            output_amount: 150,
-            output_random: [0x22u8; 32],
-        };
-        let dp = prove_deposit(witness, &handle, &setup.zkey).expect("rapidsnark prove");
-
-        // proof.json must carry the standard snarkjs envelope so go-rapidsnark accepts it.
-        // (rapidsnark omits the `curve` field that snarkjs emits — go-rapidsnark only
-        // needs `curve` on the VK, so this is fine as-is.)
-        assert_eq!(dp.proof_json["protocol"], "groth16");
-        assert!(dp.proof_json["pi_a"].is_array());
-        assert!(dp.proof_json["pi_b"].is_array());
-        assert!(dp.proof_json["pi_c"].is_array());
-
-        // public.json is an ordered array of decimal strings — one per public signal.
-        // deposit.circom declares `public [bridge_commitment, output_hashes]` so we
-        // expect exactly 3 entries (1 + M=2 outputs).
-        let public = dp.public_json.as_array().expect("public is array");
-        assert_eq!(public.len(), 3);
-
-        // Sanity: the off-circuit commitments echoed by prove_deposit must match
-        // recomputing them — chain re-derives these to assemble the public-input vector.
-        assert_eq!(
-            dp.bridge_commitment_hex,
-            fr_to_hex(&poseidon_commit(150, &[0x11u8; 32]))
-        );
-        assert_eq!(
-            dp.output_commitment_hex,
-            fr_to_hex(&poseidon_commit(150, &[0x22u8; 32]))
-        );
-    }
-
-    #[test]
-    fn withdraw_proof_round_trips_through_rapidsnark() {
-        // Spend two cashes (70 + 40 = 110); withdraw 100 (hidden); mint 10 as change.
-        let setup = dev_setup_snarkjs("withdraw").expect("snarkjs setup");
-        let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir).expect("circuit handle");
-        let in_a_random = [0xA1u8; 32];
-        let in_b_random = [0xB2u8; 32];
-        let witness = WithdrawWitness {
-            withdraw_amount: 100,
-            r_bridge_out: [0x11u8; 32],
-            inputs: vec![(70, in_a_random), (40, in_b_random)],
-            change_amount: 10,
-            change_random: [0xC3u8; 32],
-        };
-        let wp = prove_withdraw(witness, &handle, &setup.zkey).expect("rapidsnark prove");
-
-        // proof.json envelope
-        assert_eq!(wp.proof_json["protocol"], "groth16");
-
-        // public.json layout: [bridge_out_commitment, input_hashes[0..N], output_hashes[0..M]]
-        let public = wp.public_json.as_array().expect("public is array");
-        assert_eq!(public.len(), 1 + 2 + 2);
-
-        // Real input commitments echoed in unpadded order
-        assert_eq!(wp.input_commitments_hex.len(), 2);
-        assert_eq!(
-            wp.input_commitments_hex[0],
-            fr_to_hex(&poseidon_commit(70, &in_a_random))
-        );
-        assert_eq!(
-            wp.input_commitments_hex[1],
-            fr_to_hex(&poseidon_commit(40, &in_b_random))
-        );
-
-        // Bridge + change commitments match an off-circuit recomputation
-        assert_eq!(
-            wp.bridge_out_commitment_hex,
-            fr_to_hex(&poseidon_commit(100, &[0x11u8; 32]))
-        );
-        assert_eq!(
-            wp.change_commitment_hex,
-            fr_to_hex(&poseidon_commit(10, &[0xC3u8; 32]))
-        );
-    }
-
-    #[test]
-    fn split_proof_round_trips_through_rapidsnark() {
-        // Spend one 100-cash, lock 60 + return 40 change — the most common SendOrder
-        // split. Mirrors how the wallet uses it when collateralizing a partial trade.
-        let setup = dev_setup_snarkjs("split").expect("snarkjs setup");
-        let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir).expect("circuit handle");
-        let in_random = [0xE5u8; 32];
-        let locked_random = [0xF6u8; 32];
-        let change_random = [0xC7u8; 32];
-        let witness = SplitWitness {
-            inputs: vec![(100, in_random)],
-            locked_amount: 60,
-            locked_random,
-            change_amount: 40,
-            change_random,
-        };
-        let sp = prove_split(witness, &handle, &setup.zkey).expect("rapidsnark prove");
-
-        assert_eq!(sp.proof_json["protocol"], "groth16");
-        // public.json layout: [input_hashes[0..N], output_hashes[0..M]] = 2 + 2 = 4
-        let public = sp.public_json.as_array().expect("public is array");
-        assert_eq!(public.len(), 4);
-
-        assert_eq!(sp.input_commitments_hex.len(), 1);
-        assert_eq!(
-            sp.input_commitments_hex[0],
-            fr_to_hex(&poseidon_commit(100, &in_random))
-        );
-        assert_eq!(
-            sp.locked_commitment_hex,
-            fr_to_hex(&poseidon_commit(60, &locked_random))
-        );
-        assert_eq!(
-            sp.change_commitment_hex,
-            fr_to_hex(&poseidon_commit(40, &change_random))
-        );
-    }
-
-    #[test]
-    fn split_proof_supports_exact_lock_no_change() {
-        // Lock the entire 100-cash, no change — change_amount=0 + change_random=0
-        // makes output[1] collapse to the constant zero-pad commitment chain
-        // detects via PoseidonZeroCommitmentHex.
-        let setup = dev_setup_snarkjs("split").expect("snarkjs setup");
-        let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir).expect("circuit handle");
-        let witness = SplitWitness {
-            inputs: vec![(100, [0xA1u8; 32])],
-            locked_amount: 100,
-            locked_random: [0xB2u8; 32],
-            change_amount: 0,
-            change_random: [0u8; 32],
-        };
-        let sp = prove_split(witness, &handle, &setup.zkey).expect("exact-lock split");
-        // Without explicit change, the change commitment should equal Poseidon(0,0).
-        assert_eq!(
-            sp.change_commitment_hex,
-            fr_to_hex(&poseidon_commit(0, &[0u8; 32]))
-        );
-    }
-
-    #[test]
-    fn settle_larger_proof_round_trips_through_rapidsnark() {
-        // Alice locked 80 ETH (Token1 sender), trade fills 60, change=20.
-        // Counterparty (bob) sends 60 USDT back (other_fill, price=1).
-        let setup = dev_setup_snarkjs("settle_larger").expect("snarkjs setup");
-        let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir).expect("circuit handle");
-        let in_random = [0xA1u8; 32];
-        let r_my = [0x01u8; 32];
-        let r_other = [0x02u8; 32];
-        let change_random = [0xC3u8; 32];
-        // Counterparty's recv commitment hex — bob computes Poseidon(60_USDT, his_random)
-        // and gives it to alice. We just synthesize one for the round-trip.
-        let bob_recv_random = [0xB0u8; 32];
-        let bob_recv_commit_hex = fr_to_hex(&poseidon_commit(60, &bob_recv_random));
-        let witness = SettleLargerWitness {
-            r_my,
-            other_fill: 60,
-            r_other,
-            price: 1,
-            is_token2_sender: false,
-            inputs: vec![(80, in_random)],
-            change_amount: 20,
-            change_random,
-            counterparty_recv_commitment_hex: bob_recv_commit_hex.clone(),
-        };
-        let sp = prove_settle_larger(witness, &handle, &setup.zkey)
-            .expect("rapidsnark prove settle_larger");
-
-        assert_eq!(sp.proof_json["protocol"], "groth16");
-        // public.json layout: [my_match, other_match, price, is_token2_sender,
-        //                      input_hashes[0], input_hashes[1], change, recv]
-        let public = sp.public_json.as_array().expect("public is array");
-        assert_eq!(public.len(), 8);
-
-        // commitments echoed match recomputing them off-circuit
-        assert_eq!(
-            sp.my_match_commitment_hex,
-            fr_to_hex(&poseidon_commit(60, &r_my))
-        );
-        assert_eq!(
-            sp.other_match_commitment_hex,
-            fr_to_hex(&poseidon_commit(60, &r_other))
-        );
-        assert_eq!(
-            sp.change_commitment_hex,
-            fr_to_hex(&poseidon_commit(20, &change_random))
-        );
-    }
-
-    #[test]
-    fn settle_smaller_proof_round_trips_through_rapidsnark() {
-        // Bob locked exactly 60 USDT (Token2 sender), no change. fill = inputs.sum.
-        let setup = dev_setup_snarkjs("settle_smaller").expect("snarkjs setup");
-        let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir).expect("circuit handle");
-        let in_random = [0xB2u8; 32];
-        let r_match = [0x02u8; 32];
-        // alice's recv commitment hex — she computes Poseidon(60_ETH, her_random) and gives it.
-        let alice_recv_random = [0xA0u8; 32];
-        let alice_recv_commit_hex = fr_to_hex(&poseidon_commit(60, &alice_recv_random));
-        let witness = SettleSmallerWitness {
-            r_match,
-            inputs: vec![(60, in_random)],
-            counterparty_recv_commitment_hex: alice_recv_commit_hex.clone(),
-        };
-        let sp = prove_settle_smaller(witness, &handle, &setup.zkey)
-            .expect("rapidsnark prove settle_smaller");
-
-        // public.json: [match_commitment, input_hashes[0], input_hashes[1], recv]
-        let public = sp.public_json.as_array().expect("public is array");
-        assert_eq!(public.len(), 4);
-        assert_eq!(
-            sp.match_commitment_hex,
-            fr_to_hex(&poseidon_commit(60, &r_match))
-        );
-    }
-
-    #[test]
-    fn settle_cozk_proof_round_trips_through_rapidsnark() {
-        // A (maker) sells 80 token1 at price 3, B buys 60 → cmp = 1, A keeps 20.
-        // The single-prover baseline path; the collaborative flow in lib/cozk
-        // must produce a proof over the identical 15-signal public vector.
+    fn settle_cmp_proof_round_trips_through_rapidsnark() {
+        // A sells 80, B buys 60 at price 3 → cmp = 1.
+        // Publics: [cmp, locked_a, locked_b, price, a_is_seller].
         let setup = dev_setup_snarkjs("settle_cozk").expect("snarkjs setup");
         let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir).expect("circuit handle");
-        let witness = SettleCoZkWitness {
-            a: SettleCoZkSide {
-                order_amount: 80,
-                r_order: [0xA1u8; 32],
-                r_order_new: [0xA2u8; 32],
-                locked: vec![(80, [0xA3u8; 32])],
-                r_locked_new: [0xA4u8; 32],
-                r_recv: [0xA5u8; 32],
-            },
-            b: SettleCoZkSide {
-                order_amount: 60,
-                r_order: [0xB1u8; 32],
-                r_order_new: [0xB2u8; 32],
-                locked: vec![(180, [0xB3u8; 32])],
-                r_locked_new: [0xB4u8; 32],
-                r_recv: [0xB5u8; 32],
-            },
+        let witness = SettleCmpWitness {
+            a: 80,
+            r_a: [0xA1u8; 32],
+            b: 60,
+            r_b: [0xB1u8; 32],
             price: 3,
             a_is_seller: true,
         };
-        let sp = prove_settle_cozk(&witness, &handle, &setup.zkey)
-            .expect("rapidsnark prove settle_cozk");
+        let sp =
+            prove_settle_cmp(&witness, &handle, &setup.zkey).expect("rapidsnark prove settle_cmp");
 
         assert_eq!(sp.proof_json["protocol"], "groth16");
         let public = sp.public_json.as_array().expect("public is array");
-        assert_eq!(public.len(), 15);
+        assert_eq!(public.len(), 5);
         assert_eq!(sp.cmp, 1);
-        // A keeps 20 on the book; B's remainder commitments commit to zero.
+        // A (seller) locks q = 80; B (buyer) locks q·price = 180.
         assert_eq!(
-            sp.new_order_a_commitment_hex,
-            fr_to_hex(&poseidon_commit(20, &[0xA2u8; 32]))
+            sp.locked_a_hex,
+            fr_to_hex(&poseidon_commit(80, &[0xA1u8; 32]))
         );
         assert_eq!(
-            sp.new_order_b_commitment_hex,
-            fr_to_hex(&poseidon_commit(0, &[0xB2u8; 32]))
+            sp.locked_b_hex,
+            fr_to_hex(&poseidon_commit(180, &[0xB1u8; 32]))
         );
-        // A (seller) receives the token2 leg 60*3, B receives 60 token1.
-        assert_eq!(
-            sp.recv_a_commitment_hex,
-            fr_to_hex(&poseidon_commit(180, &[0xA5u8; 32]))
-        );
-        assert_eq!(
-            sp.recv_b_commitment_hex,
-            fr_to_hex(&poseidon_commit(60, &[0xB5u8; 32]))
-        );
-    }
-
-    #[test]
-    fn withdraw_proof_supports_single_input() {
-        // One 100-cash spent, no change — exercises the N-padding path.
-        let setup = dev_setup_snarkjs("withdraw").expect("snarkjs setup");
-        let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir).expect("circuit handle");
-        let only_input = [0xD4u8; 32];
-        let witness = WithdrawWitness {
-            withdraw_amount: 100,
-            r_bridge_out: [0x33u8; 32],
-            inputs: vec![(100, only_input)],
-            change_amount: 0,
-            change_random: [0u8; 32],
-        };
-        let wp = prove_withdraw(witness, &handle, &setup.zkey).expect("single-input withdraw");
-        assert_eq!(wp.input_commitments_hex.len(), 1);
     }
 }

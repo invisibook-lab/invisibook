@@ -5,7 +5,7 @@
 //! with the ark-compressed proof and verifying key bytes. Reusing the serde
 //! layer (instead of a hand-rolled binary layout) keeps the Go side free of
 //! field-element encoding concerns and reuses `SettlePublic::to_vec`'s
-//! canonical ordering — the single source of truth for the 15 signals.
+//! canonical ordering — the single source of truth for the 5 signals.
 //!
 //! Build as a staticlib (`cargo build --release --lib`) and link from Go
 //! with `-tags cozk2p` (see `chain/core/plonkverify_cgo.go`).
@@ -16,7 +16,10 @@ use ark_bn254::Bn254;
 use ark_serialize::CanonicalDeserialize;
 use mpc_plonk::proof_system::structs::{Proof, VerifyingKey};
 
-use crate::{prove::verify_settle, relation::SettlePublic};
+use crate::{
+    prove::verify_settle, prove_pair::verify_settle_pair, relation::SettlePublic,
+    relation_pair::PairPublic,
+};
 
 /// Return codes of [`cozk2p_verify_settle`].
 pub const VERIFY_OK: i32 = 0;
@@ -87,6 +90,66 @@ pub unsafe extern "C" fn cozk2p_verify_settle(
             Err(e) => return (VERIFY_BAD_INPUT, format!("parsing proof: {e}")),
         };
         match verify_settle(&vk, &public, &proof) {
+            Ok(()) => (VERIFY_OK, String::new()),
+            Err(e) => (VERIFY_REJECTED, e.to_string()),
+        }
+    });
+    match result {
+        Ok((code, msg)) => {
+            if code != VERIFY_OK {
+                write_err(err_ptr, err_cap, &msg);
+            }
+            code
+        }
+        Err(_) => {
+            write_err(err_ptr, err_cap, "verifier panicked");
+            VERIFY_PANIC
+        }
+    }
+}
+
+/// Verify a MERGED 2-party collaborative settlement proof (compare + both
+/// settlement legs in one statement). Same contract as
+/// [`cozk2p_verify_settle`], but `public_json` is the 15-signal
+/// `PairPublic` JSON and `vk` is the `settle_pair_cozk2p_vk.bin` artifact.
+///
+/// # Safety
+/// All pointers must reference valid readable (writable for `err_ptr`)
+/// memory of the stated lengths for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cozk2p_verify_settle_pair(
+    vk_ptr: *const u8,
+    vk_len: usize,
+    public_json_ptr: *const u8,
+    public_json_len: usize,
+    proof_ptr: *const u8,
+    proof_len: usize,
+    err_ptr: *mut u8,
+    err_cap: usize,
+) -> i32 {
+    if vk_ptr.is_null() || public_json_ptr.is_null() || proof_ptr.is_null() {
+        write_err(err_ptr, err_cap, "null input pointer");
+        return VERIFY_BAD_INPUT;
+    }
+    let vk_bytes = unsafe { slice::from_raw_parts(vk_ptr, vk_len) };
+    let public_bytes = unsafe { slice::from_raw_parts(public_json_ptr, public_json_len) };
+    let proof_bytes = unsafe { slice::from_raw_parts(proof_ptr, proof_len) };
+
+    // Never unwind across the FFI boundary — Go's linker aborts the process.
+    let result = catch_unwind(|| {
+        let vk = match VerifyingKey::<Bn254>::deserialize_compressed(vk_bytes) {
+            Ok(vk) => vk,
+            Err(e) => return (VERIFY_BAD_INPUT, format!("parsing verifying key: {e}")),
+        };
+        let public: PairPublic = match serde_json::from_slice(public_bytes) {
+            Ok(p) => p,
+            Err(e) => return (VERIFY_BAD_INPUT, format!("parsing public statement: {e}")),
+        };
+        let proof = match Proof::<Bn254>::deserialize_compressed(proof_bytes) {
+            Ok(p) => p,
+            Err(e) => return (VERIFY_BAD_INPUT, format!("parsing proof: {e}")),
+        };
+        match verify_settle_pair(&vk, &public, &proof) {
             Ok(()) => (VERIFY_OK, String::new()),
             Err(e) => (VERIFY_REJECTED, e.to_string()),
         }

@@ -1,0 +1,46 @@
+{
+  "baseline_single_prover": {
+    "prove_ms": [
+      261.594251,
+      273.173853,
+      255.808889
+    ],
+    "verify_ms": [
+      5.40344,
+      5.511413,
+      5.445977
+    ]
+  },
+  "bench_process_peak_rss_bytes": 3686596608,
+  "circuit_gates": 2048,
+  "cozk2p_mock_inprocess": [
+    {
+      "build_ms": 11.137497,
+      "open_ms": 1832.070088,
+      "prove_ms": 785.1471789999999,
+      "session_overhead_ms": 19.522605000000112,
+      "total_ms": 2647.8773690000003
+    },
+    {
+      "build_ms": 18.685319,
+      "open_ms": 1779.10743,
+      "prove_ms": 888.421735,
+      "session_overhead_ms": 17.70819799999981,
+      "total_ms": 2703.922682
+    },
+    {
+      "build_ms": 17.494483000000002,
+      "open_ms": 2056.798954,
+      "prove_ms": 825.015605,
+      "session_overhead_ms": 17.565927000000556,
+      "total_ms": 2916.8749690000004
+    }
+  ],
+  "cozk2p_quic_2process": [],
+  "proof_size_bytes": {
+    "compressed": 769,
+    "uncompressed": 1185
+  },
+  "public_signals": 15,
+  "vk_size_bytes_compressed": 938
+}

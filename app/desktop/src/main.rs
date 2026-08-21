@@ -11,10 +11,12 @@ use futures_util::StreamExt;
 
 use hex;
 use invisibook_lib::{
-    cash_store::{CashRecord, CashStore},
     chain::{ChainClient, OrderEvent},
     config::ClientConfig,
-    hd, orderbook,
+    hd,
+    note_store::{NOTE_PENDING_MINT, NOTE_PENDING_SPEND, NOTE_SPENT, NOTE_UNSPENT, NoteStore},
+    order_store::{OrderOpening, OrderStore},
+    orderbook,
     types::*,
 };
 use invisibook_ui::{
@@ -36,6 +38,172 @@ fn main() {
                 .with_disable_context_menu(true),
         )
         .launch(App);
+}
+
+/// Consecutive polls an uncertain submission may stay invisible on chain
+/// before the reconciler rolls its records back (~5 × 3 s ≈ 15 s, several
+/// blocks past the submission).
+const RECONCILE_MISS_LIMIT: u32 = 5;
+
+/// Settle the fate of submissions whose outcome was UNCERTAIN (network
+/// error during send_order): records carrying a `pending_order` marker are
+/// resolved against the chain. An order observed on chain (or any of its
+/// input nullifiers published) confirms the submission — the markers are
+/// cleared and the normal pending-note sync finishes the job. An order
+/// that stays invisible AND unspent for `RECONCILE_MISS_LIMIT` consecutive
+/// polls provably never landed: its records are rolled back (inputs to
+/// UNSPENT, change note and order opening dropped).
+async fn reconcile_uncertain_submissions(
+    client: &ChainClient,
+    note_store: &mut Signal<NoteStore>,
+    order_store: &mut Signal<OrderStore>,
+    chain_orders: &[Order],
+    misses: &mut HashMap<String, u32>,
+) {
+    let pending_ids: HashSet<String> = note_store
+        .read()
+        .records()
+        .iter()
+        .filter(|r| !r.pending_order.is_empty())
+        .map(|r| r.pending_order.clone())
+        .collect();
+    for order_id in pending_ids {
+        // Seen in the bulk poll or by direct id query → the tx landed.
+        let mut on_chain = chain_orders.iter().any(|o| o.id == order_id);
+        if !on_chain {
+            if let Ok(found) = client
+                .query_orders(
+                    Some(order_id.clone()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(1),
+                    Some(0),
+                )
+                .await
+            {
+                on_chain = found.iter().any(|o| o.id == order_id);
+            } else {
+                continue; // chain unreachable: decide nothing this round
+            }
+        }
+        if !on_chain {
+            // Not visible as an order; a published input nullifier still
+            // proves the tx landed (the order query may lag).
+            let nfs: Vec<String> = note_store
+                .read()
+                .records()
+                .iter()
+                .filter(|r| r.pending_order == order_id && !r.nf.is_empty())
+                .map(|r| r.nf.clone())
+                .collect();
+            if !nfs.is_empty() {
+                match client.get_nullifiers(&nfs).await {
+                    Ok(spent) if spent.iter().any(|s| *s) => on_chain = true,
+                    Ok(_) => {}
+                    Err(_) => continue, // chain unreachable: keep waiting
+                }
+            }
+        }
+
+        if on_chain {
+            // Confirmed: clear the uncertainty markers; sync_note_statuses
+            // resolves the pending spend/mint states from here.
+            misses.remove(&order_id);
+            let mut store = note_store.write();
+            let mut changed = false;
+            for rec in store.records_mut() {
+                if rec.pending_order == order_id {
+                    rec.pending_order = String::new();
+                    changed = true;
+                }
+            }
+            if changed {
+                let _ = store.save();
+            }
+            continue;
+        }
+
+        let n = misses.entry(order_id.clone()).or_insert(0);
+        *n += 1;
+        if *n < RECONCILE_MISS_LIMIT {
+            continue;
+        }
+        // Provably never landed: order invisible and inputs unspent for
+        // several consecutive polls — roll the wallet records back.
+        misses.remove(&order_id);
+        eprintln!("[trade] submission {order_id} never landed; rolling back local records");
+        {
+            let mut store = note_store.write();
+            let mut drop_cms = Vec::new();
+            for rec in store.records_mut() {
+                if rec.pending_order != order_id {
+                    continue;
+                }
+                match rec.status {
+                    NOTE_PENDING_SPEND => {
+                        rec.status = NOTE_UNSPENT;
+                        rec.nf = String::new();
+                        rec.pending_order = String::new();
+                    }
+                    NOTE_PENDING_MINT => drop_cms.push(rec.cm.clone()),
+                    _ => rec.pending_order = String::new(),
+                }
+            }
+            store.retain(|r| !drop_cms.contains(&r.cm));
+            let _ = store.save();
+        }
+        {
+            let mut store = order_store.write();
+            store.remove(&order_id);
+            let _ = store.save();
+        }
+    }
+}
+
+/// Resolve pending note states against the chain: a PENDING_MINT note gets
+/// its leaf index once its commitment is in the pool tree; a PENDING_SPEND
+/// note becomes SPENT once its nullifier is published. Saves when changed.
+async fn sync_note_statuses(client: &ChainClient, note_store: &mut Signal<NoteStore>) {
+    let pending: Vec<(String, u8, String)> = note_store
+        .read()
+        .records()
+        .iter()
+        .filter(|r| r.status == NOTE_PENDING_MINT || r.status == NOTE_PENDING_SPEND)
+        .map(|r| (r.cm.clone(), r.status, r.nf.clone()))
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+    let mut changed = false;
+    for (cm, status, nf) in pending {
+        if status == NOTE_PENDING_MINT {
+            if let Ok(idx) = client.get_note_by_cm(&cm).await {
+                if idx >= 0 {
+                    let mut store = note_store.write();
+                    if let Some(rec) = store.find_mut(&cm) {
+                        rec.leaf_index = idx as u64;
+                        rec.status = NOTE_UNSPENT;
+                        changed = true;
+                    }
+                }
+            }
+        } else if !nf.is_empty() {
+            if let Ok(spent) = client.get_nullifiers(&[nf]).await {
+                if spent.first().copied().unwrap_or(false) {
+                    let mut store = note_store.write();
+                    if let Some(rec) = store.find_mut(&cm) {
+                        rec.status = NOTE_SPENT;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    if changed {
+        let _ = note_store.read().save();
+    }
 }
 
 #[component]
@@ -70,12 +238,14 @@ fn App() -> Element {
     let seed_signal: Signal<Option<[u8; 32]>> = use_signal(|| initial_seed);
 
     let mut orders = use_signal(Vec::<Order>::new);
-    let mut own_order_ids = use_signal(HashMap::<OrderID, String>::new);
+    let own_order_ids = use_signal(HashMap::<OrderID, String>::new);
     let selected = use_signal(|| None::<usize>);
     let expanded = use_signal(|| None::<usize>);
     let mut message: Signal<Option<(String, bool)>> = use_signal(|| None);
-    let cash_path = cfg.cash_path();
-    let mut cash_store = use_signal(|| CashStore::load(cash_path.clone()));
+    let notes_path = cfg.notes_path();
+    let orders_path = cfg.orders_path();
+    let mut note_store = use_signal(|| NoteStore::load(notes_path.clone()));
+    let mut order_store = use_signal(|| OrderStore::load(orders_path.clone()));
     let mut show_key_import = use_signal(|| false);
     let key_imported = use_signal(|| init_imported);
     let mut settling_ids: Signal<HashSet<OrderID>> = use_signal(HashSet::new);
@@ -84,11 +254,16 @@ fn App() -> Element {
     // Transient failures: do not re-dispatch the order until this instant.
     let mut retry_after: Signal<HashMap<OrderID, std::time::Instant>> = use_signal(HashMap::new);
 
-    // Prover binary + data-dir subpaths (the app links no crypto; the
+    // Prover binary + data-dir subpaths (the app links no MPC crypto; the
     // collaborative proof runs in the settle2p_session subprocess).
     let settle2p_bin = cfg.settle2p_bin();
     let settle2p_keys_dir = cfg.settle2p_keys_dir();
     let settle2p_sessions_dir = cfg.settle2p_sessions_dir();
+    // Settlement flavor (benchmark switch): "split" (default) or "merged".
+    let settle2p_mode = match cfg.settle2p_mode().as_str() {
+        "merged" => settle::SettleMode::Merged,
+        _ => settle::SettleMode::Split,
+    };
 
     // ── Settle coroutine: receives order IDs to settle (strictly serial) ──
     let settle_coro = use_coroutine({
@@ -139,11 +314,17 @@ fn App() -> Element {
                         }
                     };
 
+                    let Some(note_seed) = *seed_signal.read() else {
+                        message.set(Some(("✗ wallet seed unavailable".into(), true)));
+                        continue;
+                    };
                     let deps = match &settle2p_bin {
                         Some(bin) => settle::SettleDeps {
                             bin: bin.clone(),
                             keys_dir: settle2p_keys_dir.clone(),
                             sessions_dir: settle2p_sessions_dir.clone(),
+                            note_seed,
+                            mode: settle2p_mode,
                         },
                         None => {
                             message.set(Some((
@@ -155,9 +336,22 @@ fn App() -> Element {
                         }
                     };
 
+                    // The order opening is the settle witness; without it no
+                    // retry can help (blindings exist only in orders.json).
+                    let Some(opening) = order_store.read().find(&order_id).cloned() else {
+                        unsettleable_ids.write().insert(order_id.clone());
+                        message.set(Some((
+                            format!(
+                                "⚠ {}: no local order opening — cannot settle",
+                                orderbook::short_id(&order_id)
+                            ),
+                            true,
+                        )));
+                        continue;
+                    };
+
                     // Mark as settling in the UI (cleared LAST, after persist).
                     settling_ids.write().insert(order_id.clone());
-                    let records_snapshot: Vec<_> = cash_store.read().records().to_vec();
 
                     let mut msg_signal = message;
                     let settle_order_id = order_id.clone();
@@ -165,7 +359,7 @@ fn App() -> Element {
                         &c,
                         &my_order,
                         &counter_order,
-                        &records_snapshot,
+                        &opening,
                         &deps,
                         |status| {
                             let short = orderbook::short_id(&settle_order_id);
@@ -177,43 +371,46 @@ fn App() -> Element {
                     let short = orderbook::short_id(&order_id).to_string();
                     match result {
                         Ok(outcome) => {
-                            // Persist AFTER on-chain confirmation: spend inputs,
-                            // add recv, and (survivor) the relisted locked cash.
+                            // The incoming payout is a pool NOTE: persist it
+                            // pending-mint; the status sync below resolves its
+                            // leaf index from the chain.
                             {
-                                let mut store = cash_store.write();
-                                let spent = settle::spent_cash_ids(&my_order);
-                                for rec in store.records_mut().iter_mut() {
-                                    if spent.contains(&rec.cash_id) {
-                                        rec.status = CASH_SPENT;
-                                    }
-                                }
+                                use invisibook_lib::note_store::NoteRecord;
                                 let recv = &outcome.recv;
-                                if !store.records().iter().any(|r| r.cash_id == recv.cash_id) {
-                                    store.records_mut().push(CashRecord {
-                                        cash_id: recv.cash_id.clone(),
+                                let mut nstore = note_store.write();
+                                if nstore.find(&recv.cm).is_none() {
+                                    nstore.upsert(NoteRecord {
+                                        cm: recv.cm.clone(),
                                         token: recv.token.clone(),
                                         amount: recv.amount,
-                                        random: recv.random_hex.clone(),
-                                        status: CASH_ACTIVE,
-                                        order_amount: None,
-                                        order_random: None,
+                                        r: recv.r_hex.clone(),
+                                        key_index: 0,
+                                        sk: recv.sk_hex.clone(),
+                                        leaf_index: 0,
+                                        status: NOTE_PENDING_MINT,
+                                        nf: String::new(),
+                                        pending_order: String::new(),
                                     });
+                                    let _ = nstore.save();
                                 }
-                                if let Some(rem) = &outcome.remainder {
-                                    let l = &rem.locked;
-                                    if !store.records().iter().any(|r| r.cash_id == l.cash_id) {
-                                        store.records_mut().push(CashRecord {
-                                            cash_id: l.cash_id.clone(),
-                                            token: l.token.clone(),
-                                            amount: l.amount,
-                                            random: l.random_hex.clone(),
-                                            status: CASH_LOCKED,
-                                            order_amount: Some(rem.order_amount),
-                                            order_random: Some(rem.order_random_hex.clone()),
-                                        });
+                            }
+                            // Order ledger: a survivor's opening becomes the
+                            // residual one; a filled order's opening is done.
+                            {
+                                let mut ostore = order_store.write();
+                                match &outcome.remainder {
+                                    Some(rem) => ostore.upsert(OrderOpening {
+                                        order_id: order_id.clone(),
+                                        q: rem.order_amount,
+                                        locked_amount: rem.locked_amount,
+                                        r_locked: rem.locked_random_hex.clone(),
+                                        lock_token: settle::lock_token(&my_order),
+                                    }),
+                                    None => {
+                                        ostore.remove(&order_id);
                                     }
                                 }
-                                let _ = store.flush();
+                                let _ = ostore.save();
                             }
                             // The chain relisted the survivor in place (same id,
                             // block height); the poller drives its next round.
@@ -241,6 +438,10 @@ fn App() -> Element {
                                 true,
                             )));
                         }
+                        Err(settle::SettleError::Unrecoverable(m)) => {
+                            unsettleable_ids.write().insert(order_id.clone());
+                            message.set(Some((format!("⚠ {short}: {m}"), true)));
+                        }
                         Err(e) => {
                             retry_after.write().insert(
                                 order_id.clone(),
@@ -258,6 +459,8 @@ fn App() -> Element {
 
     // ── Poll order list from chain every 3 seconds (≈ 1 block) ──
     use_coroutine(move |_: UnboundedReceiver<()>| async move {
+        // Miss counters for uncertain submissions (see the reconciler).
+        let mut reconcile_misses: HashMap<String, u32> = HashMap::new();
         loop {
             let c = client.read().clone();
             if let Some(c) = c {
@@ -289,6 +492,18 @@ fn App() -> Element {
                         message.set(Some((format!("✗ Failed to fetch orders: {e}"), true)));
                     }
                 }
+                // Resolve pending note mints/spends against the chain.
+                sync_note_statuses(&c, &mut note_store).await;
+                // Settle the fate of uncertain submissions (P1-7).
+                let snapshot = orders.read().clone();
+                reconcile_uncertain_submissions(
+                    &c,
+                    &mut note_store,
+                    &mut order_store,
+                    &snapshot,
+                    &mut reconcile_misses,
+                )
+                .await;
             }
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
@@ -382,30 +597,37 @@ fn App() -> Element {
                         .await;
                 }
                 // Recover sessions that landed on chain but crashed before the
-                // wallet persisted their UTXOs.
+                // wallet persisted their records.
                 let c = loop {
                     if let Some(c) = client.read().clone() {
                         break c;
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 };
-                let recovered = settle::recover_all_sessions(&c, &sessions_dir).await;
+                let note_seed = loop {
+                    if let Some(s) = *seed_signal.read() {
+                        break s;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                };
+                let recovered = settle::recover_all_sessions(&c, &note_seed, &sessions_dir).await;
                 for rec in recovered {
                     {
-                        let mut store = cash_store.write();
-                        for id in &rec.spent_ids {
-                            for r in store.records_mut().iter_mut() {
-                                if &r.cash_id == id {
-                                    r.status = CASH_SPENT;
-                                }
+                        let mut nstore = note_store.write();
+                        if nstore.find(&rec.note.cm).is_none() {
+                            nstore.upsert(rec.note.clone());
+                            let _ = nstore.save();
+                        }
+                    }
+                    {
+                        let mut ostore = order_store.write();
+                        match &rec.remainder {
+                            Some(rem) => ostore.upsert(rem.clone()),
+                            None => {
+                                ostore.remove(&rec.order_id);
                             }
                         }
-                        for add in &rec.add {
-                            if !store.records().iter().any(|r| r.cash_id == add.cash_id) {
-                                store.records_mut().push(add.clone());
-                            }
-                        }
-                        let _ = store.flush();
+                        let _ = ostore.save();
                     }
                     let _ = std::fs::remove_dir_all(&rec.dir);
                 }
@@ -455,14 +677,14 @@ fn App() -> Element {
                         settle_coro.send(order_id);
                     },
                 }
-                TradeForm { orders, own_order_ids, expanded, message, chain_client: client, my_address, cash_store }
+                TradeForm { orders, own_order_ids, expanded, message, chain_client: client, my_address, note_store, order_store }
             }
             Toast { message }
             KeyImport {
                 chain_client: client,
                 my_address,
                 message,
-                cash_store,
+                note_store,
                 visible: show_key_import,
                 key_imported,
                 seed_signal,

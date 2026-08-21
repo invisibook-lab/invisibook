@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 dioxus = "0.7"
 hex = "0.4"
+sha2 = "0.10"
 invisibook-lib = { path = "../../lib/chain" }
 tokio = { version = "1", features = ["time", "net", "io-util", "process"] }
 serde = { version = "1", features = ["derive"] }
@@ -18,6 +19,7 @@ serde_json = "1"
 # NOT ark-mpc, so it does not reintroduce a second ark-mpc.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 zk = { path = "../../lib/zk" }
+rand = "0.9"
 
 # Dev-only: the headless settle_e2e integration test needs the tokio test
 # macro and a multi-thread runtime. Features unify with the normal `tokio`

@@ -26,11 +26,17 @@ use anyhow::{Context, Result, ensure};
 use ark_mpc::{PARTY0, test_helpers::execute_mock_mpc};
 use ark_serialize::CanonicalSerialize;
 use clap::Parser;
-use cozk2p::poseidon::{commit, fr_to_hex};
-use cozk2p::session::{LockedCash, MyPrivate, NeedSig, SessionInput, SigIo, run_session};
 use cozk2p::{
-    SidePrivate, compute_public, default_cache_dir, dev_keys, prove_single, sample_trade,
-    setup::circuit_size, stats::peak_rss_bytes, verify_settle,
+    SidePrivate, compute_public, default_cache_dir, dev_keys, needed_collateral,
+    poseidon::{commit, fr_to_hex},
+    prove_single, sample_trade,
+    session::{
+        CompareReady, MyPrivate, NeedSig, SessionConfig, SessionInput, SettleLeg, SigIo,
+        exchange_settle_legs, run_session,
+    },
+    setup::circuit_size,
+    stats::peak_rss_bytes,
+    verify_settle,
 };
 use serde_json::{Value, json};
 
@@ -40,12 +46,25 @@ use serde_json::{Value, json};
 const DUMMY_SIG: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\
                          aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-/// In-process signature ferry that returns the fixed dummy signature.
-struct DummySigIo;
+/// In-process signature ferry that returns the fixed dummy signature and
+/// simulates the F1 on-chain compare confirmation with a configurable
+/// blocking delay (0 by default — the session records the wait separately,
+/// so the crypto phases stay uncontaminated either way).
+struct DummySigIo {
+    confirm_delay: std::time::Duration,
+}
 
 impl SigIo for DummySigIo {
     fn request_sig(&mut self, _need: &NeedSig) -> Result<String> {
         Ok(DUMMY_SIG.to_string())
+    }
+
+    /// In-process bench: no chain; sleep for the configured stand-in delay.
+    fn confirm_compare_onchain(&mut self, _ready: &CompareReady) -> Result<()> {
+        if !self.confirm_delay.is_zero() {
+            std::thread::sleep(self.confirm_delay);
+        }
+        Ok(())
     }
 }
 
@@ -56,65 +75,71 @@ fn commit_hex(amount: u64, random: &[u8; 32]) -> String {
 
 /// Build both traders' `SessionInput`s for a sample trade — the same
 /// chain-sourced publics + per-side witnesses the app assembles, so the
-/// benchmark drives the FULL session (compare + reveal + exchange + prove),
-/// not just the prove. Token/id fields are placeholders (no chain here).
+/// benchmark drives the FULL session (compare + reveal + key exchange +
+/// prove), not just the prove. Token/id fields are placeholders (no chain
+/// here). Collateral backs each order at the execution price so the
+/// session's sanity checks pass.
 fn build_session_inputs(
     a: &SidePrivate,
     b: &SidePrivate,
     price: u64,
     a_is_seller: bool,
 ) -> (SessionInput, SessionInput) {
-    let zero = commit_hex(0, &[0u8; 32]);
-    let order_a = commit_hex(a.order_amount, &a.r_order);
-    let order_b = commit_hex(b.order_amount, &b.r_order);
-    let pad = |locked: &[(u64, [u8; 32])]| -> [String; 2] {
-        let mut out = [zero.clone(), zero.clone()];
-        for (i, (amt, r)) in locked.iter().take(2).enumerate() {
-            out[i] = commit_hex(*amt, r);
-        }
-        out
+    // Locked-only model: each order's single on-chain commitment is
+    // P2(needed(q, side), r_locked) — the same equation the relation and
+    // the session use.
+    let collateral = |amt: u64, is_seller: bool| {
+        needed_collateral(amt, price, is_seller).expect("sample collateral fits u64")
     };
-    let locked_a = pad(&a.locked);
-    let locked_b = pad(&b.locked);
+    let locked_amt_a = collateral(a.order_amount, a_is_seller);
+    let locked_amt_b = collateral(b.order_amount, !a_is_seller);
+    let locked_a = commit_hex(locked_amt_a, &a.r_locked);
+    let locked_b = commit_hex(locked_amt_b, &b.r_locked);
     let my_priv = |s: &SidePrivate| MyPrivate {
         order_amount: s.order_amount,
-        r_order: hex::encode(s.r_order),
-        locked: s
-            .locked
-            .iter()
-            .map(|(amt, r)| LockedCash {
-                amount: *amt,
-                random: hex::encode(r),
-            })
-            .collect(),
+        r_locked: hex::encode(s.r_locked),
     };
+    // Fresh npk per side: any in-range field element works for the bench.
+    let npk_hex = |seed: u8| fr_to_hex(&commit(seed as u64, &[seed; 32]));
     // Seller locks/receives token1/token2; the buyer is the opposite leg.
     let (a_lock, a_recv) = if a_is_seller {
         ("ETH", "USDT")
     } else {
         ("USDT", "ETH")
     };
-    let common = |role: &str, my_id: &str, cash: &str, lock: &str, recv: &str, my: MyPrivate| {
+    let common = |role: &str, my_id: &str, lock: &str, recv: &str, npk: String, my: MyPrivate| {
         SessionInput {
             role: role.to_string(),
             order_a_id: "order-a".into(),
             order_b_id: "order-b".into(),
             my_order_id: my_id.into(),
-            my_input_cash_ids: vec![cash.into()],
             my_lock_token: lock.into(),
             my_recv_token: recv.into(),
             price,
             a_is_seller,
-            order_a: order_a.clone(),
-            order_b: order_b.clone(),
             locked_a: locked_a.clone(),
             locked_b: locked_b.clone(),
+            my_recv_npk: npk,
             my,
         }
     };
     (
-        common("trader-a", "order-a", "a-cash", a_lock, a_recv, my_priv(a)),
-        common("trader-b", "order-b", "b-cash", a_recv, a_lock, my_priv(b)),
+        common(
+            "trader-a",
+            "order-a",
+            a_lock,
+            a_recv,
+            npk_hex(0x51),
+            my_priv(a),
+        ),
+        common(
+            "trader-b",
+            "order-b",
+            a_recv,
+            a_lock,
+            npk_hex(0x52),
+            my_priv(b),
+        ),
     )
 }
 
@@ -130,6 +155,11 @@ struct Args {
     /// Skip the 2-process QUIC mode.
     #[arg(long)]
     skip_quic: bool,
+    /// Stand-in for the F1 on-chain compare confirmation in the mock mode:
+    /// each party blocks this long in `confirm_compare_onchain`. Reported
+    /// as `onchain_wait_ms`, SEPARATE from the cryptographic phases.
+    #[arg(long, default_value_t = 0)]
+    confirm_delay_ms: u64,
     /// Where to write the JSON report.
     #[arg(long, default_value = "settle2p_bench.json")]
     out: PathBuf,
@@ -193,6 +223,7 @@ async fn main() -> Result<()> {
     let session_tmp = std::env::temp_dir().join(format!("bench_settle2p_{}", std::process::id()));
     fs::create_dir_all(&session_tmp)?;
     let mut mock_runs = Vec::new();
+    let confirm_delay = std::time::Duration::from_millis(args.confirm_delay_ms);
     for run in 0..args.runs {
         let dir_a = session_tmp.join(format!("mock_{run}_a"));
         let dir_b = session_tmp.join(format!("mock_{run}_b"));
@@ -203,42 +234,78 @@ async fn main() -> Result<()> {
             let (dir_a, dir_b) = (dir_a.clone(), dir_b.clone());
             async move {
                 let party = fabric.party_id();
-                let (input, dir) = if party == PARTY0 {
+                let i_am_a = party == PARTY0;
+                let (input, dir) = if i_am_a {
                     (input_a, dir_a)
                 } else {
                     (input_b, dir_b)
                 };
-                let mut sig_io = DummySigIo;
-                run_session(
+                let mut sig_io = DummySigIo { confirm_delay };
+                let result = run_session(
                     fabric.clone(),
                     party,
                     &input,
                     &mut sig_io,
-                    &pk,
-                    &vk,
-                    &dir,
+                    SessionConfig {
+                        pk: &pk,
+                        vk: &vk,
+                        out_dir: &dir,
+                    },
                     |_, _| {},
                 )
                 .await
-                .expect("full session must succeed")
+                .expect("full session must succeed");
+                // Post-session settle-leg exchange (SettlePair path); the
+                // dummy proof stands in for the host's rapidsnark output.
+                let leg = SettleLeg {
+                    is_a: i_am_a,
+                    cm_note_out: result.my.recv_commitment.clone(),
+                    signature: DUMMY_SIG.to_string(),
+                    zk_proof: "x".repeat(800),
+                    cm_locked_residual: result.my.new_locked_commitment.clone(),
+                };
+                let leg_start = Instant::now();
+                exchange_settle_legs(&fabric, party, &leg)
+                    .await
+                    .expect("leg exchange must succeed");
+                let leg_exchange_ms = leg_start.elapsed().as_secs_f64() * 1e3;
+                (result, leg_exchange_ms)
             }
         })
         .await;
         let total_ms = t.elapsed().as_secs_f64() * 1e3;
-        let tim = r0.timings;
-        // Everything in `total` that is not the prove's own phases: the MPC
-        // compare, the fill reveal, the commitment/signature exchange.
-        let session_overhead_ms = (total_ms - tim.build_ms - tim.prove_ms - tim.open_ms).max(0.0);
+        let (result, leg_exchange_ms) = r0;
+        let tim = result.timings;
+        // Everything in `total` that is neither the prove's own phases nor
+        // a host/chain wait: the MPC compare, the fill reveal, the
+        // commitment/signature exchange.
+        let session_overhead_ms = (total_ms
+            - tim.build_ms
+            - tim.prove_ms
+            - tim.open_ms
+            - result.onchain_wait_ms
+            - leg_exchange_ms)
+            .max(0.0);
         mock_runs.push(json!({
             "total_ms": total_ms,
             "session_overhead_ms": session_overhead_ms,
             "build_ms": tim.build_ms,
             "prove_ms": tim.prove_ms,
             "open_ms": tim.open_ms,
+            // Host/chain waits, NOT cryptography: the F1 on-chain compare
+            // confirmation stand-in and the settle-leg round.
+            "onchain_wait_ms": result.onchain_wait_ms,
+            "leg_exchange_ms": leg_exchange_ms,
         }));
         println!(
-            "  run: total {:.0} ms (compare+reveal+exchange ~{:.0}, prove build {:.0}/prove {:.0}/open {:.0})",
-            total_ms, session_overhead_ms, tim.build_ms, tim.prove_ms, tim.open_ms
+            "  run: total {:.0} ms (compare+reveal+exchange ~{:.0}, prove build {:.0}/prove {:.0}/open {:.0}, onchain-wait {:.0}, leg-exchange {:.0})",
+            total_ms,
+            session_overhead_ms,
+            tim.build_ms,
+            tim.prove_ms,
+            tim.open_ms,
+            result.onchain_wait_ms,
+            leg_exchange_ms
         );
     }
 
@@ -256,8 +323,14 @@ async fn main() -> Result<()> {
                 "settle2p_session binary not found — build with `cargo build --release --bins`",
             )?;
         let keys_dir = default_cache_dir();
-        fs::write(session_tmp.join("a_input.json"), serde_json::to_string(&input_a)?)?;
-        fs::write(session_tmp.join("b_input.json"), serde_json::to_string(&input_b)?)?;
+        fs::write(
+            session_tmp.join("a_input.json"),
+            serde_json::to_string(&input_a)?,
+        )?;
+        fs::write(
+            session_tmp.join("b_input.json"),
+            serde_json::to_string(&input_b)?,
+        )?;
 
         for run in 0..args.runs {
             // Fresh port pair per run to avoid rebind races.
@@ -286,10 +359,20 @@ async fn main() -> Result<()> {
                     .arg(&keys_dir)
                     .stdin(Stdio::piped());
                 let mut child = cmd.spawn()?;
-                // Pre-feed the signature: the child buffers it and reads the
-                // one line when it reaches its need_sig request.
+                // Pre-feed every host reply in protocol order: the child
+                // buffers them and consumes one line per request
+                // (need_sig → compare_ready → result_ready).
                 let mut stdin = child.stdin.take().context("child stdin")?;
                 writeln!(stdin, "{{\"sig\":\"{DUMMY_SIG}\"}}")?;
+                writeln!(stdin, "{{\"compare_confirmed\":true}}")?;
+                let leg = json!({"settle_leg": {
+                    "is_a": role == "trader-a",
+                    "cm_note_out": "11".repeat(32),
+                    "signature": DUMMY_SIG,
+                    "zk_proof": "x".repeat(800),
+                    "cm_locked_residual": "",
+                }});
+                writeln!(stdin, "{leg}")?;
                 drop(stdin);
                 children.push(child);
             }
@@ -314,14 +397,16 @@ async fn main() -> Result<()> {
             }
             ensure!(proofs[0] == proofs[1], "parties revealed different proofs");
 
-            println!("  run: total {total_ms:.0} ms (incl. process startup + key load + full session)");
+            println!(
+                "  run: total {total_ms:.0} ms (incl. process startup + key load + full session)"
+            );
             quic_runs.push(json!({ "total_ms": total_ms, "per_party": per_party }));
         }
     }
 
     let report = json!({
         "circuit_gates": gates,
-        "public_signals": 15,
+        "public_signals": 5,
         "proof_size_bytes": {
             "compressed": proof_compressed,
             "uncompressed": proof_uncompressed,

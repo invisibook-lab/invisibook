@@ -1,0 +1,98 @@
+{
+  "asset_eth": "0000000000000000000000000000000000000000000000000000000000455448",
+  "asset_usdt": "0000000000000000000000000000000000000000000000000000000055534454",
+  "bind": "0653a36a689e6a5fc03c7f2528f01db22328031d497869b569fe478f08b85046",
+  "bind_fields": [
+    "invisibook.bind.v1",
+    "u64be(1926)",
+    "spend_withdraw",
+    "u32be(1)",
+    "abc",
+    "hello"
+  ],
+  "bits_leaf1": [
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "comment": "Cross-language golden vectors for the shielded pool. Inputs are 32-byte constants reduced BE mod r. Regenerate only on a spec change.",
+  "dummy": {
+    "rho_byte": "0x77",
+    "sk_byte": "0x66"
+  },
+  "empty_leaf": "00000000000000000000000000000000696e76697369626f6f6b2e656d707479",
+  "empty_root_20": "11cf5222bf39d3e16d06009a6a9b7061b801c1c68c26a388636d90bd22d86af2",
+  "leaf0": "05c02c526709ad742795e34707d04aa2a0042e79e12af17a316ee0c950ab6be7",
+  "leaf1": "27e3fc599c0669018b170099f776ce466e74c1084eeb5418b7928ba0b00fcb07",
+  "leaf2": "02c106f9e23d66d66ff214297430392fcf20b070adc6d2322d74bd7f5f7044b1",
+  "nf_dummy": "19071055f947db4783c2c592efb534d242fe869a8fc752f82423e22cfe0e201e",
+  "nf_leaf1": "1aeb5e7dee2b7e486a36aee415303a7ded45ebfb8debc9b8ee28beffef1ae99b",
+  "nk1": "123c248c2104f41860bae308230ffa974b9ffddd65d94cef751bb8e98105ae61",
+  "note0": {
+    "asset": "ETH",
+    "r_byte": "0x33",
+    "v": 7
+  },
+  "note1": {
+    "asset": "USDT",
+    "r_byte": "0x34",
+    "sk_byte": "0x43",
+    "v": 1000000
+  },
+  "note2": {
+    "asset": "ETH",
+    "r_byte": "0x35",
+    "v": 5
+  },
+  "npk1": "25ff8373c2c7ccefa65cfcec308cfb46cf4252e91257fd61db72baa79975a679",
+  "path_leaf1": [
+    "05c02c526709ad742795e34707d04aa2a0042e79e12af17a316ee0c950ab6be7",
+    "001419e7bdf7a30a2aebfdd931e02688c65a60545ac65e3d9d2b96383fd542bb",
+    "1e0e87a83fe830b370720a821f8660aafc66ec64c53b4f9b81bb5481ba776f04",
+    "21464a29d15d92433cf6d932e42ac11dbc7671a19f7f0842d8ddd3a77bd12a32",
+    "1384ddbabb08069adfde92f261b4c5ac58909a0054cf93110fd365b29af33b30",
+    "2714826c2f3bfe229afdf18f4c7e9c4d91e4a7f7985abdc38a6a1f794a3d22d6",
+    "066d3b11b436a024f694b2be0589f0986966b94284cfd68a573c09c3276dd13b",
+    "19ed3955f15d4a3c70249234a9e7c87cc720922c34f413b426d5f7d53addd343",
+    "17f8527a064c0bc2be1e1397f980808cba979b8ed78ff62a58bc4a2c608be351",
+    "0e6bb3bbb0c00c5819e125c7edcebe665bcc9b48f57610f53de89b181433aeaf",
+    "02f8ca4692032b567d6a3066da2605f71b258dc7543160fad039dba60ac624fa",
+    "13febea32623f6f389c685e9469eed4b5a1c1ac2cd76dc2362d14d447f85e536",
+    "080a77dbb9a27468876d1b35a6d87727faef6248818dd5f6f03d5fb96badf364",
+    "04bbfbbf4c0c2e0685c419200af3d859be799ee6b101a87dc7b1bb06518d9072",
+    "25c70d72ca15ee9dabe8ddd33d13a5a8498a80ff1bbb7960434768510db308fe",
+    "1e08a5794b1787a525c495328e50c2b770a4356da987de092acbe4593383f4f7",
+    "0990b6a8a5f659a1bb9f823cb661a05b7d40712c3c71115bbd15e1af586e6d5f",
+    "2264ae5148bda28a062c2bc9406bedc204778479e2a20e850ccf289272b6033b",
+    "2c0d594998679fd40be018c861415d3a083f366d6981b21fb688d2cbacce995a",
+    "0fedb88c5f919770e86879316671472909320111df187833c35bc6c31c0d3a8e"
+  ],
+  "rho_leaf1": "118b715158457bafaace40eec302e919bb6c8570afdb9cdd49442b83045329c7",
+  "root_after_3": "188f6ab502db49b73c5364f8f387d373d5a8cf23f7e068caade83e3168247b75",
+  "sk1_bytes": "42..42 (32 bytes)",
+  "tags": {
+    "cm": 3,
+    "nf": 5,
+    "nk": 1,
+    "npk": 2,
+    "rho": 4
+  },
+  "tree_depth": 20
+}

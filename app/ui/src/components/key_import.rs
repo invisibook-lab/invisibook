@@ -2,22 +2,27 @@ use std::{fs, path::PathBuf, sync::Arc};
 
 use dioxus::{html::HasFileData, prelude::*};
 
-use invisibook_lib::{cash_store::CashStore, chain::ChainClient, config::ClientConfig};
+use invisibook_lib::{
+    chain::ChainClient,
+    config::ClientConfig,
+    note_store::{NoteRecord, NoteStore},
+};
 
-/// Modal panel for importing a BIP-39 mnemonic phrase and optionally a cash file.
+/// Modal panel for importing a BIP-39 mnemonic phrase and optionally a
+/// notes file (the wallet's note ledger — see `note_store`).
 #[component]
 pub fn KeyImport(
     chain_client: Signal<Option<Arc<ChainClient>>>,
     my_address: Signal<String>,
     message: Signal<Option<(String, bool)>>,
-    cash_store: Signal<CashStore>,
+    note_store: Signal<NoteStore>,
     visible: Signal<bool>,
     key_imported: Signal<bool>,
     seed_signal: Signal<Option<[u8; 32]>>,
     data_dir: PathBuf,
 ) -> Element {
     let mut mnemonic_input = use_signal(String::new);
-    let mut cash_file_input = use_signal(String::new);
+    let mut notes_file_input = use_signal(String::new);
     let mut drag_over = use_signal(|| false);
 
     if !*visible.read() {
@@ -59,22 +64,41 @@ pub fn KeyImport(
         let _ = fs::create_dir_all(&data_dir);
         let _ = fs::write(data_dir.join("mnemonic"), &mnemonic_text);
 
-        // Optionally import cash file
-        let cash_file = cash_file_input.read().trim().to_string();
-        if !cash_file.is_empty() {
-            let path = PathBuf::from(&cash_file);
-            match cash_store.write().load_from_file(&path) {
-                Ok(n) => message.set(Some((
-                    format!(
-                        "✓ Key imported ({}) — {} cash records loaded",
-                        &pubkey[..10],
-                        n
-                    ),
-                    false,
-                ))),
+        // Optionally import a notes file: upsert every record by commitment.
+        let notes_file = notes_file_input.read().trim().to_string();
+        if !notes_file.is_empty() {
+            let imported: Result<Vec<NoteRecord>, String> = fs::read_to_string(&notes_file)
+                .map_err(|e| e.to_string())
+                .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()));
+            match imported {
+                Ok(records) => {
+                    let n = records.len();
+                    let mut store = note_store.write();
+                    for rec in records {
+                        store.upsert(rec);
+                    }
+                    match store.save() {
+                        Ok(()) => message.set(Some((
+                            format!(
+                                "✓ Key imported ({}) — {} note records loaded",
+                                &pubkey[..10],
+                                n
+                            ),
+                            false,
+                        ))),
+                        Err(e) => message.set(Some((
+                            format!(
+                                "✓ Key imported ({}) — notes save error: {}",
+                                &pubkey[..10],
+                                e
+                            ),
+                            true,
+                        ))),
+                    }
+                }
                 Err(e) => message.set(Some((
                     format!(
-                        "✓ Key imported ({}) — cash file error: {}",
+                        "✓ Key imported ({}) — notes file error: {}",
                         &pubkey[..10],
                         e
                     ),
@@ -86,17 +110,17 @@ pub fn KeyImport(
         }
 
         mnemonic_input.set(String::new());
-        cash_file_input.set(String::new());
+        notes_file_input.set(String::new());
         visible.set(false);
     };
 
     let on_cancel = move |_| {
         mnemonic_input.set(String::new());
-        cash_file_input.set(String::new());
+        notes_file_input.set(String::new());
         visible.set(false);
     };
 
-    let has_cash_file = !cash_file_input.read().is_empty();
+    let has_notes_file = !notes_file_input.read().is_empty();
 
     rsx! {
         div { class: "modal-overlay",
@@ -115,7 +139,7 @@ pub fn KeyImport(
                 }
 
                 div { class: "input-group",
-                    span { class: "input-label", "Cash File (optional)" }
+                    span { class: "input-label", "Notes File (optional)" }
                     div {
                         class: if *drag_over.read() { "drop-zone drag-over" } else { "drop-zone" },
                         ondragover: move |evt: Event<DragData>| {
@@ -127,21 +151,21 @@ pub fn KeyImport(
                             drag_over.set(false);
                             if let Some(file) = evt.files().into_iter().next() {
                                 if let Some(pb) = file.inner().downcast_ref::<PathBuf>() {
-                                    cash_file_input.set(pb.to_string_lossy().into_owned());
+                                    notes_file_input.set(pb.to_string_lossy().into_owned());
                                 }
                             }
                         },
-                        if !has_cash_file {
+                        if !has_notes_file {
                             div { class: "drop-hint",
                                 span { class: "drop-hint-icon", "📂" }
-                                span { class: "drop-hint-text", "Drop cash.json here" }
+                                span { class: "drop-hint-text", "Drop notes.json here" }
                             }
                         } else {
                             div { class: "drop-content",
-                                span { class: "drop-filename", "{cash_file_input}" }
+                                span { class: "drop-filename", "{notes_file_input}" }
                                 button {
                                     class: "drop-clear",
-                                    onclick: move |_| cash_file_input.set(String::new()),
+                                    onclick: move |_| notes_file_input.set(String::new()),
                                     "×"
                                 }
                             }

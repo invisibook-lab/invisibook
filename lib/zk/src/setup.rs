@@ -95,33 +95,38 @@ pub fn dev_setup_snarkjs(circuit_name: &str) -> Result<DevSetup> {
     })
 }
 
-/// Generate a Powers of Tau file with 2^13 = 8192 constraint capacity (the
-/// largest wallet circuit is ~4200 constraints) and cache it under
-/// `lib/target/circuit-build/_ptau/`. Reused across all dev setups.
+/// log2 of the dev Powers-of-Tau constraint capacity. 2^15 = 32768 covers
+/// the depth-20 spend circuits (~14k constraints); bump when a circuit
+/// outgrows it. Regenerate by deleting `lib/target/circuit-build/_ptau/`.
+const DEV_PTAU_POWER: &str = "15";
+
+/// Generate a Powers of Tau file with 2^DEV_PTAU_POWER constraint capacity
+/// and cache it under `lib/target/circuit-build/_ptau/`. Reused across all
+/// dev setups.
 fn ensure_dev_ptau(circuit_dir: &Path) -> Result<PathBuf> {
     let ptau_dir = circuit_dir
         .parent()
         .context("circuit dir has no parent")?
         .join("_ptau");
     create_dir_all(&ptau_dir)?;
-    let final_ptau = ptau_dir.join("pot13_final.ptau");
+    let final_ptau = ptau_dir.join(format!("pot{DEV_PTAU_POWER}_final.ptau"));
     if final_ptau.exists() {
         return Ok(final_ptau);
     }
 
-    // 1) new — empty ceremony at curve bn128, log2(constraints)=13
-    let p0 = ptau_dir.join("pot13_0000.ptau");
+    // 1) new — empty ceremony at curve bn128
+    let p0 = ptau_dir.join(format!("pot{DEV_PTAU_POWER}_0000.ptau"));
     snarkjs(&[
         "powersoftau",
         "new",
         "bn128",
-        "13",
+        DEV_PTAU_POWER,
         p0.to_str().unwrap(),
         "-v",
     ])?;
 
     // 2) contribute — single (insecure) entropy injection
-    let p1 = ptau_dir.join("pot13_0001.ptau");
+    let p1 = ptau_dir.join(format!("pot{DEV_PTAU_POWER}_0001.ptau"));
     snarkjs(&[
         "powersoftau",
         "contribute",
@@ -171,8 +176,8 @@ fn snarkjs(args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn deposit_dev_setup_produces_zkey_and_vk() {
-        let setup = super::dev_setup_snarkjs("deposit").expect("snarkjs setup must succeed");
+    fn note_deposit_dev_setup_produces_zkey_and_vk() {
+        let setup = super::dev_setup_snarkjs("note_deposit").expect("snarkjs setup must succeed");
         assert!(setup.zkey.exists(), "zkey should exist at {:?}", setup.zkey);
         assert!(
             setup.vk_json.exists(),
@@ -185,8 +190,9 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&setup.vk_json).unwrap()).unwrap();
         assert_eq!(vk["protocol"], "groth16");
         assert_eq!(vk["curve"], "bn128");
-        // deposit.circom has 3 public signals (bridge_commitment + 2 output_hashes)
-        assert_eq!(vk["nPublic"].as_u64(), Some(3));
+        // note_deposit.circom has 4 public signals:
+        // [bridge_commitment, asset_id, cm_out, bind].
+        assert_eq!(vk["nPublic"].as_u64(), Some(4));
         assert!(vk["IC"].is_array(), "IC array required for verification");
     }
 }

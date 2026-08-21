@@ -179,10 +179,14 @@ pub fn verify_proof<E: Pairing>(
 /// snarkjs zkey has to be generated from the O2 R1CS for the witness layout
 /// to match.
 fn circuit_opt_flag(name: &str) -> &'static str {
-    if name == "settle_cozk" {
-        "--O2"
-    } else {
-        "--O0"
+    match name {
+        // settle_cozk must match the co-snarks witness layout; the
+        // shielded-pool circuits need full linear elimination to fit the
+        // dev ptau (spend circuits are ~16k non-linear + ~18k linear at O1).
+        "settle_cozk" | "note_deposit" | "spend_withdraw" | "send_order" | "settle_small"
+        | "settle_large" | "claim_fees" => "--O2",
+        // Legacy circuits keep O0: their committed VKs were built at O0.
+        _ => "--O0",
     }
 }
 
@@ -247,8 +251,6 @@ mod tests {
     use ark_bn254::Fr;
     use ark_ff::{BigInteger, PrimeField};
     use circom_bridge::fr_to_decimal_string;
-
-    use crate::wallet::{SettleCoZkSide, SettleCoZkWitness};
 
     /// Cached `dev_setup` result per circuit name. A real ceremony's PK is
     /// loaded once at startup; mirroring that here also avoids paying ~200 ms
@@ -519,149 +521,7 @@ mod tests {
         assert!(generate_proof::<Bn254>("split", &input, params).is_err());
     }
 
-    // ────────────────────── SettleLargerVerify / SettleSmallerVerify ──────────────────────
-
-    /// Convenience: distinct blinding factor for the counterparty's recv cash so
-    /// it doesn't collide with the per-amount `test_r`.
-    fn recv_r(amount: u64) -> Fr {
-        test_r(amount.wrapping_add(0xCEC2EC))
-    }
-
-    fn recv_commit_str(amount: u64) -> String {
-        fr_to_decimal_string(&poseidon_hash(amount, recv_r(amount)))
-    }
-
-    /// Larger side: alice locked [80, 0], change=20, my_fill=60, other_fill=60, price=1, sender of Token1.
-    #[test]
-    fn settle_larger_proof_verifies_with_change() {
-        let input = serde_json::json!({
-            "my_match_commitment":          fr_to_decimal_string(&poseidon_hash(60, test_r(60))),
-            "other_match_commitment":       fr_to_decimal_string(&poseidon_hash(60, test_r(61))),
-            "price":                        "1",
-            "is_token2_sender":             "0",
-            "input_hashes":                 hash_strs(&[80, 0]),
-            "change_commitment":            hash_str(20),
-            "counterparty_recv_commitment": recv_commit_str(60),
-            "r_my":                         fr_to_decimal_string(&test_r(60)),
-            "other_fill":                   "60",
-            "r_other":                      fr_to_decimal_string(&test_r(61)),
-            "input_amounts":                amount_strs(&[80, 0]),
-            "input_randomness":             r_strs(&[80, 0]),
-            "change_amount":                "20",
-            "change_random":                fr_to_decimal_string(&test_r(20)),
-        });
-        let params = cached_params("settle_larger");
-        generate_proof::<Bn254>("settle_larger", &input, params)
-            .expect("settle_larger should prove with valid change");
-    }
-
-    /// Larger side, no-change variant (alice locked exactly fill: 60). change_amount=0,
-    /// change_commitment = Poseidon(0, 0) — the same constant chain rebuilds.
-    #[test]
-    fn settle_larger_proof_verifies_with_zero_change() {
-        let zero_random = Fr::from(0u64);
-        let zero_commit = fr_to_decimal_string(&poseidon_hash(0, zero_random));
-        let input = serde_json::json!({
-            "my_match_commitment":          fr_to_decimal_string(&poseidon_hash(60, test_r(60))),
-            "other_match_commitment":       fr_to_decimal_string(&poseidon_hash(60, test_r(61))),
-            "price":                        "1",
-            "is_token2_sender":             "0",
-            "input_hashes":                 hash_strs(&[60, 0]),
-            "change_commitment":            zero_commit,
-            "counterparty_recv_commitment": recv_commit_str(60),
-            "r_my":                         fr_to_decimal_string(&test_r(60)),
-            "other_fill":                   "60",
-            "r_other":                      fr_to_decimal_string(&test_r(61)),
-            "input_amounts":                amount_strs(&[60, 0]),
-            "input_randomness":             r_strs(&[60, 0]),
-            "change_amount":                "0",
-            "change_random":                fr_to_decimal_string(&zero_random),
-        });
-        let params = cached_params("settle_larger");
-        generate_proof::<Bn254>("settle_larger", &input, params)
-            .expect("settle_larger should prove with zero change");
-    }
-
-    /// Larger side: cross-leg ratio violated (other_fill should be 60 but prover claims 50).
-    /// fill_t2 (= other_fill = 50) ≠ fill_t1 (= my_fill = 60) * price (= 1) → reject.
-    #[test]
-    fn settle_larger_proof_fails_when_ratio_mismatches() {
-        let input = serde_json::json!({
-            "my_match_commitment":          fr_to_decimal_string(&poseidon_hash(60, test_r(60))),
-            "other_match_commitment":       fr_to_decimal_string(&poseidon_hash(50, test_r(50))),
-            "price":                        "1",
-            "is_token2_sender":             "0",
-            "input_hashes":                 hash_strs(&[80, 0]),
-            "change_commitment":            hash_str(20),
-            "counterparty_recv_commitment": recv_commit_str(50),
-            "r_my":                         fr_to_decimal_string(&test_r(60)),
-            "other_fill":                   "50",
-            "r_other":                      fr_to_decimal_string(&test_r(50)),
-            "input_amounts":                amount_strs(&[80, 0]),
-            "input_randomness":             r_strs(&[80, 0]),
-            "change_amount":                "20",
-            "change_random":                fr_to_decimal_string(&test_r(20)),
-        });
-        let params = cached_params("settle_larger");
-        assert!(generate_proof::<Bn254>("settle_larger", &input, params).is_err());
-    }
-
-    /// Larger side: change_amount > inputs.sum → my_fill underflows → range check rejects.
-    #[test]
-    fn settle_larger_proof_fails_when_change_exceeds_inputs() {
-        let input = serde_json::json!({
-            "my_match_commitment":          fr_to_decimal_string(&poseidon_hash(60, test_r(60))),
-            "other_match_commitment":       fr_to_decimal_string(&poseidon_hash(60, test_r(61))),
-            "price":                        "1",
-            "is_token2_sender":             "0",
-            "input_hashes":                 hash_strs(&[50, 0]),
-            "change_commitment":            hash_str(80),
-            "counterparty_recv_commitment": recv_commit_str(60),
-            "r_my":                         fr_to_decimal_string(&test_r(60)),
-            "other_fill":                   "60",
-            "r_other":                      fr_to_decimal_string(&test_r(61)),
-            "input_amounts":                amount_strs(&[50, 0]),
-            "input_randomness":             r_strs(&[50, 0]),
-            "change_amount":                "80",
-            "change_random":                fr_to_decimal_string(&test_r(80)),
-        });
-        let params = cached_params("settle_larger");
-        assert!(generate_proof::<Bn254>("settle_larger", &input, params).is_err());
-    }
-
-    /// Smaller side: bob locked exactly 60 USDT, no change, fill = inputs.sum = 60.
-    #[test]
-    fn settle_smaller_proof_verifies() {
-        let input = serde_json::json!({
-            "match_commitment":             fr_to_decimal_string(&poseidon_hash(60, test_r(61))),
-            "input_hashes":                 hash_strs(&[60, 0]),
-            "counterparty_recv_commitment": recv_commit_str(60),
-            "r_match":                      fr_to_decimal_string(&test_r(61)),
-            "input_amounts":                amount_strs(&[60, 0]),
-            "input_randomness":             r_strs(&[60, 0]),
-        });
-        let params = cached_params("settle_smaller");
-        generate_proof::<Bn254>("settle_smaller", &input, params)
-            .expect("settle_smaller should prove");
-    }
-
-    /// Smaller side: match_commitment doesn't match Poseidon(inputs.sum, r_match).
-    /// Prover supplied r for value 60 but inputs sum to 50 — binding rejects.
-    #[test]
-    fn settle_smaller_proof_fails_when_match_does_not_open() {
-        let input = serde_json::json!({
-            "match_commitment":             fr_to_decimal_string(&poseidon_hash(60, test_r(61))),
-            "input_hashes":                 hash_strs(&[50, 0]),
-            "counterparty_recv_commitment": recv_commit_str(60),
-            "r_match":                      fr_to_decimal_string(&test_r(61)),
-            "input_amounts":                amount_strs(&[50, 0]),
-            "input_randomness":             r_strs(&[50, 0]),
-        });
-        let params = cached_params("settle_smaller");
-        assert!(generate_proof::<Bn254>("settle_smaller", &input, params).is_err());
-    }
-
-    // ────────────────────── SettleCoZk ──────────────────────
+    // ────────────────────── SettleCmp (co-zk comparison) ──────────────────────
 
     /// Fr blinding rendered as the 32-byte big-endian array the wallet API takes.
     fn r_bytes(seed: u64) -> [u8; 32] {
@@ -671,107 +531,133 @@ mod tests {
         out
     }
 
-    /// Build a settle_cozk witness: A's order is `a_amt` token1, B's `b_amt`,
-    /// each backed by a single locked cash of exactly the required collateral.
-    fn cozk_witness(a_amt: u64, b_amt: u64, price: u64, a_is_seller: bool) -> SettleCoZkWitness {
-        let side = |amt: u64, is_seller: bool, salt: u64| SettleCoZkSide {
-            order_amount: amt,
-            r_order: r_bytes(salt),
-            r_order_new: r_bytes(salt + 1),
-            locked: vec![(if is_seller { amt } else { amt * price }, r_bytes(salt + 2))],
-            r_locked_new: r_bytes(salt + 3),
-            r_recv: r_bytes(salt + 4),
-        };
-        SettleCoZkWitness {
-            a: side(a_amt, a_is_seller, 0x0A00),
-            b: side(b_amt, !a_is_seller, 0x0B00),
-            price,
-            a_is_seller,
-        }
-    }
-
-    /// Prove and verify, then assert the 15-signal public vector layout
-    /// (outputs first, then public inputs) matches the documented order the
-    /// chain rebuilds. Returns the proof for further inspection.
-    fn cozk_prove_and_check(w: &SettleCoZkWitness) -> CircuitProof<Bn254> {
-        use crate::wallet::{
-            poseidon_commit, settle_cozk_cmp_fr, settle_cozk_input_json, settle_cozk_outcome,
-        };
-        let input = settle_cozk_input_json(w).expect("witness builds");
+    /// Prove + verify the comparison statement and pin the 5-signal public
+    /// vector [cmp, locked_a, locked_b, price, a_is_seller] the chain
+    /// rebuilds. A sells (locks q), B buys (locks q·price).
+    fn cmp_prove_and_check(a: u64, b: u64, expected_cmp: i8) {
+        use crate::wallet::{needed_collateral, poseidon_commit, settle_cmp_fr};
+        let (r_a, r_b) = (r_bytes(0x0A00), r_bytes(0x0B00));
+        let price = 3u64;
+        let locked_a = poseidon_commit(needed_collateral(a, price, true), &r_a);
+        let locked_b = poseidon_commit(needed_collateral(b, price, false), &r_b);
+        let input = serde_json::json!({
+            "cmp": fr_to_decimal_string(&settle_cmp_fr(expected_cmp)),
+            "locked_a": fr_to_decimal_string(&locked_a),
+            "locked_b": fr_to_decimal_string(&locked_b),
+            "price": price.to_string(),
+            "a_is_seller": "1",
+            "q_a": a.to_string(),
+            "r_a": fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&r_a)),
+            "q_b": b.to_string(),
+            "r_b": fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&r_b)),
+        });
         let params = cached_params("settle_cozk");
         let proof = generate_proof::<Bn254>("settle_cozk", &input, params)
             .expect("settle_cozk should prove");
         assert!(verify_proof(&proof, &params.vk).unwrap());
-
-        let out = settle_cozk_outcome(w).expect("outcome computes");
         let expected: Vec<Fr> = vec![
-            settle_cozk_cmp_fr(out.cmp),
-            poseidon_commit(out.a_prime, &w.a.r_order_new),
-            poseidon_commit(out.b_prime, &w.b.r_order_new),
-            poseidon_commit(out.a_new_locked, &w.a.r_locked_new),
-            poseidon_commit(out.b_new_locked, &w.b.r_locked_new),
-            poseidon_commit(out.a_recv, &w.a.r_recv),
-            poseidon_commit(out.b_recv, &w.b.r_recv),
-            poseidon_commit(w.a.order_amount, &w.a.r_order),
-            poseidon_commit(w.b.order_amount, &w.b.r_order),
-            Fr::from(w.price),
-            Fr::from(w.a_is_seller as u64),
-            poseidon_commit(w.a.locked[0].0, &w.a.locked[0].1),
-            poseidon_commit(0, &[0u8; 32]),
-            poseidon_commit(w.b.locked[0].0, &w.b.locked[0].1),
-            poseidon_commit(0, &[0u8; 32]),
+            settle_cmp_fr(expected_cmp),
+            locked_a,
+            locked_b,
+            Fr::from(price),
+            Fr::from(1u64),
         ];
-        assert_eq!(
-            proof.public_inputs, expected,
-            "public vector must be [outputs..., public inputs...] in declaration order"
+        assert_eq!(proof.public_inputs, expected);
+    }
+
+    #[test]
+    fn settle_cmp_proves_all_three_outcomes() {
+        cmp_prove_and_check(80, 60, 1);
+        cmp_prove_and_check(50, 90, -1);
+        cmp_prove_and_check(60, 60, 0);
+    }
+
+    /// A lying cmp claim is unsatisfiable.
+    #[test]
+    fn settle_cmp_fails_on_wrong_claim() {
+        use crate::wallet::{needed_collateral, poseidon_commit, settle_cmp_fr};
+        let (r_a, r_b) = (r_bytes(0x0A00), r_bytes(0x0B00));
+        let price = 3u64;
+        let input = serde_json::json!({
+            "cmp": fr_to_decimal_string(&settle_cmp_fr(-1)), // lie: a > b
+            "locked_a": fr_to_decimal_string(&poseidon_commit(needed_collateral(80, price, true), &r_a)),
+            "locked_b": fr_to_decimal_string(&poseidon_commit(needed_collateral(60, price, false), &r_b)),
+            "price": price.to_string(),
+            "a_is_seller": "1",
+            "q_a": "80",
+            "r_a": fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&r_a)),
+            "q_b": "60",
+            "r_b": fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&r_b)),
+        });
+        let params = cached_params("settle_cozk");
+        assert!(generate_proof::<Bn254>("settle_cozk", &input, params).is_err());
+    }
+
+    // ────────────────────── Note golden vectors ──────────────────────
+
+    /// The circom leg of the three-language golden-vector gate
+    /// (`spec/golden.json`): witness generation for `note_golden.circom`
+    /// succeeds iff every note derivation — keys, commitment chain, Merkle
+    /// root/index, position-bound nullifier, dummy nullifier — matches the
+    /// values Go and Rust pin.
+    #[test]
+    fn note_golden_vectors_hold_in_circom() {
+        use crate::{test_circuit::TestCircuitHandle, wallet::hex_to_fr};
+
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../spec/golden.json"
+        ))
+        .expect("spec/golden.json must exist");
+        let g: serde_json::Value = serde_json::from_str(&raw).expect("golden.json must parse");
+
+        let dec_of_hex =
+            |hex: &str| fr_to_decimal_string(&hex_to_fr(hex).expect("golden hex must parse"));
+        let dec_of_key = |key: &str| dec_of_hex(g[key].as_str().expect(key));
+        let dec_of_rep = |b: u8| fr_to_decimal_string(&Fr::from_be_bytes_mod_order(&[b; 32]));
+
+        let path: Vec<String> = g["path_leaf1"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| dec_of_hex(v.as_str().unwrap()))
+            .collect();
+        let bits: Vec<String> = g["bits_leaf1"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i64().unwrap().to_string())
+            .collect();
+
+        let input = serde_json::json!({
+            "sk1": dec_of_rep(0x42),
+            "sk2": dec_of_rep(0x43),
+            "asset_usdt": dec_of_key("asset_usdt"),
+            "r1": dec_of_rep(0x34),
+            "path": path,
+            "path_bits": bits,
+            "sk_dummy": dec_of_rep(0x66),
+            "rho_dummy": dec_of_rep(0x77),
+            "want_nk1": dec_of_key("nk1"),
+            "want_npk1": dec_of_key("npk1"),
+            "want_leaf1": dec_of_key("leaf1"),
+            "want_root": dec_of_key("root_after_3"),
+            "want_nf1": dec_of_key("nf_leaf1"),
+            "want_nf_dummy": dec_of_key("nf_dummy"),
+        });
+
+        let dir = compile_circuit("note_golden").expect("note_golden must compile");
+        let handle = TestCircuitHandle::from_compiled(&dir).expect("circuit handle");
+        handle
+            .gen_witness(&input)
+            .expect("golden values must satisfy every note constraint");
+
+        // A tampered expectation must be rejected by the constraints.
+        let mut bad = input.clone();
+        bad["want_nf1"] = serde_json::json!("1");
+        assert!(
+            handle.gen_witness(&bad).is_err(),
+            "a wrong nullifier expectation must fail witness generation"
         );
-        proof
-    }
-
-    /// A (maker) sells 80 token1 at price 3; B buys 60 → B fully fills,
-    /// cmp = 1, A keeps 20 on the book. Covers the seller-is-larger mux path.
-    #[test]
-    fn settle_cozk_proof_verifies_partial_fill() {
-        let w = cozk_witness(80, 60, 3, true);
-        cozk_prove_and_check(&w);
-    }
-
-    /// A (maker) buys 50 token1 at price 2; B sells 90 → A fully fills,
-    /// cmp = -1, B keeps 40. Covers the buyer-side-A mux path.
-    #[test]
-    fn settle_cozk_proof_verifies_buyer_maker_smaller() {
-        let w = cozk_witness(50, 90, 2, false);
-        cozk_prove_and_check(&w);
-    }
-
-    /// Equal amounts: cmp = 0, both remainders are commitments to zero.
-    #[test]
-    fn settle_cozk_proof_verifies_equal_amounts() {
-        let w = cozk_witness(60, 60, 5, true);
-        cozk_prove_and_check(&w);
-    }
-
-    /// Buyer collateral must be exactly order_amount * price — a buyer locking
-    /// the wrong total fails witness generation on the conservation constraint.
-    #[test]
-    fn settle_cozk_proof_fails_when_buyer_collateral_mismatched() {
-        use crate::wallet::settle_cozk_input_json;
-        let mut w = cozk_witness(80, 60, 3, true);
-        // B is the buyer and should lock 180; lock 179 instead.
-        w.b.locked = vec![(179, r_bytes(0x0B02))];
-        let input = settle_cozk_input_json(&w).expect("builder does not enforce conservation");
-        let params = cached_params("settle_cozk");
-        assert!(generate_proof::<Bn254>("settle_cozk", &input, params).is_err());
-    }
-
-    /// An order commitment that does not open to (amount, r) is rejected.
-    #[test]
-    fn settle_cozk_proof_fails_when_order_commitment_tampered() {
-        use crate::wallet::settle_cozk_input_json;
-        let w = cozk_witness(80, 60, 3, true);
-        let mut input = settle_cozk_input_json(&w).expect("witness builds");
-        input["order_a_commitment"] = serde_json::json!(hash_str(81));
-        let params = cached_params("settle_cozk");
-        assert!(generate_proof::<Bn254>("settle_cozk", &input, params).is_err());
     }
 }

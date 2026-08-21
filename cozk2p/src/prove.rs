@@ -28,24 +28,17 @@ use crate::relation::{
     side_wires_from_vars,
 };
 
-/// Group the 15 canonical public wires.
+/// Group the 5 canonical public wires
+/// ([cmp, locked_a, locked_b, price, a_is_seller]).
 /// `vars` must be the public variables in canonical order.
 fn public_wires_from_vars(vars: &[Variable]) -> PublicWires {
-    assert_eq!(vars.len(), 15);
+    assert_eq!(vars.len(), 5);
     PublicWires {
         cmp: vars[0],
-        new_order_a: vars[1],
-        new_order_b: vars[2],
-        new_locked_a: vars[3],
-        new_locked_b: vars[4],
-        recv_a: vars[5],
-        recv_b: vars[6],
-        order_a: vars[7],
-        order_b: vars[8],
-        price: vars[9],
-        a_is_seller: vars[10],
-        locked_a: [vars[11], vars[12]],
-        locked_b: [vars[13], vars[14]],
+        locked_a: vars[1],
+        locked_b: vars[2],
+        price: vars[3],
+        a_is_seller: vars[4],
     }
 }
 
@@ -168,7 +161,7 @@ fn build_mpc_circuit_sat(
 /// `r_i = 0` the product is `0`; otherwise it is `0` with only negligible
 /// probability (Schwartz–Zippel), and the mask hides `S`'s actual value so a
 /// rejection leaks nothing beyond "invalid".
-async fn check_witness_valid(
+pub(crate) async fn check_witness_valid(
     fabric: &MpcFabric<G1Projective>,
     circuit: &MpcPlonkCircuit<G1Projective>,
     sat: &SatisfiabilityWitness,

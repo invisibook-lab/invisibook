@@ -9,73 +9,94 @@ import (
 )
 
 // Config holds all configurable parameters for the core tripods.
+// `ChainID` enters every bind transcript so proofs cannot replay across
+// chains; it must equal the yu kernel's chain id.
 type Config struct {
+	ChainID   uint64          `toml:"chain_id"`
 	OrderBook OrderBookConfig `toml:"orderbook"`
 	Account   AccountConfig   `toml:"account"`
 }
 
 // OrderBookConfig holds configuration for the OrderBook tripod.
 //
-// `SplitVKPath` is the snarkjs `vk.json` for the split circuit (SendOrder).
-// `SettleLargerVKPath` is the settle circuit for the larger side (change +
-// cross-leg ratio check). Only the larger party submits a ZK proof; the
-// smaller party confirms settlement without proof.
 // `SettleCoZkVKPath` is the joint settle_cozk circuit whose single proof is
-// generated collaboratively by both traders (SettleOrdersCoZk writing).
+// generated collaboratively by both traders (SubmitCompareCoZk writing).
 // `SettleCoZk2pVKPath` is the ark-compressed PLONK verifying key of the
-// 2-party collaborative settlement (SettleOrdersCoZk2p writing; verification
+// 2-party collaborative settlement (SubmitCompareCoZk2p writing; verification
 // requires a chain binary built with `-tags cozk2p`).
-// `RequireProofs`, when true, makes an empty/missing settlement VK path a
-// startup error instead of silently skipping verification (see LoadVK's
-// fail-open contract). Leave false for test/dev configs that intentionally
-// run without circuit artifacts; set true in production so a misconfigured
-// node refuses to boot rather than accept unverified settlements.
+// `SettlePairCoZk2pVKPath` is the ark-compressed PLONK verifying key of the
+// MERGED settlement statement (SettlePairCoZk2p writing; same `-tags cozk2p`
+// requirement).
+// `RequireProofs` defaults to TRUE: an empty/missing settlement VK path is
+// a startup error instead of silently skipping verification (see LoadVK's
+// fail-open contract). Dev/test configs that intentionally run without
+// circuit artifacts must OPT OUT explicitly with `require_proofs = false`;
+// a config that simply forgets its VK paths refuses to boot.
 // `DBLogLevel` controls GORM SQL logging: "silent", "error", "warn", "info".
 type OrderBookConfig struct {
-	DBPath             string `toml:"db_path"`
-	SplitVKPath        string `toml:"split_vk_path"`
-	SettleLargerVKPath string `toml:"settle_larger_vk_path"`
-	SettleCoZkVKPath   string `toml:"settle_cozk_vk_path"`
-	SettleCoZk2pVKPath string `toml:"settle_cozk2p_vk_path"`
-	RequireProofs      bool   `toml:"require_proofs"`
-	DBLogLevel         string `toml:"db_log_level"`
+	DBPath                 string `toml:"db_path"`
+	SettleCoZkVKPath       string `toml:"settle_cozk_vk_path"`
+	SettleCoZk2pVKPath     string `toml:"settle_cozk2p_vk_path"`
+	SettlePairCoZk2pVKPath string `toml:"settle_pair_cozk2p_vk_path"`
+	SettleSmallVKPath      string `toml:"settle_small_vk_path"`
+	SettleLargeVKPath      string `toml:"settle_large_vk_path"`
+	SendOrderVKPath        string `toml:"send_order_vk_path"`
+	ClaimFeesVKPath        string `toml:"claim_fees_vk_path"`
+	RequireProofs          bool   `toml:"require_proofs"`
+	DBLogLevel             string `toml:"db_log_level"`
+	ChainID                uint64 `toml:"-"`
 }
 
 // AccountConfig holds configuration for the Account tripod.
 //
-// `DepositVKPath` and `WithdrawVKPath` point at the snarkjs `vk.json` files
-// produced by `snarkjs zkey export verificationkey <circuit>.zkey vk.json`.
-// Both are required at startup — chain refuses to boot if any path is unset
-// or the file is missing/malformed.
+// `NoteDepositVKPath`/`SpendWithdrawVKPath` are the shielded-pool circuits
+// (snarkjs `vk.json` files).
+// `BridgeOperatorPubkey` (64-char ed25519 hex) gates NoteDeposit until the
+// real bridge inclusion proof lands: when set, every deposit must carry the
+// operator's signature; when empty, the check is skipped (dev only — a
+// public network MUST set it).
+// `RequireProofs` mirrors the OrderBook flag (default TRUE): an empty VK
+// path becomes a startup error; dev mode needs an explicit
+// `require_proofs = false`.
 // `DBLogLevel` controls GORM SQL logging: "silent", "error", "warn", "info".
+// `ChainID` is copied from the top-level config by LoadConfig.
 type AccountConfig struct {
-	DBPath         string        `toml:"db_path"`
-	DepositVKPath  string        `toml:"deposit_vk_path"`
-	WithdrawVKPath string        `toml:"withdraw_vk_path"`
-	DBLogLevel     string        `toml:"db_log_level"`
-	GenesisCash    []GenesisCash `toml:"genesis_cash"`
+	DBPath               string        `toml:"db_path"`
+	NoteDepositVKPath    string        `toml:"note_deposit_vk_path"`
+	SpendWithdrawVKPath  string        `toml:"spend_withdraw_vk_path"`
+	BridgeOperatorPubkey string        `toml:"bridge_operator_pubkey"`
+	RequireProofs        bool          `toml:"require_proofs"`
+	DBLogLevel           string        `toml:"db_log_level"`
+	GenesisNote          []GenesisNote `toml:"genesis_note"`
+	ChainID              uint64        `toml:"-"`
 }
 
-// GenesisCash defines a Cash record to be inserted at chain initialization.
-// The ID is explicit — no derivation happens on-chain.
-type GenesisCash struct {
-	ID     string `toml:"id"`
-	Pubkey string `toml:"pubkey"`
-	Token  string `toml:"token"`
-	Amount string `toml:"amount"`
+// GenesisNote defines one shielded-pool leaf seeded at chain init. Leaves
+// are appended in listing order as leaves 0..len-1; the seeding is
+// prefix-verified so a restart never duplicates or shifts them. `Memo` is
+// documentation only (e.g. "alice 2000 ETH") — the chain never parses it.
+type GenesisNote struct {
+	Cm   string `toml:"cm"`
+	Memo string `toml:"memo"`
 }
 
-// DefaultConfig returns a Config with sensible defaults.
+// DefaultConfig returns a Config with sensible SECURE defaults: proof
+// verification is required, so a configuration that carries no verifying
+// keys refuses to boot instead of silently skipping verification. Dev/test
+// configs opt out with an explicit `require_proofs = false`.
 // DBLogLevel defaults to "warn" to suppress expected "record not found" noise.
 func DefaultConfig() *Config {
 	return &Config{
+		ChainID: 1926,
 		OrderBook: OrderBookConfig{
-			DBPath:     "orders.db",
-			DBLogLevel: "warn",
+			DBPath:        "orders.db",
+			DBLogLevel:    "warn",
+			RequireProofs: true,
 		},
 		Account: AccountConfig{
-			DBPath:     "accounts.db",
-			DBLogLevel: "warn",
+			DBPath:        "accounts.db",
+			DBLogLevel:    "warn",
+			RequireProofs: true,
 		},
 	}
 }
@@ -102,5 +123,8 @@ func LoadConfig(path string) (*Config, error) {
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
 		return nil, fmt.Errorf("failed to load core config from %s: %w", path, err)
 	}
+	// Propagate the chain id into the per-tripod configs (bind transcripts).
+	cfg.Account.ChainID = cfg.ChainID
+	cfg.OrderBook.ChainID = cfg.ChainID
 	return cfg, nil
 }

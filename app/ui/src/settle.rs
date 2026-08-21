@@ -1,13 +1,23 @@
-//! Desktop settlement via the 2-party collaborative-ZK path
-//! (`SettleOrdersCoZk2p`).
+//! Desktop settlement per the paper (§VI) on the note model, hardened per
+//! the rev.4 plan (F1 + F2):
 //!
-//! The app owns no cryptography: all of it — the MPC comparison, the fill
-//! reveal, the output-commitment exchange, and the collaborative PLONK
-//! proof — runs in the pre-built `settle2p_session` subprocess (a separate
-//! cargo workspace pinned to an older toolchain, so it cannot be linked).
-//! This module drives that subprocess over piped stdio, ferries the one
-//! ed25519 signature it asks for, submits the single on-chain writing, and
-//! persists the resulting UTXOs.
+//! The collaborative part — the MPC comparison, the smaller side's reveal,
+//! the payout-note key exchange, and the collaborative PLONK π_cmp — runs
+//! in the pre-built `settle2p_session` subprocess (a separate cargo
+//! workspace pinned to an older toolchain, so it cannot be linked). This
+//! module drives that subprocess over piped stdio in TWO phases:
+//!
+//! 1. Compare phase: ferry the one ed25519 compare signature, then — on
+//!    the subprocess's `compare_ready` — submit `SubmitCompareCoZk2p`,
+//!    block until BOTH orders are Settling on chain, and only then answer
+//!    `compare_confirmed`. The subprocess reveals nothing before that
+//!    anchor lands (the F1 ordering).
+//! 2. Settle phase: on `result_ready`, prove THIS side's settle circuit
+//!    (settle_small when fully filled, settle_large otherwise) with
+//!    rapidsnark and hand the signed leg back; the subprocess exchanges
+//!    legs over its still-open QUIC fabric and emits `pair_ready`, after
+//!    which either party submits the ATOMIC `SettlePair` (the F2 fix —
+//!    both payout notes mint together or nothing changes).
 //!
 //! NOTE: peer QUIC addresses are exchanged on-chain today; production would
 //! use an anonymous overlay. The subprocess uses mock Beaver triples and a
@@ -15,52 +25,65 @@
 
 #[cfg(not(target_os = "android"))]
 mod inner {
-    use std::{
-        collections::HashSet, fmt, fs, path::PathBuf, process::Stdio, sync::Arc, time::Duration,
-    };
+    use std::{fmt, fs, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
     use serde::{Deserialize, Serialize};
+    use sha2::{Digest, Sha256};
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
         process::Command,
     };
 
     use invisibook_lib::{
-        cash_store::CashRecord,
-        chain::{ChainClient, SettleCoZkParams},
+        chain::{
+            ChainClient, CompareParams, SettleLargeParams, SettlePairCoZk2pParams,
+            SettlePairLegParams, SettlePairParams, SettleSmallParams, verify_compare_cozk2p_sig,
+            verify_settle_pair_cozk2p_sig,
+        },
+        note::{
+            asset_id, fr_from_be_bytes, note_fr_to_hex, npk_from_sk, settle_large_bind,
+            settle_small_bind,
+        },
+        note_prover::{
+            SettleLargeWitness, SettleSmallWitness, prove_settle_large, prove_settle_small,
+        },
+        note_store::{NOTE_PENDING_MINT, NoteRecord},
+        order_store::OrderOpening,
         orderbook,
         types::*,
     };
+    use zk::wallet::hex_to_fr;
 
-    /// `Poseidon(0, 0)` — the zero-commitment used to pad unused locked
-    /// slots to the circuit's fixed N=2 shape.
-    pub const POSEIDON_ZERO_COMMITMENT_HEX: &str =
-        "2098f5fb9e239eab3ceac3f27b81e481dc3124d55ffed523a839ee8446b64864";
-
-    /// A newly minted UTXO the wallet must persist to keep it spendable.
+    /// This trader's incoming payout NOTE: the full opening the wallet must
+    /// persist to keep it spendable (notes.json IS the money).
     #[derive(Clone, Debug)]
-    pub struct NewCash {
-        pub cash_id: String,
+    pub struct NewNote {
+        pub cm: String,
         pub token: String,
         pub amount: u64,
-        pub random_hex: String,
+        pub r_hex: String,
+        /// The note spending secret, derived from the wallet seed + order id
+        /// (re-derivable in recovery).
+        pub sk_hex: String,
     }
 
-    /// The surviving (larger) side's on-book remainder after settlement: a
-    /// fresh Locked collateral cash plus the order-commitment witness the
-    /// chain relisted the order under.
+    /// The surviving (larger) side's residual order opening after the chain
+    /// relisted it in place: the fresh collateral opening that now opens
+    /// the on-chain residual commitment (locked-only model: the residual
+    /// quantity is plain wallet bookkeeping, not committed). Replaces the
+    /// order's old `OrderOpening` in the wallet's order ledger.
     #[derive(Clone, Debug)]
     pub struct Remainder {
-        pub locked: NewCash,
         pub order_amount: u64,
-        pub order_random_hex: String,
+        pub locked_amount: u64,
+        pub locked_random_hex: String,
     }
 
     /// The outcome of a successful settlement, from this trader's view.
     #[derive(Clone, Debug)]
     pub struct SettleOutcome {
         pub cmp: i8,
-        pub recv: NewCash,
+        pub recv: NewNote,
         /// Present only when this side survived on the book (had a
         /// remainder); the chain relisted the order in place.
         pub remainder: Option<Remainder>,
@@ -68,13 +91,17 @@ mod inner {
         pub session_dir: PathBuf,
     }
 
-    /// Why a settlement did not complete. `CrossPrice`/`SelfMatch` are
-    /// permanent (the caller should stop retrying the pair); `Transient`
-    /// and `OnChainRejected` are retryable after a backoff.
+    /// Why a settlement did not complete. `CrossPrice`, `SelfMatch`, and
+    /// `Unrecoverable` are permanent (the caller should stop retrying the
+    /// pair); `Transient` and `OnChainRejected` are retryable after a
+    /// backoff.
     #[derive(Clone, Debug)]
     pub enum SettleError {
         CrossPrice(String),
         SelfMatch,
+        /// Local state is missing something no retry can restore (e.g. the
+        /// order opening whose blindings exist only locally).
+        Unrecoverable(String),
         Transient(String),
         OnChainRejected(String),
     }
@@ -84,39 +111,56 @@ mod inner {
             match self {
                 SettleError::CrossPrice(m) => write!(f, "cross-price match unsupported: {m}"),
                 SettleError::SelfMatch => write!(f, "self-matched pair cannot settle"),
+                SettleError::Unrecoverable(m) => write!(f, "unrecoverable local state: {m}"),
                 SettleError::Transient(m) => write!(f, "{m}"),
                 SettleError::OnChainRejected(m) => write!(f, "settlement rejected on chain: {m}"),
             }
         }
     }
 
-    /// Everything the settle flow needs from config: the prover binary and
-    /// the two data-dir subpaths.
+    /// Which settlement flavor the session runs. `Split` is the default
+    /// production path (compare-only MPC + per-side Groth16 legs +
+    /// SettlePair); `Merged` proves compare + both legs in ONE
+    /// collaborative proof (SettlePairCoZk2p) — kept side by side for
+    /// benchmarking.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SettleMode {
+        Split,
+        Merged,
+    }
+
+    /// Everything the settle flow needs from config: the prover binary, the
+    /// data-dir subpaths, and the wallet seed the per-trade note spending
+    /// secrets derive from.
     #[derive(Clone, Debug)]
     pub struct SettleDeps {
         pub bin: PathBuf,
         pub keys_dir: PathBuf,
         pub sessions_dir: PathBuf,
+        /// Wallet seed for note-key derivation (the ed25519 seed works: the
+        /// note secret is domain-separated by hashing).
+        pub note_seed: [u8; 32],
+        /// Settlement flavor; see [`SettleMode`].
+        pub mode: SettleMode,
     }
 
-    /// The set of locked input cash IDs an order spends when it settles.
-    pub fn spent_cash_ids(order: &Order) -> HashSet<String> {
-        order.input_cash_ids.iter().cloned().collect()
+    /// Derive the per-trade note spending secret: SHA-256 over a domain
+    /// tag, the wallet seed, and the order id — deterministic, so recovery
+    /// can re-derive it from `witness.json`'s order id alone.
+    fn note_sk_bytes(seed: &[u8; 32], order_id: &str) -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(b"invisibook-note-sk-v1");
+        h.update(seed);
+        h.update(order_id.as_bytes());
+        h.finalize().into()
     }
 
     // ── Subprocess wire structs (mirror cozk2p's session serde exactly) ──
 
     #[derive(Serialize)]
-    struct LockedCashWire {
-        amount: u64,
-        random: String,
-    }
-
-    #[derive(Serialize)]
     struct MyPrivateWire {
         order_amount: u64,
-        r_order: String,
-        locked: Vec<LockedCashWire>,
+        r_locked: String,
     }
 
     #[derive(Serialize)]
@@ -125,48 +169,73 @@ mod inner {
         order_a_id: String,
         order_b_id: String,
         my_order_id: String,
-        my_input_cash_ids: Vec<String>,
         my_lock_token: String,
         my_recv_token: String,
         price: u64,
         a_is_seller: bool,
-        order_a: String,
-        order_b: String,
-        locked_a: [String; 2],
-        locked_b: [String; 2],
+        locked_a: String,
+        locked_b: String,
+        my_recv_npk: String,
         my: MyPrivateWire,
     }
 
     #[derive(Deserialize)]
     struct NeedSigWire {
         cmp: i8,
-        new_order_a: String,
-        new_order_b: String,
-        new_locked_a: String,
-        new_locked_b: String,
-        recv_a: String,
-        recv_b: String,
     }
 
     /// Subset of the subprocess `SettlePublic` the app cross-checks; serde
-    /// ignores the fields not named here.
+    /// ignores the fields not named here. Locked-only model: the statement
+    /// carries the two collateral commitments, the execution price, and the
+    /// maker's side — all 5 signals except the proven `cmp` itself.
     #[derive(Deserialize)]
     struct PublicWire {
-        order_a: String,
-        order_b: String,
+        locked_a: String,
+        locked_b: String,
+        price: u64,
+        a_is_seller: bool,
     }
 
+    /// The subprocess's `compare_ready` payload: π_cmp + both signatures,
+    /// handed over BEFORE any reveal so the app can land the comparison on
+    /// chain first (F1 ordering).
     #[derive(Deserialize)]
+    struct CompareReadyWire {
+        cmp: i8,
+        public: PublicWire,
+        proof_hex: String,
+        sig_a: String,
+        sig_b: String,
+    }
+
+    #[derive(Clone, Deserialize)]
     struct MyOutcomeWire {
+        is_a: bool,
+        i_am_smaller: bool,
+        fill: u64,
         recv_amount: u64,
+        recv_token: String,
         r_recv: String,
         recv_commitment: String,
+        ctr_recv_npk: String,
+        ctr_r_recv: String,
+        ctr_order_amount: u64,
+        ctr_r_locked: String,
         new_order_amount: u64,
-        r_order_new: String,
-        new_order_commitment: String,
         new_locked_amount: u64,
         r_locked_new: String,
         new_locked_commitment: String,
+    }
+
+    impl MyOutcomeWire {
+        /// True when this side survived on the book as the larger leg, so
+        /// the chain relisted its order under a fresh residual collateral
+        /// commitment. The residual commitment is the ONE marker (it is what
+        /// the relisted row carries on chain); the smaller side leaves it
+        /// empty.
+        fn is_relisted(&self) -> bool {
+            !self.new_locked_commitment.is_empty()
+        }
     }
 
     #[derive(Deserialize)]
@@ -179,11 +248,68 @@ mod inner {
         my: MyOutcomeWire,
     }
 
-    /// Crash-recovery record the subprocess writes before releasing its
-    /// signature. Mirrors cozk2p's `SessionWitness`.
+    /// One side's settle artifacts, exchanged through the subprocess so
+    /// either party can submit the atomic SettlePair. Mirrors cozk2p's
+    /// `SettleLeg` serde.
+    #[derive(Clone, Serialize, Deserialize)]
+    struct SettleLegWire {
+        is_a: bool,
+        cm_note_out: String,
+        signature: String,
+        zk_proof: String,
+        #[serde(default)]
+        cm_locked_residual: String,
+    }
+
+    /// The merged statement as the subprocess emits it (mirrors cozk2p's
+    /// `PairPublic` serde). `asset_recv_*` are omitted: the chain rebuilds
+    /// them itself and the app has no use for them. Locked-only model: the
+    /// two collateral commitments are the only on-chain opens, and each
+    /// side carries ONE residual commitment (its collateral).
+    #[derive(Clone, Deserialize)]
+    struct PairPublicWire {
+        cmp: i8,
+        cm_note_out_a: String,
+        cm_note_out_b: String,
+        cm_locked_res_a: String,
+        cm_locked_res_b: String,
+        locked_a: String,
+        locked_b: String,
+        price: u64,
+        a_is_seller: bool,
+    }
+
+    /// The merged session's `need_sig` payload: cmp plus the full public
+    /// statement the host must sign.
+    #[derive(Deserialize)]
+    struct NeedSigPairWire {
+        cmp: i8,
+        public: PairPublicWire,
+    }
+
+    /// The merged session's `pair_settle_ready` payload: the chain-ready
+    /// merged writing (proof + both signatures).
+    #[derive(Deserialize)]
+    struct PairReadyWire {
+        cmp: i8,
+        public: PairPublicWire,
+        proof_hex: String,
+        sig_a: String,
+        sig_b: String,
+    }
+
+    /// The merged session's result.json subset the app consumes.
+    #[derive(Deserialize)]
+    struct MergedResultWire {
+        cmp: i8,
+        my: MyOutcomeWire,
+    }
+
+    /// Crash-recovery record the subprocess writes before any secret leaves
+    /// it. Mirrors cozk2p's `SessionWitness`.
     #[derive(Deserialize)]
     struct SessionWitnessWire {
-        my_input_cash_ids: Vec<String>,
+        my_order_id: String,
         my_lock_token: String,
         my_recv_token: String,
         my: MyOutcomeWire,
@@ -191,7 +317,7 @@ mod inner {
 
     /// Token an order locks as collateral: Token1 for a sell, Token2 for a
     /// buy.
-    fn lock_token(order: &Order) -> String {
+    pub fn lock_token(order: &Order) -> String {
         match order.trade_type {
             TradeType::Buy => order.subject.token2.clone(),
             TradeType::Sell => order.subject.token1.clone(),
@@ -206,81 +332,35 @@ mod inner {
         }
     }
 
-    /// Read one order's locked input commitment hexes from chain state,
-    /// padded to two slots with the zero commitment. `order.input_cash_ids`
-    /// must reference cashes owned by `order.pubkey` in `token`.
-    async fn gather_locked_commitments(
-        client: &ChainClient,
-        order: &Order,
-        token: &str,
-    ) -> Result<[String; 2], SettleError> {
-        let account = client
-            .get_account(&order.pubkey, token)
-            .await
-            .map_err(|e| SettleError::Transient(format!("get_account: {e}")))?;
-        let mut out = [
-            POSEIDON_ZERO_COMMITMENT_HEX.to_string(),
-            POSEIDON_ZERO_COMMITMENT_HEX.to_string(),
-        ];
-        for (slot, id) in order.input_cash_ids.iter().take(2).enumerate() {
-            let cash = account.cash.iter().find(|c| &c.id == id).ok_or_else(|| {
-                SettleError::Transient(format!("locked cash {id} not found on chain"))
-            })?;
-            out[slot] = cash.amount.clone();
+    /// An order's single collateral commitment hex (`Order.LockedCommitment`
+    /// — the order's ONLY commitment in the locked-only model). The
+    /// commitment sits on the order row itself — no extra chain read.
+    fn locked_hex(order: &Order) -> Result<String, SettleError> {
+        if order.locked_commitment.len() != 64 {
+            return Err(SettleError::Transient(format!(
+                "order {} carries no collateral commitment (stale read?)",
+                orderbook::short_id(&order.id)
+            )));
         }
-        Ok(out)
+        Ok(order.locked_commitment.clone())
     }
 
-    /// Build this trader's private witness from its local cash records.
-    /// Sells commit the token1 quantity with the locked cash's own random;
-    /// buys (and every co-zk survivor) carry an explicit `order_amount` /
-    /// `order_random` distinct from the locked-cash commitment.
-    fn build_my_private(
-        order: &Order,
-        records: &[CashRecord],
-    ) -> Result<MyPrivateWire, SettleError> {
-        let mut locked = Vec::new();
-        for id in &order.input_cash_ids {
-            let rec = records.iter().find(|r| &r.cash_id == id).ok_or_else(|| {
-                SettleError::Transient(format!("missing local CashRecord for locked input {id}"))
-            })?;
-            locked.push(LockedCashWire {
-                amount: rec.amount,
-                random: rec.random.clone(),
-            });
-        }
-        if locked.is_empty() {
-            return Err(SettleError::Transient("order has no locked inputs".into()));
-        }
-        // The first input carries the order-commitment witness.
-        let first = records
-            .iter()
-            .find(|r| r.cash_id == order.input_cash_ids[0])
-            .expect("checked above");
-        let (order_amount, r_order) = match (first.order_amount, first.order_random.clone()) {
-            (Some(amount), Some(random)) => (amount, random),
-            _ => {
-                let sum: u64 = locked.iter().map(|l| l.amount).sum();
-                (sum, first.random.clone())
-            }
-        };
-        Ok(MyPrivateWire {
-            order_amount,
-            r_order,
-            locked,
-        })
-    }
-
-    /// Run the full 2-party collaborative settlement for a matched pair.
-    /// `my_order` and `counter_order` must be mutually `Matched`.
+    /// Run the full settlement for a matched pair: compare session, on-chain
+    /// compare confirmation, this side's settle proof, leg exchange, and the
+    /// atomic SettlePair submission. `opening` is this order's locally
+    /// persisted (q, collateral) opening.
     pub async fn run_settle(
         client: &Arc<ChainClient>,
         my_order: &Order,
         counter_order: &Order,
-        cash_records: &[CashRecord],
+        opening: &OrderOpening,
         deps: &SettleDeps,
         mut progress: impl FnMut(&str),
     ) -> Result<SettleOutcome, SettleError> {
+        if deps.mode == SettleMode::Merged {
+            return run_settle_merged(client, my_order, counter_order, opening, deps, progress)
+                .await;
+        }
         let my_pubkey = client.pubkey_hex().to_string();
 
         // Self-match would deadlock the serial settle coroutine.
@@ -294,7 +374,7 @@ mod inner {
         let i_am_maker = maker.id == my_order.id;
         let role = if i_am_maker { "trader-a" } else { "trader-b" };
 
-        // Equal-price requirement of the co-zk circuit.
+        // Equal-price requirement of the settle circuits.
         let (mp, tp) = match (maker.price, taker.price) {
             (Some(mp), Some(tp)) => (mp, tp),
             _ => return Err(SettleError::CrossPrice("orders missing price".into())),
@@ -307,32 +387,33 @@ mod inner {
         let price = mp;
         let a_is_seller = maker.trade_type == TradeType::Sell;
 
-        // Chain-sourced public inputs.
-        progress("Reading on-chain settlement state...");
-        let order_a = maker.amount.clone();
-        let order_b = taker.amount.clone();
-        let locked_a = gather_locked_commitments(client, maker, &lock_token(maker)).await?;
-        let locked_b = gather_locked_commitments(client, taker, &lock_token(taker)).await?;
+        // Chain-sourced public inputs (all already on the order rows).
+        let locked_a = locked_hex(maker)?;
+        let locked_b = locked_hex(taker)?;
 
         let my_lock_token = lock_token(my_order);
         let my_recv_token = recv_token(my_order);
-        let my_priv = build_my_private(my_order, cash_records)?;
+
+        // Fresh per-trade note key: the payout note this wallet receives.
+        let my_note_sk = note_sk_bytes(&deps.note_seed, &my_order.id);
+        let my_recv_npk = note_fr_to_hex(&npk_from_sk(fr_from_be_bytes(&my_note_sk)));
 
         let input = SessionInputWire {
             role: role.to_string(),
             order_a_id: maker.id.clone(),
             order_b_id: taker.id.clone(),
             my_order_id: my_order.id.clone(),
-            my_input_cash_ids: my_order.input_cash_ids.clone(),
             my_lock_token: my_lock_token.clone(),
             my_recv_token: my_recv_token.clone(),
             price,
             a_is_seller,
-            order_a: order_a.clone(),
-            order_b: order_b.clone(),
-            locked_a,
-            locked_b,
-            my: my_priv,
+            locked_a: locked_a.clone(),
+            locked_b: locked_b.clone(),
+            my_recv_npk,
+            my: MyPrivateWire {
+                order_amount: opening.q,
+                r_locked: opening.r_locked.clone(),
+            },
         };
 
         let session_dir = deps.sessions_dir.join(&my_order.id);
@@ -357,70 +438,461 @@ mod inner {
         progress("Waiting for counterparty...");
         let peer_addr = poll_peer_addr(client, &my_order.id, &counter_order.id).await?;
 
-        // ── Prover subprocess ──
-        let result = run_prover_session(
+        // ── Full two-phase session (subprocess) ──
+        let session = SessionCtx {
             client,
+            my_order,
+            counter_order,
+            maker_id: &maker.id,
+            taker_id: &taker.id,
+            maker_pubkey: &maker.pubkey,
+            taker_pubkey: &taker.pubkey,
+            expected_locked_a: &locked_a,
+            expected_locked_b: &locked_b,
+            price,
+            a_is_seller,
+            my_lock_token: &my_lock_token,
+            opening,
+            session_dir: &session_dir,
+        };
+        let output = run_prover_session(
             deps,
             role,
             &local_addr,
             &peer_addr,
             &input_path,
-            &session_dir,
-            &maker.id,
-            &taker.id,
-            &maker.pubkey,
-            &taker.pubkey,
-            &order_a,
-            &order_b,
+            &session,
             &mut progress,
         )
         .await?;
 
-        // ── Submit and confirm ──
-        progress("Submitting settlement...");
-        let params = SettleCoZkParams {
-            order_a_id: maker.id.clone(),
-            order_b_id: taker.id.clone(),
-            cmp: result.cmp,
-            new_order_a_commitment: result.need.new_order_a.clone(),
-            new_order_b_commitment: result.need.new_order_b.clone(),
-            new_locked_a_commitment: result.need.new_locked_a.clone(),
-            new_locked_b_commitment: result.need.new_locked_b.clone(),
-            recv_a_commitment: result.need.recv_a.clone(),
-            recv_b_commitment: result.need.recv_b.clone(),
-            sig_a: result.res.sig_a.clone(),
-            sig_b: result.res.sig_b.clone(),
-            zk_proof: result.res.proof_hex.clone(),
-        };
-        // Best-effort submit — either party may land it; a duplicate or a
-        // pair already advanced past Matched is a benign race, judged by
-        // the confirm-poll below.
-        if let Err(e) = client.settle_orders_cozk2p(&params).await {
+        // ── Atomic SettlePair: either party may land it (F2) ──
+        progress("Submitting atomic settlement pair...");
+        let pair = build_pair_params(&maker.id, &taker.id, &output.legs)?;
+        if let Err(e) = client.settle_pair(&pair).await {
             let msg = e.to_string();
-            if !(msg.contains("not Matched") || msg.contains("duplicated")) {
-                progress(&format!("submit warning: {msg}"));
+            // The counterparty may already have landed the pair; the real
+            // verdict comes from the on-chain confirmation below.
+            if !(msg.contains("is not Settling") || msg.contains("duplicated")) {
+                progress(&format!("settle_pair submit warning: {msg}"));
             }
         }
 
         progress("Confirming settlement on chain...");
-        let my_new_order = result.res.my.new_order_commitment.clone();
-        confirm_on_chain(client, &my_order.id, &my_new_order).await?;
+        let outcome = &output.res.my;
+        confirm_on_chain(client, &my_order.id, &outcome.new_locked_commitment).await?;
 
         Ok(outcome_from_result(
-            &my_pubkey,
-            &my_lock_token,
-            &my_recv_token,
-            result.cmp,
-            &result.res.my,
+            &deps.note_seed,
+            &my_order.id,
+            output.res.cmp,
+            outcome,
             session_dir,
         ))
     }
 
-    /// The prover subprocess plus the signature it made this trader produce.
+    /// The MERGED settlement flow: same rendezvous and session input as the
+    /// split path (the pre-flight deliberately mirrors `run_settle` so the
+    /// two benchmark paths differ only in the cryptographic pipeline), but
+    /// the subprocess runs `--mode merged`: one collaborative proof covers
+    /// compare + both settle legs, the host submits `SettlePairCoZk2p`
+    /// while the pair is still Matched, and the fill is revealed only after
+    /// settlement finality. No rapidsnark settle proofs, no leg exchange.
+    async fn run_settle_merged(
+        client: &Arc<ChainClient>,
+        my_order: &Order,
+        counter_order: &Order,
+        opening: &OrderOpening,
+        deps: &SettleDeps,
+        mut progress: impl FnMut(&str),
+    ) -> Result<SettleOutcome, SettleError> {
+        let my_pubkey = client.pubkey_hex().to_string();
+        if counter_order.pubkey == my_pubkey {
+            return Err(SettleError::SelfMatch);
+        }
+
+        let (maker, taker) = orderbook::maker_taker(my_order, counter_order);
+        let role = if maker.id == my_order.id {
+            "trader-a"
+        } else {
+            "trader-b"
+        };
+
+        let (mp, tp) = match (maker.price, taker.price) {
+            (Some(mp), Some(tp)) => (mp, tp),
+            _ => return Err(SettleError::CrossPrice("orders missing price".into())),
+        };
+        if mp != tp {
+            return Err(SettleError::CrossPrice(
+                "co-zk settlement requires equal order prices".into(),
+            ));
+        }
+        let price = mp;
+        let a_is_seller = maker.trade_type == TradeType::Sell;
+
+        // Chain-sourced public inputs (all already on the order rows).
+        let locked_a = locked_hex(maker)?;
+        let locked_b = locked_hex(taker)?;
+
+        let my_lock_token = lock_token(my_order);
+        let my_recv_token = recv_token(my_order);
+        let my_note_sk = note_sk_bytes(&deps.note_seed, &my_order.id);
+        let my_recv_npk = note_fr_to_hex(&npk_from_sk(fr_from_be_bytes(&my_note_sk)));
+
+        let input = SessionInputWire {
+            role: role.to_string(),
+            order_a_id: maker.id.clone(),
+            order_b_id: taker.id.clone(),
+            my_order_id: my_order.id.clone(),
+            my_lock_token: my_lock_token.clone(),
+            my_recv_token: my_recv_token.clone(),
+            price,
+            a_is_seller,
+            locked_a: locked_a.clone(),
+            locked_b: locked_b.clone(),
+            my_recv_npk,
+            my: MyPrivateWire {
+                order_amount: opening.q,
+                r_locked: opening.r_locked.clone(),
+            },
+        };
+
+        let session_dir = deps.sessions_dir.join(&my_order.id);
+        fs::create_dir_all(&session_dir)
+            .map_err(|e| SettleError::Transient(format!("creating session dir: {e}")))?;
+        let input_path = session_dir.join("input.json");
+        fs::write(
+            &input_path,
+            serde_json::to_vec(&input).expect("SessionInput serializes"),
+        )
+        .map_err(|e| SettleError::Transient(format!("writing session input: {e}")))?;
+
+        progress("Registering settlement address...");
+        let base = bind_ephemeral_port().await?;
+        let local_addr = format!("127.0.0.1:{base}");
+        client
+            .register_settle_addr(my_order.id.clone(), counter_order.id.clone(), &local_addr)
+            .await
+            .map_err(|e| SettleError::Transient(format!("register_settle_addr: {e}")))?;
+
+        progress("Waiting for counterparty...");
+        let peer_addr = poll_peer_addr(client, &my_order.id, &counter_order.id).await?;
+
+        let session = SessionCtx {
+            client,
+            my_order,
+            counter_order,
+            maker_id: &maker.id,
+            taker_id: &taker.id,
+            maker_pubkey: &maker.pubkey,
+            taker_pubkey: &taker.pubkey,
+            expected_locked_a: &locked_a,
+            expected_locked_b: &locked_b,
+            price,
+            a_is_seller,
+            my_lock_token: &my_lock_token,
+            opening,
+            session_dir: &session_dir,
+        };
+        let res = run_merged_prover_session(
+            deps,
+            role,
+            &local_addr,
+            &peer_addr,
+            &input_path,
+            &session,
+            &mut progress,
+        )
+        .await?;
+
+        Ok(outcome_from_result(
+            &deps.note_seed,
+            &my_order.id,
+            res.cmp,
+            &res.my,
+            session_dir,
+        ))
+    }
+
+    /// Cross-check a merged statement against the chain-sourced expecteds:
+    /// a stale or divergent chain read must abort before anything is
+    /// signed or submitted.
+    fn check_merged_public(ctx: &SessionCtx<'_>, p: &PairPublicWire) -> Result<(), SettleError> {
+        if p.locked_a != ctx.expected_locked_a
+            || p.locked_b != ctx.expected_locked_b
+            || p.price != ctx.price
+            || p.a_is_seller != ctx.a_is_seller
+        {
+            return Err(SettleError::Transient(
+                "prover statement does not match the on-chain order rows".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Build the chain request from the subprocess statement plus both
+    /// signatures and the proof.
+    fn merged_params(
+        ctx: &SessionCtx<'_>,
+        p: &PairPublicWire,
+        sig_a: String,
+        sig_b: String,
+        zk_proof: String,
+    ) -> SettlePairCoZk2pParams {
+        SettlePairCoZk2pParams {
+            order_a_id: ctx.maker_id.to_string(),
+            order_b_id: ctx.taker_id.to_string(),
+            cmp: p.cmp,
+            cm_note_out_a: p.cm_note_out_a.clone(),
+            cm_note_out_b: p.cm_note_out_b.clone(),
+            cm_locked_residual_a: p.cm_locked_res_a.clone(),
+            cm_locked_residual_b: p.cm_locked_res_b.clone(),
+            sig_a,
+            sig_b,
+            zk_proof,
+        }
+    }
+
+    /// Handle the merged session's `pair_settle_ready`: verify both
+    /// signatures locally, submit `SettlePairCoZk2p`, and block until this
+    /// side's order reflects the settlement (Done, or relisted under the
+    /// statement's residual commitment). Only a `true` reply lets the
+    /// subprocess reveal the fill.
+    async fn confirm_merged_settle(
+        ctx: &SessionCtx<'_>,
+        ready: &PairReadyWire,
+        progress: &mut impl FnMut(&str),
+    ) -> Result<(), SettleError> {
+        check_merged_public(ctx, &ready.public)?;
+        let params = merged_params(
+            ctx,
+            &ready.public,
+            ready.sig_a.clone(),
+            ready.sig_b.clone(),
+            ready.proof_hex.clone(),
+        );
+        if !verify_settle_pair_cozk2p_sig(&params, ctx.maker_pubkey, &ready.sig_a)
+            || !verify_settle_pair_cozk2p_sig(&params, ctx.taker_pubkey, &ready.sig_b)
+        {
+            return Err(SettleError::Transient(
+                "merged settle signatures failed local verification".into(),
+            ));
+        }
+
+        progress("Submitting merged settlement...");
+        if let Err(e) = ctx.client.settle_pair_cozk2p(&params).await {
+            let msg = e.to_string();
+            // The counterparty may already have landed it; the on-chain
+            // wait below is the real verdict.
+            if !(msg.contains("not Matched") || msg.contains("duplicated")) {
+                progress(&format!("settle_pair_cozk2p submit warning: {msg}"));
+            }
+        }
+
+        progress("Confirming settlement on chain...");
+        // My expected relist commitment: the statement's residual
+        // COLLATERAL for MY side when I am the larger one (the relisted row
+        // carries it — locked-only model), otherwise my order simply closes.
+        let i_am_a = ctx.maker_id == ctx.my_order.id;
+        let i_am_larger = (ready.cmp == 1) == i_am_a && ready.cmp != 0;
+        let expected_residual = if i_am_larger {
+            if i_am_a {
+                ready.public.cm_locked_res_a.clone()
+            } else {
+                ready.public.cm_locked_res_b.clone()
+            }
+        } else {
+            String::new()
+        };
+        confirm_on_chain(ctx.client, &ctx.my_order.id, &expected_residual).await
+    }
+
+    /// Spawn `settle2p_session --mode merged` and drive its stdio protocol:
+    /// `need_sig` → sign the full statement; `pair_settle_ready` → submit
+    /// + confirm on chain (the settlement IS the anchor); `result_ready` →
+    /// parse result.json. Bounded by a 60-minute watchdog: the merged
+    /// circuit is 8x the compare circuit and its collaborative prove is
+    /// network-round bound over QUIC, so it needs far more headroom than
+    /// the split path's 15 minutes.
+    async fn run_merged_prover_session(
+        deps: &SettleDeps,
+        role: &str,
+        local_addr: &str,
+        peer_addr: &str,
+        input_path: &std::path::Path,
+        ctx: &SessionCtx<'_>,
+        progress: &mut impl FnMut(&str),
+    ) -> Result<MergedResultWire, SettleError> {
+        let mut child = Command::new(&deps.bin)
+            .arg("--mode")
+            .arg("merged")
+            .arg("--role")
+            .arg(role)
+            .arg("--listen")
+            .arg(local_addr)
+            .arg("--peer")
+            .arg(peer_addr)
+            .arg("--input")
+            .arg(input_path)
+            .arg("--out-dir")
+            .arg(ctx.session_dir)
+            .arg("--keys-dir")
+            .arg(&deps.keys_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                SettleError::Transient(format!("spawning prover {}: {e}", deps.bin.display()))
+            })?;
+
+        let stdout = child.stdout.take().expect("piped stdout");
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let mut stderr = child.stderr.take().expect("piped stderr");
+        let mut lines = BufReader::new(stdout).lines();
+
+        let interaction = async {
+            async fn reply(
+                stdin: &mut tokio::process::ChildStdin,
+                line: String,
+            ) -> Result<(), SettleError> {
+                stdin
+                    .write_all(line.as_bytes())
+                    .await
+                    .map_err(|e| SettleError::Transient(format!("prover stdin: {e}")))?;
+                stdin
+                    .write_all(b"\n")
+                    .await
+                    .map_err(|e| SettleError::Transient(format!("prover stdin: {e}")))?;
+                stdin
+                    .flush()
+                    .await
+                    .map_err(|e| SettleError::Transient(format!("prover stdin: {e}")))
+            }
+
+            loop {
+                let line = lines
+                    .next_line()
+                    .await
+                    .map_err(|e| SettleError::Transient(format!("prover stdout: {e}")))?;
+                let Some(line) = line else {
+                    break;
+                };
+                let value: serde_json::Value = match serde_json::from_str(line.trim()) {
+                    Ok(v) => v,
+                    Err(_) => continue, // ignore non-JSON lines
+                };
+                match value.get("event").and_then(|e| e.as_str()) {
+                    Some("phase") => {
+                        if let Some(msg) = value.get("msg").and_then(|m| m.as_str()) {
+                            progress(msg);
+                        }
+                    }
+                    Some("need_sig") => {
+                        let ns: NeedSigPairWire = serde_json::from_value(value)
+                            .map_err(|e| SettleError::Transient(format!("bad need_sig: {e}")))?;
+                        // Refuse to sign a statement inconsistent with the
+                        // chain state this app read.
+                        check_merged_public(ctx, &ns.public)?;
+                        let params = merged_params(
+                            ctx,
+                            &ns.public,
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                        );
+                        debug_assert_eq!(params.cmp, ns.cmp);
+                        let sig = ctx.client.sign_settle_pair_cozk2p(&params);
+                        reply(&mut stdin, format!("{{\"sig\":\"{sig}\"}}")).await?;
+                    }
+                    Some("pair_settle_ready") => {
+                        let ready: PairReadyWire =
+                            serde_json::from_value(value.get("ready").cloned().unwrap_or_default())
+                                .map_err(|e| {
+                                    SettleError::Transient(format!("bad pair_settle_ready: {e}"))
+                                })?;
+                        match confirm_merged_settle(ctx, &ready, progress).await {
+                            Ok(()) => {
+                                reply(&mut stdin, "{\"settle_confirmed\":true}".into()).await?;
+                            }
+                            Err(e) => {
+                                let _ =
+                                    reply(&mut stdin, "{\"settle_confirmed\":false}".into()).await;
+                                return Err(e);
+                            }
+                        }
+                    }
+                    Some("done") => break,
+                    _ => {} // result_ready needs no reply; result.json is read below
+                }
+            }
+            Ok::<(), SettleError>(())
+        };
+
+        match tokio::time::timeout(Duration::from_secs(3600), interaction).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                let _ = child.start_kill();
+                return Err(e);
+            }
+            Err(_) => {
+                let _ = child.start_kill();
+                return Err(SettleError::Transient(
+                    "prover timed out after 60 minutes".into(),
+                ));
+            }
+        }
+
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| SettleError::Transient(format!("awaiting prover: {e}")))?;
+        if !status.success() {
+            let mut err = String::new();
+            let _ = stderr.read_to_string(&mut err).await;
+            let err = err.trim();
+            let hint = if err.contains("memory") || err.contains("alloc") {
+                " (out of memory — collaborative proving needs several GB)"
+            } else {
+                ""
+            };
+            return Err(SettleError::Transient(format!(
+                "prover exited with failure{hint}: {err}"
+            )));
+        }
+
+        let result_bytes = fs::read(ctx.session_dir.join("result.json"))
+            .map_err(|e| SettleError::Transient(format!("reading prover result: {e}")))?;
+        serde_json::from_slice(&result_bytes)
+            .map_err(|e| SettleError::Transient(format!("parsing prover result: {e}")))
+    }
+
+    /// The prover subprocess's parsed products: the session result and the
+    /// exchanged (A, B) settle legs.
     struct ProverOutput {
-        cmp: i8,
-        need: NeedSigWire,
         res: SessionResultWire,
+        legs: (SettleLegWire, SettleLegWire),
+    }
+
+    /// Chain-facing context the subprocess interaction needs (grouped to
+    /// keep the function argument count sane).
+    struct SessionCtx<'a> {
+        client: &'a Arc<ChainClient>,
+        my_order: &'a Order,
+        counter_order: &'a Order,
+        maker_id: &'a str,
+        taker_id: &'a str,
+        maker_pubkey: &'a str,
+        taker_pubkey: &'a str,
+        expected_locked_a: &'a str,
+        expected_locked_b: &'a str,
+        price: u64,
+        /// Maker side read off the chain rows: order A (the maker) sells.
+        a_is_seller: bool,
+        my_lock_token: &'a str,
+        opening: &'a OrderOpening,
+        session_dir: &'a std::path::Path,
     }
 
     /// Bind an ephemeral UDP port and release it, returning the number for
@@ -460,24 +932,256 @@ mod inner {
         ))
     }
 
-    /// Spawn `settle2p_session`, stream its progress, answer its one
-    /// signature request, and parse its result. Bounded by a 10-minute
-    /// watchdog; the child is killed if this future is dropped.
-    #[allow(clippy::too_many_arguments)]
+    /// Poll until `order_id` reaches Settling (the comparison landed —
+    /// submitted by either party). `Done` counts too (fast counterparty).
+    async fn wait_for_settling(client: &ChainClient, order_id: &str) -> Result<(), SettleError> {
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            match query_one(client, order_id).await {
+                Some(order) if order.status == OrderStatus::Settling => return Ok(()),
+                Some(order) if order.status == OrderStatus::Done => return Ok(()),
+                _ => continue,
+            }
+        }
+        Err(SettleError::OnChainRejected(
+            "comparison not observed on chain within the confirmation window".into(),
+        ))
+    }
+
+    async fn query_one(client: &ChainClient, order_id: &str) -> Option<Order> {
+        client
+            .query_orders(
+                Some(order_id.to_string()),
+                None,
+                None,
+                None,
+                None,
+                Some(1),
+                Some(0),
+            )
+            .await
+            .ok()
+            .and_then(|orders| orders.into_iter().find(|o| o.id == order_id))
+    }
+
+    /// Cross-check a proven statement against the rows read from the chain:
+    /// every non-`cmp` signal of the 5-signal statement (both collateral
+    /// commitments, the execution price, the maker's side) must match, or
+    /// the subprocess proved something other than THIS pair (a stale chain
+    /// read, most likely). Cheap local guard — the chain re-verifies.
+    fn check_public_statement(
+        ctx: &SessionCtx<'_>,
+        public: &PublicWire,
+    ) -> Result<(), SettleError> {
+        if public.locked_a != ctx.expected_locked_a
+            || public.locked_b != ctx.expected_locked_b
+            || public.price != ctx.price
+            || public.a_is_seller != ctx.a_is_seller
+        {
+            return Err(SettleError::Transient(
+                "prover statement does not match the on-chain order rows".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Handle the subprocess's `compare_ready`: cross-check the proven
+    /// statement and signatures, submit the comparison, and block until
+    /// BOTH orders are Settling. Only a `true` reply lets the subprocess
+    /// reveal (the F1 gate).
+    async fn confirm_compare(
+        ctx: &SessionCtx<'_>,
+        ready: &CompareReadyWire,
+        progress: &mut impl FnMut(&str),
+    ) -> Result<(), SettleError> {
+        check_public_statement(ctx, &ready.public)?;
+        let params = CompareParams {
+            order_a_id: ctx.maker_id.to_string(),
+            order_b_id: ctx.taker_id.to_string(),
+            cmp: ready.cmp,
+            sig_a: ready.sig_a.clone(),
+            sig_b: ready.sig_b.clone(),
+            zk_proof: ready.proof_hex.clone(),
+        };
+        if !verify_compare_cozk2p_sig(&params, ctx.maker_pubkey, &ready.sig_a)
+            || !verify_compare_cozk2p_sig(&params, ctx.taker_pubkey, &ready.sig_b)
+        {
+            return Err(SettleError::Transient(
+                "compare signatures failed local verification".into(),
+            ));
+        }
+
+        progress("Submitting comparison...");
+        if let Err(e) = ctx.client.submit_compare_cozk2p(&params).await {
+            let msg = e.to_string();
+            // The counterparty may have submitted first; the Settling wait
+            // below is the real verdict.
+            if !(msg.contains("not Matched") || msg.contains("duplicated")) {
+                progress(&format!("compare submit warning: {msg}"));
+            }
+        }
+        progress("Waiting for the comparison to land on chain...");
+        wait_for_settling(ctx.client, &ctx.my_order.id).await?;
+        wait_for_settling(ctx.client, &ctx.counter_order.id).await?;
+        Ok(())
+    }
+
+    /// Prove THIS side's settle circuit from the session outcome and wrap
+    /// it as a signed SettlePair leg.
+    fn prove_my_leg(
+        ctx: &SessionCtx<'_>,
+        outcome: &MyOutcomeWire,
+    ) -> Result<SettleLegWire, SettleError> {
+        let hex_fr = |s: &str, what: &str| {
+            hex_to_fr(s).map_err(|e| SettleError::Transient(format!("{what}: {e}")))
+        };
+        let my_side_sell = ctx.my_order.trade_type == TradeType::Sell;
+        let pay_asset = asset_id(ctx.my_lock_token)
+            .map_err(|e| SettleError::Unrecoverable(format!("pay asset: {e}")))?;
+        let npk_ctr = hex_fr(&outcome.ctr_recv_npk, "ctr_recv_npk")?;
+        let r_note = hex_fr(&outcome.ctr_r_recv, "ctr_r_recv")?;
+        let q = ctx.opening.q;
+        let r_locked = hex_fr(&ctx.opening.r_locked, "r_locked")?;
+
+        if outcome.i_am_smaller {
+            let setup =
+                tokio::task::block_in_place(|| zk::setup::dev_setup_snarkjs("settle_small"))
+                    .map_err(|e| SettleError::Transient(format!("settle_small setup: {e}")))?;
+            let handle = zk::test_circuit::TestCircuitHandle::from_compiled(&setup.circuit_dir)
+                .map_err(|e| SettleError::Transient(format!("circuit handle: {e}")))?;
+            let mut w = SettleSmallWitness {
+                q,
+                r_locked,
+                price: ctx.price,
+                side_sell: my_side_sell,
+                pay_asset,
+                npk_ctr,
+                r_note,
+                bind: fr_from_be_bytes(&[0u8; 32]),
+            };
+            let cm_note_out = note_fr_to_hex(&w.cm_note_out());
+            w.bind = settle_small_bind(
+                ctx.client.chain_id(),
+                &ctx.my_order.id,
+                &ctx.counter_order.id,
+                &cm_note_out,
+            );
+            let proof = tokio::task::block_in_place(|| prove_settle_small(w, &handle, &setup.zkey))
+                .map_err(|e| SettleError::Transient(format!("prove settle_small: {e}")))?;
+
+            let mut params = SettleSmallParams {
+                order_id: ctx.my_order.id.clone(),
+                match_order_id: ctx.counter_order.id.clone(),
+                cm_note_out: proof.cm_note_out_hex.clone(),
+                signature: String::new(),
+                zk_proof: serde_json::to_string(&proof.proof_json)
+                    .map_err(|e| SettleError::Transient(format!("proof json: {e}")))?,
+            };
+            params.signature = ctx.client.sign_settle_small(&params);
+            Ok(SettleLegWire {
+                is_a: outcome.is_a,
+                cm_note_out: params.cm_note_out,
+                signature: params.signature,
+                zk_proof: params.zk_proof,
+                cm_locked_residual: String::new(),
+            })
+        } else {
+            let setup =
+                tokio::task::block_in_place(|| zk::setup::dev_setup_snarkjs("settle_large"))
+                    .map_err(|e| SettleError::Transient(format!("settle_large setup: {e}")))?;
+            let handle = zk::test_circuit::TestCircuitHandle::from_compiled(&setup.circuit_dir)
+                .map_err(|e| SettleError::Transient(format!("circuit handle: {e}")))?;
+            let mut w = SettleLargeWitness {
+                q,
+                r_locked,
+                q_ctr: outcome.ctr_order_amount,
+                r_locked_ctr: hex_fr(&outcome.ctr_r_locked, "ctr_r_locked")?,
+                price: ctx.price,
+                side_sell: my_side_sell,
+                r_locked_residual: hex_fr(&outcome.r_locked_new, "r_locked_new")?,
+                pay_asset,
+                npk_ctr,
+                r_note,
+                bind: fr_from_be_bytes(&[0u8; 32]),
+            };
+            let (cm_locked_res, cm_note) = w.output_cms();
+            w.bind = settle_large_bind(
+                ctx.client.chain_id(),
+                &ctx.my_order.id,
+                &ctx.counter_order.id,
+                &note_fr_to_hex(&cm_locked_res),
+                &note_fr_to_hex(&cm_note),
+            );
+            let proof = tokio::task::block_in_place(|| prove_settle_large(w, &handle, &setup.zkey))
+                .map_err(|e| SettleError::Transient(format!("prove settle_large: {e}")))?;
+
+            let mut params = SettleLargeParams {
+                order_id: ctx.my_order.id.clone(),
+                match_order_id: ctx.counter_order.id.clone(),
+                cm_locked_residual: proof.cm_locked_residual_hex.clone(),
+                cm_note_out: proof.cm_note_out_hex.clone(),
+                signature: String::new(),
+                zk_proof: serde_json::to_string(&proof.proof_json)
+                    .map_err(|e| SettleError::Transient(format!("proof json: {e}")))?,
+            };
+            params.signature = ctx.client.sign_settle_large(&params);
+            Ok(SettleLegWire {
+                is_a: outcome.is_a,
+                cm_note_out: params.cm_note_out,
+                signature: params.signature,
+                zk_proof: params.zk_proof,
+                cm_locked_residual: params.cm_locked_residual,
+            })
+        }
+    }
+
+    /// Build the atomic SettlePair request from the exchanged (A, B) legs.
+    fn build_pair_params(
+        maker_id: &str,
+        taker_id: &str,
+        legs: &(SettleLegWire, SettleLegWire),
+    ) -> Result<SettlePairParams, SettleError> {
+        let to_leg = |leg: &SettleLegWire| {
+            if leg.cm_locked_residual.is_empty() {
+                SettlePairLegParams::small(
+                    leg.cm_note_out.clone(),
+                    leg.signature.clone(),
+                    leg.zk_proof.clone(),
+                )
+            } else {
+                SettlePairLegParams::large(
+                    leg.cm_note_out.clone(),
+                    leg.cm_locked_residual.clone(),
+                    leg.signature.clone(),
+                    leg.zk_proof.clone(),
+                )
+            }
+        };
+        if !legs.0.is_a || legs.1.is_a {
+            return Err(SettleError::Transient(
+                "exchanged settle legs carry inconsistent roles".into(),
+            ));
+        }
+        Ok(SettlePairParams {
+            order_a_id: maker_id.to_string(),
+            order_b_id: taker_id.to_string(),
+            a: to_leg(&legs.0),
+            b: to_leg(&legs.1),
+        })
+    }
+
+    /// Spawn `settle2p_session` and drive its full stdio protocol:
+    /// `need_sig` → sign; `compare_ready` → submit + confirm on chain
+    /// (F1 gate); `result_ready` → prove this side's leg; `pair_ready` →
+    /// capture both legs. Bounded by a 15-minute watchdog; the child is
+    /// killed if this future is dropped.
     async fn run_prover_session(
-        client: &ChainClient,
         deps: &SettleDeps,
         role: &str,
         local_addr: &str,
         peer_addr: &str,
         input_path: &std::path::Path,
-        session_dir: &std::path::Path,
-        order_a_id: &str,
-        order_b_id: &str,
-        maker_pubkey: &str,
-        taker_pubkey: &str,
-        expected_order_a: &str,
-        expected_order_b: &str,
+        ctx: &SessionCtx<'_>,
         progress: &mut impl FnMut(&str),
     ) -> Result<ProverOutput, SettleError> {
         let mut child = Command::new(&deps.bin)
@@ -490,7 +1194,7 @@ mod inner {
             .arg("--input")
             .arg(input_path)
             .arg("--out-dir")
-            .arg(session_dir)
+            .arg(ctx.session_dir)
             .arg("--keys-dir")
             .arg(&deps.keys_dir)
             .stdin(Stdio::piped())
@@ -507,9 +1211,28 @@ mod inner {
         let mut stderr = child.stderr.take().expect("piped stderr");
         let mut lines = BufReader::new(stdout).lines();
 
-        let mut need: Option<NeedSigWire> = None;
+        let mut legs: Option<(SettleLegWire, SettleLegWire)> = None;
 
         let interaction = async {
+            // Reply one JSON line on the child's stdin.
+            async fn reply(
+                stdin: &mut tokio::process::ChildStdin,
+                line: String,
+            ) -> Result<(), SettleError> {
+                stdin
+                    .write_all(line.as_bytes())
+                    .await
+                    .map_err(|e| SettleError::Transient(format!("prover stdin: {e}")))?;
+                stdin
+                    .write_all(b"\n")
+                    .await
+                    .map_err(|e| SettleError::Transient(format!("prover stdin: {e}")))?;
+                stdin
+                    .flush()
+                    .await
+                    .map_err(|e| SettleError::Transient(format!("prover stdin: {e}")))
+            }
+
             loop {
                 let line = lines
                     .next_line()
@@ -531,31 +1254,67 @@ mod inner {
                     Some("need_sig") => {
                         let ns: NeedSigWire = serde_json::from_value(value)
                             .map_err(|e| SettleError::Transient(format!("bad need_sig: {e}")))?;
-                        let params = SettleCoZkParams {
-                            order_a_id: order_a_id.to_string(),
-                            order_b_id: order_b_id.to_string(),
+                        let params = CompareParams {
+                            order_a_id: ctx.maker_id.to_string(),
+                            order_b_id: ctx.taker_id.to_string(),
                             cmp: ns.cmp,
-                            new_order_a_commitment: ns.new_order_a.clone(),
-                            new_order_b_commitment: ns.new_order_b.clone(),
-                            new_locked_a_commitment: ns.new_locked_a.clone(),
-                            new_locked_b_commitment: ns.new_locked_b.clone(),
-                            recv_a_commitment: ns.recv_a.clone(),
-                            recv_b_commitment: ns.recv_b.clone(),
                             sig_a: String::new(),
                             sig_b: String::new(),
                             zk_proof: String::new(),
                         };
-                        let sig = client.sign_settle_cozk2p(&params);
-                        let sig_line = format!("{{\"sig\":\"{sig}\"}}\n");
-                        stdin
-                            .write_all(sig_line.as_bytes())
-                            .await
-                            .map_err(|e| SettleError::Transient(format!("prover stdin: {e}")))?;
-                        stdin
-                            .flush()
-                            .await
-                            .map_err(|e| SettleError::Transient(format!("prover stdin: {e}")))?;
-                        need = Some(ns);
+                        let sig = ctx.client.sign_compare_cozk2p(&params);
+                        reply(&mut stdin, format!("{{\"sig\":\"{sig}\"}}")).await?;
+                    }
+                    Some("compare_ready") => {
+                        let ready: CompareReadyWire =
+                            serde_json::from_value(value.get("ready").cloned().unwrap_or_default())
+                                .map_err(|e| {
+                                    SettleError::Transient(format!("bad compare_ready: {e}"))
+                                })?;
+                        match confirm_compare(ctx, &ready, progress).await {
+                            Ok(()) => {
+                                reply(&mut stdin, "{\"compare_confirmed\":true}".into()).await?;
+                            }
+                            Err(e) => {
+                                // A false reply makes the subprocess abort
+                                // BEFORE any reveal (F1: nothing leaked).
+                                let _ =
+                                    reply(&mut stdin, "{\"compare_confirmed\":false}".into()).await;
+                                return Err(e);
+                            }
+                        }
+                    }
+                    Some("result_ready") => {
+                        // result.json is on disk while the child still
+                        // holds the QUIC connection for the leg exchange.
+                        let result_bytes =
+                            fs::read(ctx.session_dir.join("result.json")).map_err(|e| {
+                                SettleError::Transient(format!("reading prover result: {e}"))
+                            })?;
+                        let res: SessionResultWire = serde_json::from_slice(&result_bytes)
+                            .map_err(|e| {
+                                SettleError::Transient(format!("parsing prover result: {e}"))
+                            })?;
+                        progress("Proving this side's settlement...");
+                        let leg = prove_my_leg(ctx, &res.my)?;
+                        let leg_line = serde_json::to_string(&serde_json::json!({
+                            "settle_leg": leg
+                        }))
+                        .expect("leg serializes");
+                        reply(&mut stdin, leg_line).await?;
+                    }
+                    Some("pair_ready") => {
+                        let leg_a: SettleLegWire =
+                            serde_json::from_value(value.get("a").cloned().unwrap_or_default())
+                                .map_err(|e| {
+                                    SettleError::Transient(format!("bad pair_ready leg a: {e}"))
+                                })?;
+                        let leg_b: SettleLegWire =
+                            serde_json::from_value(value.get("b").cloned().unwrap_or_default())
+                                .map_err(|e| {
+                                    SettleError::Transient(format!("bad pair_ready leg b: {e}"))
+                                })?;
+                        legs = Some((leg_a, leg_b));
                     }
                     Some("done") => break,
                     _ => {}
@@ -564,8 +1323,9 @@ mod inner {
             Ok::<(), SettleError>(())
         };
 
-        // 10-minute watchdog over the whole interaction.
-        match tokio::time::timeout(Duration::from_secs(600), interaction).await {
+        // 15-minute watchdog over the whole interaction (the settle-leg
+        // round adds two rapidsnark proves on top of the old budget).
+        match tokio::time::timeout(Duration::from_secs(900), interaction).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 let _ = child.start_kill();
@@ -574,7 +1334,7 @@ mod inner {
             Err(_) => {
                 let _ = child.start_kill();
                 return Err(SettleError::Transient(
-                    "prover timed out after 10 minutes".into(),
+                    "prover timed out after 15 minutes".into(),
                 ));
             }
         }
@@ -597,83 +1357,35 @@ mod inner {
             )));
         }
 
-        let need = need
-            .ok_or_else(|| SettleError::Transient("prover never requested a signature".into()))?;
-        let result_bytes = fs::read(session_dir.join("result.json"))
+        let legs = legs.ok_or_else(|| {
+            SettleError::Transient("prover exited without exchanging settle legs".into())
+        })?;
+        let result_bytes = fs::read(ctx.session_dir.join("result.json"))
             .map_err(|e| SettleError::Transient(format!("reading prover result: {e}")))?;
         let res: SessionResultWire = serde_json::from_slice(&result_bytes)
             .map_err(|e| SettleError::Transient(format!("parsing prover result: {e}")))?;
-
-        // The proven statement's order commitments must equal the ones read
-        // from chain (the prover is a trusted local component, but this
-        // catches a stale read or a corrupt result file cheaply).
-        if res.public.order_a != expected_order_a || res.public.order_b != expected_order_b {
-            return Err(SettleError::Transient(
-                "prover statement does not match on-chain order commitments".into(),
-            ));
-        }
-
-        // Sanity: the proven statement must match the chain-sourced inputs,
-        // and both signatures must verify (the chain re-verifies regardless).
-        let params = SettleCoZkParams {
-            order_a_id: order_a_id.to_string(),
-            order_b_id: order_b_id.to_string(),
-            cmp: res.cmp,
-            new_order_a_commitment: need.new_order_a.clone(),
-            new_order_b_commitment: need.new_order_b.clone(),
-            new_locked_a_commitment: need.new_locked_a.clone(),
-            new_locked_b_commitment: need.new_locked_b.clone(),
-            recv_a_commitment: need.recv_a.clone(),
-            recv_b_commitment: need.recv_b.clone(),
-            sig_a: res.sig_a.clone(),
-            sig_b: res.sig_b.clone(),
-            zk_proof: res.proof_hex.clone(),
-        };
-        if !invisibook_lib::chain::verify_settle_cozk2p_sig(&params, maker_pubkey, &res.sig_a)
-            || !invisibook_lib::chain::verify_settle_cozk2p_sig(&params, taker_pubkey, &res.sig_b)
-        {
-            return Err(SettleError::Transient(
-                "settlement signatures failed local verification".into(),
-            ));
-        }
-
-        Ok(ProverOutput {
-            cmp: res.cmp,
-            need,
-            res,
-        })
+        // Redundant with confirm_compare, but result.json is re-read here:
+        // keep the invariant local.
+        check_public_statement(ctx, &res.public)?;
+        let _ = (&res.proof_hex, &res.sig_a, &res.sig_b); // consumed in compare phase
+        Ok(ProverOutput { res, legs })
     }
 
     /// Poll until this trader's order is `Done` or has been relisted with
-    /// its new remainder commitment. Timing out while the pair is still
-    /// mutually matched means the writing was rejected.
+    /// its new residual collateral commitment. Timing out while the pair is
+    /// still mutually matched means the writing was rejected.
     async fn confirm_on_chain(
         client: &ChainClient,
         my_order_id: &str,
-        my_new_order_commitment: &str,
+        my_new_locked_commitment: &str,
     ) -> Result<(), SettleError> {
         for _ in 0..30 {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            let orders = match client
-                .query_orders(
-                    Some(my_order_id.to_string()),
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(1),
-                    Some(0),
-                )
-                .await
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    eprintln!("[settle] confirm poll: {e}");
-                    continue;
-                }
-            };
-            if let Some(order) = orders.into_iter().find(|o| o.id == my_order_id) {
-                if order.status == OrderStatus::Done || order.amount == *my_new_order_commitment {
+            if let Some(order) = query_one(client, my_order_id).await {
+                if order.status == OrderStatus::Done
+                    || (!my_new_locked_commitment.is_empty()
+                        && order.locked_commitment == *my_new_locked_commitment)
+                {
                     return Ok(());
                 }
             }
@@ -683,40 +1395,31 @@ mod inner {
         ))
     }
 
-    /// Assemble the local outcome from the subprocess result. Cash ids are
-    /// content-addressed over the commitment hex, matching the chain.
+    /// Assemble the local outcome from the subprocess result.
     fn outcome_from_result(
-        my_pubkey: &str,
-        my_lock_token: &str,
-        my_recv_token: &str,
+        note_seed: &[u8; 32],
+        my_order_id: &str,
         cmp: i8,
         my: &MyOutcomeWire,
         session_dir: PathBuf,
     ) -> SettleOutcome {
-        let recv = NewCash {
-            cash_id: orderbook::compute_cash_id(my_pubkey, my_recv_token, &my.recv_commitment),
-            token: my_recv_token.to_string(),
+        let recv = NewNote {
+            cm: my.recv_commitment.clone(),
+            token: my.recv_token.clone(),
             amount: my.recv_amount,
-            random_hex: my.r_recv.clone(),
+            r_hex: my.r_recv.clone(),
+            sk_hex: hex::encode(note_sk_bytes(note_seed, my_order_id)),
         };
-        let remainder = if my.new_order_amount > 0 {
+        let remainder = if my.is_relisted() {
             Some(Remainder {
-                locked: NewCash {
-                    cash_id: orderbook::compute_cash_id(
-                        my_pubkey,
-                        my_lock_token,
-                        &my.new_locked_commitment,
-                    ),
-                    token: my_lock_token.to_string(),
-                    amount: my.new_locked_amount,
-                    random_hex: my.r_locked_new.clone(),
-                },
                 order_amount: my.new_order_amount,
-                order_random_hex: my.r_order_new.clone(),
+                locked_amount: my.new_locked_amount,
+                locked_random_hex: my.r_locked_new.clone(),
             })
         } else {
             None
         };
+        let _ = my.fill; // carried for diagnostics; not persisted separately
         SettleOutcome {
             cmp,
             recv,
@@ -730,17 +1433,24 @@ mod inner {
     /// A landed-but-unpersisted session recovered from its witness file.
     #[derive(Clone, Debug)]
     pub struct Recovered {
-        pub spent_ids: Vec<String>,
-        pub add: Vec<CashRecord>,
+        /// The order this session settled (keys the order-opening ledger).
+        pub order_id: String,
+        /// The incoming payout note to materialize (with leaf index).
+        pub note: NoteRecord,
+        /// The residual order opening, when this side survived on the book;
+        /// `None` means the order fully filled (drop its opening).
+        pub remainder: Option<OrderOpening>,
         pub dir: PathBuf,
     }
 
-    /// Inspect every session dir and decide, per the recovery predicate
-    /// (recv-cash existence on chain), whether it LANDED (materialize its
-    /// records) or did not (delete it). Session dirs whose settlement has
-    /// not yet finished (no witness.json) are left untouched.
+    /// Inspect every session dir and decide, per the recovery rules below,
+    /// whether it LANDED (materialize its records), is provably DEAD
+    /// (delete it), is CORRUPT (quarantine for diagnosis), or must be KEPT.
+    /// Session dirs whose settlement has not yet finished (no witness.json)
+    /// and quarantined `.corrupt` dirs are left untouched.
     pub async fn recover_all_sessions(
         client: &ChainClient,
+        note_seed: &[u8; 32],
         sessions_dir: &std::path::Path,
     ) -> Vec<Recovered> {
         let mut out = Vec::new();
@@ -753,10 +1463,20 @@ mod inner {
             if !dir.is_dir() {
                 continue;
             }
-            match try_recover_session(client, &dir).await {
+            if dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".corrupt"))
+            {
+                continue; // already quarantined for diagnosis
+            }
+            match try_recover_session(client, note_seed, &dir).await {
                 Recovery::Landed(rec) => out.push(rec),
                 Recovery::Deleted => {
                     let _ = fs::remove_dir_all(&dir);
+                }
+                Recovery::Corrupt => {
+                    quarantine_session_dir(&dir);
                 }
                 Recovery::InProgress => {}
             }
@@ -768,67 +1488,181 @@ mod inner {
     pub enum Recovery {
         /// Landed on chain — records in the payload should be materialized.
         Landed(Recovered),
-        /// Did not land — the dir is stale and should be removed.
+        /// PROVABLY dead (the on-chain order state rules the settlement
+        /// out) — the dir is stale and should be removed.
         Deleted,
-        /// No witness yet (mid-flight or never started) — leave it alone.
+        /// The witness cannot be parsed — keep it, but move it aside so it
+        /// stays diagnosable and does not block future scans.
+        Corrupt,
+        /// Anything not decidable yet (no witness, chain unreachable, note
+        /// not on chain but the pair can still settle) — leave it alone.
         InProgress,
     }
 
-    /// Recovery predicate for one session dir: read `witness.json`, compute
-    /// the recv cash id, and check on-chain existence. `dir` must be a
-    /// session scratch directory.
-    pub async fn try_recover_session(client: &ChainClient, dir: &std::path::Path) -> Recovery {
+    /// Move a session dir with an unreadable witness to `<dir>.corrupt`.
+    /// The money-critical secrets stay on disk for manual diagnosis; a
+    /// stale quarantine from an earlier run is replaced.
+    fn quarantine_session_dir(dir: &std::path::Path) {
+        let mut target = dir.as_os_str().to_owned();
+        target.push(".corrupt");
+        let target = std::path::PathBuf::from(target);
+        let _ = fs::remove_dir_all(&target);
+        if let Err(e) = fs::rename(dir, &target) {
+            eprintln!("[settle] quarantining corrupt session {dir:?}: {e}");
+        }
+    }
+
+    /// The pure recovery decision for a witness whose payout note is NOT
+    /// in the pool tree yet.
+    ///
+    /// The peer may hold both settle legs and submit the SettlePair at any
+    /// time while the pair is still Matched/Settling on chain, so the
+    /// witness (which holds the ONLY copy of the payout-note blinding) must
+    /// be kept in every uncertain state. Deleting is allowed only when the
+    /// on-chain order state PROVES this settlement can never land: the
+    /// order left Matched/Settling (Done, relisted Pending, Cancelled, or
+    /// Frozen) without minting this witness's note — the pair can never be
+    /// Settling again, so the note can never mint.
+    fn undecided_witness_action(my_status: Option<OrderStatus>) -> Recovery {
+        match my_status {
+            // Chain unreachable / order unknown: keep — never destroy the
+            // only copy of a blinding on uncertainty.
+            None => Recovery::InProgress,
+            Some(OrderStatus::Matched) | Some(OrderStatus::Settling) => Recovery::InProgress,
+            Some(_) => Recovery::Deleted,
+        }
+    }
+
+    /// Recovery predicate for one session dir: read `witness.json`, ask the
+    /// chain whether this side's payout note commitment is in the pool
+    /// tree, and — when it is not — decide from the order state whether the
+    /// settlement can still land. The note's spending secret is re-derived
+    /// from the wallet seed and the order id.
+    pub async fn try_recover_session(
+        client: &ChainClient,
+        note_seed: &[u8; 32],
+        dir: &std::path::Path,
+    ) -> Recovery {
         let witness_bytes = match fs::read(dir.join("witness.json")) {
             Ok(b) => b,
             Err(_) => return Recovery::InProgress,
         };
         let witness: SessionWitnessWire = match serde_json::from_slice(&witness_bytes) {
             Ok(w) => w,
-            Err(_) => return Recovery::Deleted,
+            // Unreadable witness: quarantine, never delete (it may still
+            // hold the only copy of a payout blinding).
+            Err(_) => return Recovery::Corrupt,
         };
-        let my_pubkey = client.pubkey_hex().to_string();
-        let recv_id = orderbook::compute_cash_id(
-            &my_pubkey,
-            &witness.my_recv_token,
-            &witness.my.recv_commitment,
-        );
-        let account = match client.get_account(&my_pubkey, &witness.my_recv_token).await {
-            Ok(a) => a,
+        let leaf_index = match client.get_note_by_cm(&witness.my.recv_commitment).await {
+            Ok(idx) => idx,
             Err(_) => return Recovery::InProgress, // can't decide now; retry later
         };
-        if !account.cash.iter().any(|c| c.id == recv_id) {
-            return Recovery::Deleted; // never landed; blindings are stale
+        if leaf_index < 0 {
+            // Note not on chain (yet): the peer may still submit the
+            // SettlePair. Only a provably dead order state allows cleanup.
+            let my_status = query_one(client, &witness.my_order_id)
+                .await
+                .map(|o| o.status);
+            return undecided_witness_action(my_status);
         }
-        // Landed: materialize spent inputs + recv + optional remainder.
-        let mut add = vec![CashRecord {
-            cash_id: recv_id,
+        let sk_hex = hex::encode(note_sk_bytes(note_seed, &witness.my_order_id));
+        let note = NoteRecord {
+            cm: witness.my.recv_commitment.clone(),
             token: witness.my_recv_token.clone(),
             amount: witness.my.recv_amount,
-            random: witness.my.r_recv.clone(),
-            status: CASH_ACTIVE,
-            order_amount: None,
-            order_random: None,
-        }];
-        if witness.my.new_order_amount > 0 {
-            add.push(CashRecord {
-                cash_id: orderbook::compute_cash_id(
-                    &my_pubkey,
-                    &witness.my_lock_token,
-                    &witness.my.new_locked_commitment,
-                ),
-                token: witness.my_lock_token.clone(),
-                amount: witness.my.new_locked_amount,
-                random: witness.my.r_locked_new.clone(),
-                status: CASH_LOCKED,
-                order_amount: Some(witness.my.new_order_amount),
-                order_random: Some(witness.my.r_order_new.clone()),
-            });
-        }
+            r: witness.my.r_recv.clone(),
+            key_index: 0,
+            sk: sk_hex,
+            leaf_index: leaf_index as u64,
+            status: 0, // NOTE_UNSPENT
+            nf: String::new(),
+            pending_order: String::new(),
+        };
+        // Rebuild the residual order opening from the witness, using the
+        // same relist predicate the live path uses.
+        let remainder = if witness.my.is_relisted() {
+            Some(OrderOpening {
+                order_id: witness.my_order_id.clone(),
+                q: witness.my.new_order_amount,
+                locked_amount: witness.my.new_locked_amount,
+                r_locked: witness.my.r_locked_new.clone(),
+                lock_token: witness.my_lock_token.clone(),
+            })
+        } else {
+            None
+        };
+        let _ = NOTE_PENDING_MINT; // status constants re-exported for callers
         Recovery::Landed(Recovered {
-            spent_ids: witness.my_input_cash_ids,
-            add,
+            order_id: witness.my_order_id.clone(),
+            note,
+            remainder,
             dir: dir.to_path_buf(),
         })
+    }
+
+    #[cfg(test)]
+    mod recovery_tests {
+        use super::*;
+
+        /// P1-6 regression: while the payout note is absent, every
+        /// uncertain state KEEPS the witness — the peer may still submit
+        /// the exchanged SettlePair later. Only a provably dead order
+        /// state deletes.
+        #[test]
+        fn witness_kept_while_settlement_can_still_land() {
+            // Chain unreachable / order unknown → keep.
+            assert!(matches!(
+                undecided_witness_action(None),
+                Recovery::InProgress
+            ));
+            // The pair can still settle → keep.
+            assert!(matches!(
+                undecided_witness_action(Some(OrderStatus::Settling)),
+                Recovery::InProgress
+            ));
+            assert!(matches!(
+                undecided_witness_action(Some(OrderStatus::Matched)),
+                Recovery::InProgress
+            ));
+        }
+
+        /// Deletion needs PROOF: the order left the settling states without
+        /// this witness's note — that settlement can never land anymore.
+        #[test]
+        fn witness_deleted_only_when_provably_dead() {
+            for status in [
+                OrderStatus::Pending, // relisted via a different settlement
+                OrderStatus::Done,    // settled via a different leg set
+                OrderStatus::Cancelled,
+                OrderStatus::Frozen,
+            ] {
+                assert!(
+                    matches!(undecided_witness_action(Some(status)), Recovery::Deleted),
+                    "{status} must allow cleanup"
+                );
+            }
+        }
+
+        /// A corrupt witness is quarantined (renamed), never deleted: the
+        /// bytes stay on disk for diagnosis.
+        #[test]
+        fn corrupt_witness_is_quarantined_not_deleted() {
+            let base =
+                std::env::temp_dir().join(format!("settle_corrupt_test_{}", std::process::id()));
+            let dir = base.join("session-1");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("witness.json"), b"{not json").unwrap();
+
+            quarantine_session_dir(&dir);
+
+            let quarantined = base.join("session-1.corrupt");
+            assert!(!dir.exists(), "original dir must be moved");
+            assert!(
+                quarantined.join("witness.json").exists(),
+                "witness bytes must survive quarantine"
+            );
+            let _ = fs::remove_dir_all(&base);
+        }
     }
 }
 

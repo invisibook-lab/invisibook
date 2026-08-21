@@ -1,7 +1,10 @@
 services:
   chain:
     build:
-      context: ./chain
+      # Repo-root context: the image links the cozk2p Rust staticlib into
+      # the chain binary (see chain/Dockerfile).
+      context: .
+      dockerfile: chain/Dockerfile
     ports:
       - "7999:7999"
       - "8999:8999"

@@ -3,19 +3,260 @@ use std::{collections::HashMap, sync::Arc};
 use dioxus::prelude::*;
 
 use invisibook_lib::{
-    cash_store::{CashRecord, CashStore},
     chain::ChainClient,
-    orderbook,
+    note_store::{NOTE_PENDING_MINT, NOTE_PENDING_SPEND, NOTE_UNSPENT, NoteStore},
+    order_store::OrderStore,
     types::*,
 };
+
 #[cfg(not(target_os = "android"))]
-use zk::{
-    setup::dev_setup_snarkjs,
-    test_circuit::TestCircuitHandle,
-    wallet::{SplitWitness, prove_split},
+use invisibook_lib::{
+    chain::{SendOrderParams, SubmitError, TradePairJson},
+    note::{asset_id, fr_from_be_bytes, note_fr_to_hex, npk_from_sk, send_order_bind},
+    note_prover::{SendOrderWitness, SpendSlot, prove_send_order, required_collateral},
+    note_store::NoteRecord,
+    note_tree::NoteTree,
+    order_store::OrderOpening,
+    orderbook,
 };
 
 use crate::constants::TOKENS;
+
+/// Everything the send-order prover produces before submission: the wire
+/// request plus the records the wallet must persist FIRST. Public so the
+/// headless e2e test drives the exact production order path.
+#[cfg(not(target_os = "android"))]
+pub struct PreparedOrder {
+    pub params: SendOrderParams,
+    pub opening: OrderOpening,
+    /// (cm, nullifier) per spent input note (marks them pending-spend).
+    pub spent: Vec<(String, String)>,
+    /// The change note to track, absent when the inputs were exact.
+    pub change: Option<NoteRecord>,
+}
+
+/// Build the complete SendOrder request from selected notes: spend slots
+/// with Merkle paths, fresh (collateral, change) commitments, the bind,
+/// and the rapidsnark proof. Pure CPU — call from a blocking context.
+/// `notes` must be 1..=2 unspent records of `lock_token` whose sum covers
+/// `collateral + fee`.
+#[cfg(not(target_os = "android"))]
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_order(
+    chain_id: u64,
+    tree: &NoteTree,
+    notes: &[NoteRecord],
+    lock_token: &str,
+    subject: (String, String),
+    trade_type: TradeType,
+    price: u64,
+    q: u64,
+    fee: u64,
+) -> Result<PreparedOrder, String> {
+    use rand::RngCore;
+
+    let side_sell = trade_type == TradeType::Sell;
+    let lock_asset = asset_id(lock_token)?;
+    let collateral = required_collateral(q, price, side_sell);
+    let total_in: u64 = notes.iter().map(|r| r.amount).sum();
+    let v_change = total_in
+        .checked_sub(collateral + fee)
+        .ok_or("selected notes do not cover collateral + fee")?;
+
+    // Spend slots with Merkle paths; pad to 2 with a dummy.
+    let mut slots_vec = Vec::new();
+    for rec in notes {
+        let sk_raw = hex::decode(&rec.sk).map_err(|e| format!("note sk hex: {e}"))?;
+        let sk_arr: [u8; 32] = sk_raw
+            .try_into()
+            .map_err(|_| "note sk must be 32 bytes".to_string())?;
+        let r_raw = hex::decode(&rec.r).map_err(|e| format!("note r hex: {e}"))?;
+        let r_arr: [u8; 32] = r_raw
+            .try_into()
+            .map_err(|_| "note r must be 32 bytes".to_string())?;
+        let (path, bits) = tree.path(rec.leaf_index);
+        slots_vec.push(SpendSlot::real(
+            fr_from_be_bytes(&sk_arr),
+            rec.amount,
+            fr_from_be_bytes(&r_arr),
+            path,
+            bits,
+        ));
+    }
+    while slots_vec.len() < 2 {
+        slots_vec.push(SpendSlot::dummy());
+    }
+    let slots: [SpendSlot; 2] = slots_vec.try_into().expect("exactly two slots");
+
+    // Nullifiers determine the order id (SHA-256 over nf0 || nf1).
+    let nf_hex = [
+        note_fr_to_hex(&slots[0].nullifier(lock_asset)),
+        note_fr_to_hex(&slots[1].nullifier(lock_asset)),
+    ];
+    let order_id = orderbook::compute_order_id(&nf_hex);
+
+    // Fresh blindings + a fresh change-note spending secret.
+    let mut rng = rand::rng();
+    let mut draw = || {
+        let mut b = [0u8; 32];
+        rng.fill_bytes(&mut b);
+        b
+    };
+    let (r_locked, r_change, change_sk) = (draw(), draw(), draw());
+
+    let w = SendOrderWitness {
+        slots,
+        anchor: tree.root(),
+        lock_asset,
+        q,
+        r_locked: fr_from_be_bytes(&r_locked),
+        price,
+        side_sell,
+        fee,
+        npk_change: npk_from_sk(fr_from_be_bytes(&change_sk)),
+        v_change,
+        r_change: fr_from_be_bytes(&r_change),
+        bind: fr_from_be_bytes(&[0u8; 32]),
+    };
+    let (locked_cm, cm_change) = w.output_commitments();
+    let mut w = w;
+    w.bind = send_order_bind(
+        chain_id,
+        &order_id,
+        lock_token,
+        &nf_hex[0],
+        &nf_hex[1],
+        &note_fr_to_hex(&locked_cm),
+        fee,
+        &note_fr_to_hex(&cm_change),
+    );
+
+    let setup =
+        zk::setup::dev_setup_snarkjs("send_order").map_err(|e| format!("send_order setup: {e}"))?;
+    let handle = zk::test_circuit::TestCircuitHandle::from_compiled(&setup.circuit_dir)
+        .map_err(|e| format!("circuit handle: {e}"))?;
+    let proof = prove_send_order(w, &handle, &setup.zkey).map_err(|e| format!("prove: {e}"))?;
+
+    let params = SendOrderParams {
+        id: order_id.clone(),
+        trade_type: if side_sell { 1 } else { 0 },
+        subject: TradePairJson {
+            token1: subject.0,
+            token2: subject.1,
+        },
+        price: Some(price),
+        pubkey: String::new(),    // filled by ChainClient::send_order
+        signature: String::new(), // filled by ChainClient::send_order
+        anchor: note_fr_to_hex(&tree.root()),
+        input_nullifiers: proof.nf_hex.to_vec(),
+        locked_commitment: proof.locked_commitment_hex.clone(),
+        fee,
+        change_commitment: proof.cm_change_hex.clone(),
+        zk_proof: serde_json::to_string(&proof.proof_json).map_err(|e| e.to_string())?,
+    };
+    let opening = OrderOpening {
+        order_id,
+        q,
+        locked_amount: collateral,
+        r_locked: hex::encode(r_locked),
+        lock_token: lock_token.to_string(),
+    };
+    let spent = notes
+        .iter()
+        .zip(proof.nf_hex.iter())
+        .map(|(rec, nf)| (rec.cm.clone(), nf.clone()))
+        .collect();
+    // A zero-value change leaf still lands on chain, but the wallet has no
+    // reason to track dust it can never usefully spend.
+    let change = (v_change > 0).then(|| NoteRecord {
+        cm: proof.cm_change_hex.clone(),
+        token: lock_token.to_string(),
+        amount: v_change,
+        r: hex::encode(r_change),
+        key_index: 0,
+        sk: hex::encode(change_sk),
+        leaf_index: 0,
+        status: NOTE_PENDING_MINT,
+        nf: String::new(),
+        pending_order: opening.order_id.clone(),
+    });
+    Ok(PreparedOrder {
+        params,
+        opening,
+        spent,
+        change,
+    })
+}
+
+/// Persist the wallet records of a prepared order BEFORE submission
+/// (persist-before-publish): inputs become PENDING_SPEND carrying their
+/// nullifiers and the pending order id, the change note joins as
+/// PENDING_MINT, and the order opening is saved. A crash after this point
+/// loses nothing the chain will later assume the wallet knows.
+#[cfg(not(target_os = "android"))]
+pub fn persist_prepared(
+    notes: &mut NoteStore,
+    orders: &mut OrderStore,
+    prepared: &PreparedOrder,
+) -> Result<(), String> {
+    for (cm, nf) in &prepared.spent {
+        if let Some(rec) = notes.find_mut(cm) {
+            rec.status = NOTE_PENDING_SPEND;
+            rec.nf = nf.clone();
+            rec.pending_order = prepared.opening.order_id.clone();
+        }
+    }
+    if let Some(change) = &prepared.change {
+        notes.upsert(change.clone());
+    }
+    notes.save().map_err(|e| format!("saving notes: {e}"))?;
+    orders.upsert(prepared.opening.clone());
+    orders
+        .save()
+        .map_err(|e| format!("saving order opening: {e}"))
+}
+
+/// Roll the wallet records of a submission back: inputs return to UNSPENT,
+/// the change note and the order opening are dropped. ONLY legal when the
+/// chain PROVABLY did not accept the transaction (an explicit rejection or
+/// a completed reconciliation) — see `apply_submit_failure`.
+#[cfg(not(target_os = "android"))]
+pub fn rollback_prepared(notes: &mut NoteStore, orders: &mut OrderStore, prepared: &PreparedOrder) {
+    for (cm, _) in &prepared.spent {
+        if let Some(rec) = notes.find_mut(cm) {
+            rec.status = NOTE_UNSPENT;
+            rec.nf = String::new();
+            rec.pending_order = String::new();
+        }
+    }
+    if let Some(change) = &prepared.change {
+        let cm = change.cm.clone();
+        notes.retain(|r| r.cm != cm);
+    }
+    let _ = notes.save();
+    orders.remove(&prepared.opening.order_id);
+    let _ = orders.save();
+}
+
+/// React to a submission failure per its classification. Returns true when
+/// the records were rolled back (definite rejection); an UNCERTAIN outcome
+/// keeps every record — the transaction may still land, and the poller's
+/// reconciliation decides later.
+#[cfg(not(target_os = "android"))]
+pub fn apply_submit_failure(
+    notes: &mut NoteStore,
+    orders: &mut OrderStore,
+    prepared: &PreparedOrder,
+    err: &SubmitError,
+) -> bool {
+    match err {
+        SubmitError::Rejected(_) => {
+            rollback_prepared(notes, orders, prepared);
+            true
+        }
+        SubmitError::Uncertain(_) => false,
+    }
+}
 
 /// The trade panel: Buy/Sell tabs, pair selector, price/amount inputs, submit.
 #[component]
@@ -26,7 +267,8 @@ pub fn TradeForm(
     message: Signal<Option<(String, bool)>>,
     chain_client: Signal<Option<Arc<ChainClient>>>,
     my_address: Signal<String>,
-    cash_store: Signal<CashStore>,
+    note_store: Signal<NoteStore>,
+    order_store: Signal<OrderStore>,
 ) -> Element {
     // ── Form state ──
     let mut side = use_signal(|| TradeType::Buy);
@@ -54,353 +296,150 @@ pub fn TradeForm(
     let is_submitting = *submitting.read();
     let can_submit = price_val > 0.0 && amount_val > 0.0 && !is_submitting;
 
-    // ── Balance from CashStore: (token, active_amount, locked_amount) ──
-    // Group all local cash records by token and sum amounts by status.
+    // ── Balances: spendable per token (notes) + locked per token (open
+    //    orders' collateral openings) ──
     let (active_entries, locked_entries): (Vec<(String, u64)>, Vec<(String, u64)>) = {
-        let store = cash_store.read();
-        let mut map: HashMap<String, (u64, u64)> = HashMap::new();
-        for rec in store.records() {
-            let entry = map.entry(rec.token.clone()).or_default();
-            if rec.status == CASH_ACTIVE {
-                entry.0 += rec.amount;
-            } else if rec.status == CASH_LOCKED {
-                entry.1 += rec.amount;
+        let mut active: HashMap<String, u64> = HashMap::new();
+        for rec in note_store.read().records() {
+            if rec.status == NOTE_UNSPENT || rec.status == NOTE_PENDING_MINT {
+                *active.entry(rec.token.clone()).or_default() += rec.amount;
             }
         }
-        let mut pairs: Vec<(String, u64, u64)> =
-            map.into_iter().map(|(t, (a, l))| (t, a, l)).collect();
-        pairs.sort_by(|a, b| a.0.cmp(&b.0));
-        let active = pairs
-            .iter()
-            .filter(|(_, a, _)| *a > 0)
-            .map(|(t, a, _)| (t.clone(), *a))
-            .collect();
-        let locked = pairs
-            .iter()
-            .filter(|(_, _, l)| *l > 0)
-            .map(|(t, _, l)| (t.clone(), *l))
-            .collect();
-        (active, locked)
+        let mut locked: HashMap<String, u64> = HashMap::new();
+        for o in order_store.read().records() {
+            *locked.entry(o.lock_token.clone()).or_default() += o.locked_amount;
+        }
+        let to_sorted = |m: HashMap<String, u64>| {
+            let mut v: Vec<(String, u64)> = m.into_iter().filter(|(_, a)| *a > 0).collect();
+            v.sort_by(|a, b| a.0.cmp(&b.0));
+            v
+        };
+        (to_sorted(active), to_sorted(locked))
     };
 
     // ── Submit handler ──
     let on_submit = move |_| {
-        let price_str = price_input.read().clone();
-        let price: u64 = match price_str.parse() {
+        let price: u64 = match price_input.read().parse() {
             Ok(p) if p > 0 => p,
             _ => {
                 message.set(Some(("✗ Price must be a positive integer!".into(), true)));
                 return;
             }
         };
-
-        let amount_str = amount_input.read().clone();
-        let _amount: u64 = match amount_str.parse() {
+        let q: u64 = match amount_input.read().parse() {
             Ok(a) if a > 0 => a,
             _ => {
                 message.set(Some(("✗ Amount must be a positive integer!".into(), true)));
                 return;
             }
         };
-
-        let fee_str = fee_input.read().clone();
-        let fee = if fee_str.trim().is_empty() {
-            "1".to_string()
-        } else {
-            fee_str
+        let fee: u64 = {
+            let s = fee_input.read().trim().to_string();
+            if s.is_empty() {
+                1
+            } else {
+                match s.parse() {
+                    Ok(f) => f,
+                    Err(_) => {
+                        message.set(Some(("✗ Fee must be a non-negative integer!".into(), true)));
+                        return;
+                    }
+                }
+            }
         };
 
         let trade_type = *side.read();
         let t1 = token1.read().clone();
         let t2 = token2.read().clone();
 
-        // Buy → pays with token2; Sell → spends token1
-        let input_token = if trade_type == TradeType::Buy {
-            t2.clone()
-        } else {
-            t1.clone()
-        };
+        #[cfg(target_os = "android")]
+        {
+            let _ = (price, q, fee, trade_type, &t1, &t2);
+            message.set(Some((
+                "✗ On-device order proving is not supported on mobile yet".into(),
+                true,
+            )));
+        }
 
-        // Compute total: Buy → price * amount (token2); Sell → amount (token1)
-        let total: u64 = if trade_type == TradeType::Buy {
-            price * _amount
-        } else {
-            _amount
-        };
+        #[cfg(not(target_os = "android"))]
+        {
+            // Buy → locks token2 (q·price); Sell → locks token1 (q).
+            let lock_token = if trade_type == TradeType::Buy {
+                t2.clone()
+            } else {
+                t1.clone()
+            };
+            let collateral = required_collateral(q, price, trade_type == TradeType::Sell);
+            let need = collateral + fee;
 
-        let pubkey = my_address.read().clone();
-
-        // Smart cash selection — also collect CashRecords for split proof.
-        let (input_cash_ids, input_records, cash_change) = {
-            let store = cash_store.read();
-            match orderbook::select_cash(store.records(), &input_token, total) {
-                orderbook::CashSelection::Exact(ids) => {
-                    let recs: Vec<CashRecord> = store
-                        .records()
-                        .iter()
-                        .filter(|r| ids.contains(&r.cash_id))
-                        .cloned()
-                        .collect();
-                    (ids, recs, None)
-                }
-                orderbook::CashSelection::WithChange {
-                    cash_ids,
-                    change_amount,
-                } => {
-                    let recs: Vec<CashRecord> = store
-                        .records()
-                        .iter()
-                        .filter(|r| cash_ids.contains(&r.cash_id))
-                        .cloned()
-                        .collect();
-                    let (change_cipher, _change_amt, change_random) =
-                        orderbook::encrypt_amount_with_info(&change_amount.to_string());
-                    let change_cash_id =
-                        orderbook::compute_cash_id(&pubkey, &input_token, &change_cipher);
-                    let change = CashChange {
-                        cash_id: change_cash_id.clone(),
-                        amount: change_cipher,
-                    };
-                    (
-                        cash_ids,
-                        recs,
-                        Some((
-                            change,
-                            change_cash_id,
-                            change_amount,
-                            _change_amt,
-                            change_random,
-                        )),
-                    )
-                }
-                orderbook::CashSelection::Insufficient => {
-                    eprintln!(
-                        "[trade] insufficient {} balance (need {})",
-                        input_token, total
-                    );
+            // Note selection happens on spendable (leaf-indexed) notes only.
+            let selected = match note_store.read().select_unspent(&lock_token, need) {
+                Some(sel) => sel,
+                None => {
                     message.set(Some((
-                        format!("✗ Insufficient {} balance (need {})", input_token, total),
+                        format!("✗ Insufficient {lock_token} balance (need {need})"),
                         true,
                     )));
                     return;
                 }
-            }
-        };
-
-        if input_records.len() > 2 {
-            message.set(Some((
-                "✗ Split circuit caps at 2 inputs — please consolidate first".into(),
-                true,
-            )));
-            return;
-        }
-
-        let order_id = orderbook::compute_order_id(&input_cash_ids);
-
-        let subject = TradePair {
-            token1: t1.clone(),
-            token2: t2.clone(),
-        };
-        // Build the order amount commitment. order.amount always commits to the
-        // token1 quantity so MPC can compare both sides in the same denomination.
-        // For buy orders, we also need a separate locked_commitment for the actual
-        // cash amount (USDT total) used by the split proof and cash tracking.
-        let (order_cipher, _, order_random_hex) =
-            orderbook::encrypt_amount_with_info(&_amount.to_string());
-
-        // Cash commitment: for sell, same as order; for buy, commits to USDT total.
-        let (locked_cipher, locked_random_hex) = if trade_type == TradeType::Buy {
-            let (cipher, _, random) = orderbook::encrypt_amount_with_info(&total.to_string());
-            (cipher, random)
-        } else {
-            (order_cipher.clone(), order_random_hex.clone())
-        };
-
-        let order = Order {
-            id: order_id,
-            trade_type,
-            subject,
-            price: Some(price),
-            amount: order_cipher.clone(),
-            pubkey: pubkey.clone(),
-            input_cash_ids: input_cash_ids.clone(),
-            handling_fee: vec![fee.clone()],
-            block_height: 0,
-            status: OrderStatus::Pending,
-            match_order: None,
-            is_smaller: false,
-        };
-
-        let client = chain_client.read().clone();
-
-        let Some(client) = client else {
-            message.set(Some(("✗ Not connected to chain".into(), true)));
-            return;
-        };
-
-        // Generate split proof if we have a change output.
-        #[cfg(not(target_os = "android"))]
-        let (change_ref, split_proof) =
-            if let Some((ref change, _, change_amount, _, ref change_random_hex)) = cash_change {
-                let proof = match generate_split_proof(
-                    &input_records,
-                    total,
-                    &locked_random_hex,
-                    change_amount,
-                    change_random_hex,
-                ) {
-                    Ok(p) => {
-                        eprintln!("[trade] split proof generated successfully");
-                        p
-                    }
-                    Err(e) => {
-                        eprintln!("[trade] split proof failed: {e}");
-                        message.set(Some((format!("✗ Split proof failed: {e}"), true)));
-                        return;
-                    }
-                };
-                (Some(change.clone()), Some(proof))
-            } else {
-                (None, None)
             };
-        #[cfg(target_os = "android")]
-        let (change_ref, split_proof): (Option<CashChange>, Option<String>) = {
-            let cr = cash_change.as_ref().map(|(c, _, _, _, _)| c.clone());
-            (cr, None)
-        };
 
-        // Update CashStore in memory before sending so auto-settle sees
-        // the correct state immediately.
-        //
-        // Split mode (has change): chain destroys original cash, mints a new
-        // locked cash with a recomputed ID = SHA256(pubkey || token || locked_cipher).
-        // We must mirror that locally so settle can find the locked record.
-        //
-        // No-split mode: chain locks the original cash in-place, keeping IDs.
-        let locked_cash_id = orderbook::compute_cash_id(&pubkey, &input_token, &locked_cipher);
-        {
-            let mut store = cash_store.write();
-            if cash_change.is_some() {
-                // Split: original inputs are spent on-chain; add locked + change records.
-                for rec in store.records_mut().iter_mut() {
-                    if input_cash_ids.contains(&rec.cash_id) {
-                        rec.status = CASH_SPENT;
-                    }
-                }
-                // order.amount commits the token1 qty under a fresh order_random_hex
-                // (kept unlinkable to the locked-cash commitment), so BOTH sides must
-                // persist it to reconstruct the order witness at settle time — sells
-                // included, not just buys.
-                let (rec_order_amount, rec_order_random) =
-                    (Some(_amount), Some(order_random_hex.clone()));
-                store.records_mut().push(CashRecord {
-                    cash_id: locked_cash_id.clone(),
-                    token: input_token.clone(),
-                    amount: total,
-                    random: locked_random_hex.clone(),
-                    status: CASH_LOCKED,
-                    order_amount: rec_order_amount,
-                    order_random: rec_order_random,
-                });
-                if let Some((_, ref change_cash_id, change_amount, _, ref change_random)) =
-                    cash_change
-                {
-                    store.records_mut().push(CashRecord {
-                        cash_id: change_cash_id.clone(),
-                        token: input_token.clone(),
-                        amount: change_amount,
-                        random: change_random.clone(),
-                        status: CASH_ACTIVE,
-                        order_amount: None,
-                        order_random: None,
-                    });
-                }
-            } else {
-                // No split: chain locks original cash in-place, IDs unchanged.
-                for rec in store.records_mut().iter_mut() {
-                    if input_cash_ids.contains(&rec.cash_id) {
-                        rec.status = CASH_LOCKED;
-                        // Persist the order-commitment witness (token1 qty + its fresh
-                        // random) for BOTH sides; a sell that omits it cannot reopen
-                        // order.amount at settle time.
-                        rec.order_amount = Some(_amount);
-                        rec.order_random = Some(order_random_hex.clone());
-                    }
-                }
-            }
-        }
+            let Some(client) = chain_client.read().clone() else {
+                message.set(Some(("✗ Not connected to chain".into(), true)));
+                return;
+            };
 
-        // For buy orders in split mode, pass the cash commitment separately.
-        let locked_commitment_param = if trade_type == TradeType::Buy && cash_change.is_some() {
-            Some(locked_cipher.clone())
-        } else {
-            None
-        };
-
-        submitting.set(true);
-        let amount_str_clone = amount_str.clone();
-        spawn(async move {
-            match client
-                .send_order(
-                    &order,
-                    change_ref.as_ref(),
-                    split_proof,
-                    locked_commitment_param,
+            submitting.set(true);
+            // What the book shows for an own row is the LOCKED collateral
+            // (the column other rows show the collateral commitment in), not
+            // the typed quantity — locked-only model.
+            let locked_str = collateral.to_string();
+            spawn(async move {
+                let result = submit_order(
+                    &client,
+                    note_store,
+                    order_store,
+                    selected,
+                    lock_token,
+                    (t1.clone(), t2.clone()),
+                    trade_type,
+                    price,
+                    q,
+                    fee,
                 )
-                .await
-            {
-                Ok(()) => {
-                    eprintln!("[trade] order submitted successfully: {}", order.id);
-                    own_order_ids
-                        .write()
-                        .insert(order.id.clone(), amount_str_clone);
-                    expanded.set(None);
-
-                    // Persist the Locked state to disk now that the order is on-chain.
-                    let _ = cash_store.read().flush();
-
-                    message.set(Some((
-                        format!("✓ {} {}/{} order submitted", trade_type, t1, t2),
-                        false,
-                    )));
-                }
-                Err(e) => {
-                    eprintln!("[trade] send order failed: {e}");
-                    // Rollback: undo all in-memory cash changes.
-                    {
-                        let mut store = cash_store.write();
-                        if cash_change.is_some() {
-                            // Split rollback: revert originals to Active,
-                            // remove locked + change records.
-                            for rec in store.records_mut().iter_mut() {
-                                if input_cash_ids.contains(&rec.cash_id) {
-                                    rec.status = CASH_ACTIVE;
-                                }
-                            }
-                            store.records_mut().retain(|r| {
-                                r.cash_id != locked_cash_id
-                                    && cash_change
-                                        .as_ref()
-                                        .map_or(true, |(_, cid, _, _, _)| r.cash_id != *cid)
-                            });
+                .await;
+                match result {
+                    Ok((order_id, confirmed)) => {
+                        own_order_ids.write().insert(order_id, locked_str);
+                        expanded.set(None);
+                        if confirmed {
+                            message.set(Some((
+                                format!("✓ {} {}/{} order submitted", trade_type, t1, t2),
+                                false,
+                            )));
                         } else {
-                            // No-split rollback: revert originals to Active.
-                            for rec in store.records_mut().iter_mut() {
-                                if input_cash_ids.contains(&rec.cash_id) {
-                                    rec.status = CASH_ACTIVE;
-                                }
-                            }
+                            // Uncertain outcome: records are kept; the
+                            // poller reconciles against the chain.
+                            message.set(Some((
+                                format!(
+                                    "⚠ {} {}/{} order submission unconfirmed — reconciling",
+                                    trade_type, t1, t2
+                                ),
+                                true,
+                            )));
                         }
                     }
-                    message.set(Some((format!("✗ Send order failed: {e}"), true)));
+                    Err(e) => {
+                        message.set(Some((format!("✗ Send order failed: {e}"), true)));
+                    }
                 }
-            }
-            submitting.set(false);
-        });
+                submitting.set(false);
+            });
 
-        price_input.set(String::new());
-        amount_input.set(String::new());
-        fee_input.set("1".to_string());
+            price_input.set(String::new());
+            amount_input.set(String::new());
+            fee_input.set("1".to_string());
+        }
     };
 
     rsx! {
@@ -497,7 +536,7 @@ pub fn TradeForm(
                     span { class: "total-value", "{total_str}" }
                 }
 
-                // Active Token
+                // Spendable notes
                 div { class: "balance-section",
                     span { class: "balance-header", "Active Token" }
                     if active_entries.is_empty() {
@@ -514,7 +553,7 @@ pub fn TradeForm(
                     }
                 }
 
-                // Locked Token
+                // Locked collateral (open orders)
                 div { class: "balance-section",
                     span { class: "balance-header", "Locked Token" }
                     if locked_entries.is_empty() {
@@ -550,63 +589,203 @@ pub fn TradeForm(
     }
 }
 
-/// Generate a split ZK proof from input cash records, locked amount, and change amount.
-/// Returns the proof JSON string on success.
+/// Full order submission: sync the pool tree, prove send_order, persist
+/// the wallet records FIRST (persist-before-publish), then submit. Returns
+/// `(order_id, confirmed_submitted)`. A definite rejection rolls the
+/// records back (Err); an UNCERTAIN outcome (timeout, broken connection)
+/// KEEPS them and returns `confirmed_submitted = false` — the transaction
+/// may have landed, and the poller reconciles against the chain.
 #[cfg(not(target_os = "android"))]
-fn generate_split_proof(
-    input_records: &[CashRecord],
-    locked_amount: u64,
-    locked_random_hex: &str,
-    change_amount: u64,
-    change_random_hex: &str,
-) -> Result<String, String> {
-    let setup = dev_setup_snarkjs("split").map_err(|e| format!("split circuit setup: {e}"))?;
-    let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir)
-        .map_err(|e| format!("loading compiled circuit: {e}"))?;
+#[allow(clippy::too_many_arguments)]
+async fn submit_order(
+    client: &Arc<ChainClient>,
+    mut note_store: Signal<NoteStore>,
+    mut order_store: Signal<OrderStore>,
+    selected: Vec<NoteRecord>,
+    lock_token: String,
+    subject: (String, String),
+    trade_type: TradeType,
+    price: u64,
+    q: u64,
+    fee: u64,
+) -> Result<(OrderID, bool), String> {
+    // Fresh anchor + Merkle paths from the chain head.
+    let tree = client
+        .fetch_note_tree()
+        .await
+        .map_err(|e| format!("syncing note tree: {e}"))?;
 
-    let mut inputs_for_witness = Vec::with_capacity(input_records.len());
-    for rec in input_records {
-        let raw = hex::decode(&rec.random)
-            .map_err(|e| format!("cash {} random hex invalid: {e}", rec.cash_id))?;
-        if raw.len() != 32 {
-            return Err(format!(
-                "cash {} random must be 32 bytes, got {}",
-                rec.cash_id,
-                raw.len()
-            ));
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&raw);
-        inputs_for_witness.push((rec.amount, arr));
+    let chain_id = client.chain_id();
+    let prepared = tokio::task::block_in_place(|| {
+        prepare_order(
+            chain_id,
+            &tree,
+            &selected,
+            &lock_token,
+            subject,
+            trade_type,
+            price,
+            q,
+            fee,
+        )
+    })?;
+
+    {
+        let mut notes = note_store.write();
+        let mut orders = order_store.write();
+        persist_prepared(&mut notes, &mut orders, &prepared)?;
     }
 
-    let locked_random = decode_random_bytes(locked_random_hex)?;
-    let change_random = decode_random_bytes(change_random_hex)?;
-
-    let sp = prove_split(
-        SplitWitness {
-            inputs: inputs_for_witness,
-            locked_amount,
-            locked_random,
-            change_amount,
-            change_random,
-        },
-        &handle,
-        &setup.zkey,
-    )
-    .map_err(|e| format!("prove_split: {e}"))?;
-
-    serde_json::to_string(&sp.proof_json).map_err(|e| format!("serialize proof: {e}"))
+    let order_id = prepared.params.id.clone();
+    match client.send_order(prepared.params.clone()).await {
+        Ok(()) => {
+            eprintln!("[trade] order submitted successfully: {order_id}");
+            Ok((order_id, true))
+        }
+        Err(err) => {
+            let rolled_back = {
+                let mut notes = note_store.write();
+                let mut orders = order_store.write();
+                apply_submit_failure(&mut notes, &mut orders, &prepared, &err)
+            };
+            if rolled_back {
+                Err(err.to_string())
+            } else {
+                // Uncertain: keep everything; the reconciler completes or
+                // rolls back once the chain answers.
+                eprintln!("[trade] submission outcome uncertain for {order_id}: {err}");
+                Ok((order_id, false))
+            }
+        }
+    }
 }
 
-/// Decode a hex string into a 32-byte array.
-#[cfg(not(target_os = "android"))]
-fn decode_random_bytes(s: &str) -> Result<[u8; 32], String> {
-    let bytes = hex::decode(s).map_err(|e| format!("hex decode: {e}"))?;
-    if bytes.len() != 32 {
-        return Err(format!("must be 32 bytes, got {}", bytes.len()));
+#[cfg(all(test, not(target_os = "android")))]
+mod submit_tests {
+    use super::*;
+    use invisibook_lib::note_store::NOTE_PENDING_SPEND;
+
+    fn tmp_stores(tag: &str) -> (NoteStore, OrderStore) {
+        let dir =
+            std::env::temp_dir().join(format!("trade_form_test_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        (
+            NoteStore::load(dir.join("notes.json")),
+            OrderStore::load(dir.join("orders.json")),
+        )
     }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
+
+    fn sample_prepared(order_id: &str, input_cm: &str) -> PreparedOrder {
+        PreparedOrder {
+            params: SendOrderParams {
+                id: order_id.into(),
+                trade_type: 0,
+                subject: TradePairJson {
+                    token1: "ETH".into(),
+                    token2: "USDT".into(),
+                },
+                price: Some(3),
+                pubkey: String::new(),
+                signature: String::new(),
+                anchor: "bb".repeat(32),
+                input_nullifiers: vec!["cc".repeat(32), "dd".repeat(32)],
+                locked_commitment: "ee".repeat(32),
+                fee: 0,
+                change_commitment: "ff".repeat(32),
+                zk_proof: "{}".into(),
+            },
+            opening: OrderOpening {
+                order_id: order_id.into(),
+                q: 2,
+                locked_amount: 6,
+                r_locked: "22".repeat(32),
+                lock_token: "USDT".into(),
+            },
+            spent: vec![(input_cm.to_string(), "cc".repeat(32))],
+            change: Some(NoteRecord {
+                cm: "ff".repeat(32),
+                token: "USDT".into(),
+                amount: 4,
+                r: "33".repeat(32),
+                key_index: 0,
+                sk: "44".repeat(32),
+                leaf_index: 0,
+                status: NOTE_PENDING_MINT,
+                nf: String::new(),
+                pending_order: order_id.into(),
+            }),
+        }
+    }
+
+    fn seeded_input(cm: &str) -> NoteRecord {
+        NoteRecord {
+            cm: cm.into(),
+            token: "USDT".into(),
+            amount: 10,
+            r: "55".repeat(32),
+            key_index: 0,
+            sk: "66".repeat(32),
+            leaf_index: 0,
+            status: NOTE_UNSPENT,
+            nf: String::new(),
+            pending_order: String::new(),
+        }
+    }
+
+    /// P1-7 regression: an UNCERTAIN outcome (the server may have received
+    /// the transaction, the client timed out) must keep every wallet
+    /// record — spent markers, change note, and the order opening.
+    #[test]
+    fn uncertain_submit_error_keeps_all_records() {
+        let (mut notes, mut orders) = tmp_stores("uncertain");
+        let input_cm = "ab".repeat(32);
+        notes.upsert(seeded_input(&input_cm));
+        let prepared = sample_prepared("order-x", &input_cm);
+        persist_prepared(&mut notes, &mut orders, &prepared).unwrap();
+
+        let err = SubmitError::Uncertain("operation timed out".into());
+        let rolled = apply_submit_failure(&mut notes, &mut orders, &prepared, &err);
+
+        assert!(!rolled, "uncertain outcomes must never roll back");
+        let input = notes.find(&input_cm).unwrap();
+        assert_eq!(
+            input.status, NOTE_PENDING_SPEND,
+            "input stays pending-spend"
+        );
+        assert!(!input.nf.is_empty(), "nullifier stays recorded");
+        assert_eq!(input.pending_order, "order-x");
+        assert!(
+            notes.find(&"ff".repeat(32)).is_some(),
+            "change note must be kept"
+        );
+        assert!(
+            orders.find("order-x").is_some(),
+            "order opening must be kept"
+        );
+    }
+
+    /// A DEFINITE rejection rolls everything back: the input returns to
+    /// UNSPENT and the stillborn records disappear.
+    #[test]
+    fn rejected_submit_error_rolls_back() {
+        let (mut notes, mut orders) = tmp_stores("rejected");
+        let input_cm = "cd".repeat(32);
+        notes.upsert(seeded_input(&input_cm));
+        let prepared = sample_prepared("order-y", &input_cm);
+        persist_prepared(&mut notes, &mut orders, &prepared).unwrap();
+
+        let err = SubmitError::Rejected("writing failed (400)".into());
+        let rolled = apply_submit_failure(&mut notes, &mut orders, &prepared, &err);
+
+        assert!(rolled);
+        let input = notes.find(&input_cm).unwrap();
+        assert_eq!(input.status, NOTE_UNSPENT);
+        assert!(input.nf.is_empty());
+        assert!(input.pending_order.is_empty());
+        assert!(
+            notes.find(&"ff".repeat(32)).is_none(),
+            "change note dropped"
+        );
+        assert!(orders.find("order-y").is_none(), "order opening dropped");
+    }
 }
