@@ -309,6 +309,25 @@ func (ot *OrderBook) UpdateOrderComparison(id OrderID, isSmaller bool) error {
 		Update("is_smaller", isSm).Error
 }
 
+// UpdateOrderAmount replaces an order's hidden amount commitment (64-char
+// hex). Used by co-zk settlement when the surviving larger order stays on the
+// book with its remainder commitment.
+func (ot *OrderBook) UpdateOrderAmount(id OrderID, amount CipherText) error {
+	return ot.db.Model(&OrderScheme{}).Where("id = ?", string(id)).
+		Update("amount", string(amount)).Error
+}
+
+// UpdateOrderInputCashIDs replaces an order's locked input cash IDs.
+// `cashIDs` must be non-empty for an order that stays on the book.
+func (ot *OrderBook) UpdateOrderInputCashIDs(id OrderID, cashIDs []string) error {
+	b, err := json.Marshal(cashIDs)
+	if err != nil {
+		return err
+	}
+	return ot.db.Model(&OrderScheme{}).Where("id = ?", string(id)).
+		Update("input_cash_ids", string(b)).Error
+}
+
 // ────────────────────── Compare Submission CRUD ──────────────────────
 
 // SaveCompareSubmission inserts a pending compare submission row.

@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{env, fs, path::PathBuf};
 
 use clap::Parser;
 use rand::RngCore;
@@ -22,6 +22,11 @@ pub struct ClientConfig {
     /// Defaults to `~/.invisibook`.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+    /// Optional explicit path to the 2-party settlement helper binary.
+    /// When unset, `settle2p_bin()` falls back to the env var / exe-adjacent
+    /// lookup chain.
+    #[serde(default)]
+    pub settle2p_bin: Option<PathBuf>,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -144,6 +149,40 @@ impl ClientConfig {
     /// Path to the cash store file inside the data directory.
     pub fn cash_path(&self) -> PathBuf {
         self.data_dir.join("cash.json")
+    }
+
+    /// Resolves the 2-party settlement helper binary path, in order:
+    /// the `settle2p_bin` config field, the `INVISIBOOK_SETTLE2P_BIN` env
+    /// var, then a file named `settle2p_session` next to the current
+    /// executable (only if it exists). Returns `None` if nothing matches.
+    pub fn settle2p_bin(&self) -> Option<PathBuf> {
+        if let Some(p) = &self.settle2p_bin {
+            return Some(p.clone());
+        }
+        if let Ok(p) = env::var("INVISIBOOK_SETTLE2P_BIN") {
+            return Some(PathBuf::from(p));
+        }
+        if let Ok(exe) = env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let candidate = dir.join("settle2p_session");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    }
+
+    /// Directory for 2-party settlement key material inside the data
+    /// directory. Creating the directory is the caller's responsibility.
+    pub fn settle2p_keys_dir(&self) -> PathBuf {
+        self.data_dir.join("settle2p-keys")
+    }
+
+    /// Directory for 2-party settlement session state inside the data
+    /// directory. Creating the directory is the caller's responsibility.
+    pub fn settle2p_sessions_dir(&self) -> PathBuf {
+        self.data_dir.join("settle2p").join("sessions")
     }
 
     /// Derives a 32-byte ed25519 seed from the mnemonic at index 0, path m/44'/60'/0'/0'/0'.

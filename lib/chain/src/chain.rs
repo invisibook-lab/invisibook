@@ -1,3 +1,4 @@
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use yu_sdk::{KeyPair, YuClient};
@@ -102,6 +103,93 @@ pub struct SettleTokenLegParam {
     pub recv_commitment: String,
     pub recv_pubkey: String,
     pub zk_proof: String,
+}
+
+/// Mirror of chain Go `CoZkSettleRequest` — the single-submission co-zk
+/// settlement message. `order_a_id` must be the maker's order (earlier block
+/// height; ties broken by the smaller order ID), `cmp` the public three-way
+/// comparison sign(a - b), and the six commitments the circuit's public
+/// outputs. `sig_a`/`sig_b` are ed25519 signatures over
+/// `settle_cozk_message` by each order's key.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettleCoZkParams {
+    pub order_a_id: OrderID,
+    pub order_b_id: OrderID,
+    pub cmp: i8,
+    pub new_order_a_commitment: String,
+    pub new_order_b_commitment: String,
+    pub new_locked_a_commitment: String,
+    pub new_locked_b_commitment: String,
+    pub recv_a_commitment: String,
+    pub recv_b_commitment: String,
+    pub sig_a: String,
+    pub sig_b: String,
+    pub zk_proof: String,
+}
+
+/// Builds the canonical co-zk settlement byte string with the given domain
+/// `prefix`, in lockstep with Go `core.coZkSettleMessage`. The signature
+/// fields of `params` are not part of the message and may be empty.
+fn settle_cozk_message_with_prefix(prefix: &str, params: &SettleCoZkParams) -> Vec<u8> {
+    let msg = format!(
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        prefix,
+        params.order_a_id,
+        params.order_b_id,
+        params.cmp,
+        params.new_order_a_commitment,
+        params.new_order_b_commitment,
+        params.new_locked_a_commitment,
+        params.new_locked_b_commitment,
+        params.recv_a_commitment,
+        params.recv_b_commitment,
+    );
+    msg.into_bytes()
+}
+
+/// Canonical byte string both traders ed25519-sign for a 3-party co-zk
+/// settlement. Must stay in lockstep with Go `core.CoZkSettleMessage`. The
+/// signature fields of `params` are not part of the message and may be empty.
+pub fn settle_cozk_message(params: &SettleCoZkParams) -> Vec<u8> {
+    settle_cozk_message_with_prefix("invisibook-cozk-settle", params)
+}
+
+/// Canonical byte string both traders ed25519-sign for a 2-party co-zk
+/// settlement. Must stay in lockstep with Go `core.CoZk2pSettleMessage`; the
+/// distinct prefix domain-separates the 2-party variant from the 3-party one.
+/// The signature fields of `params` are not part of the message and may be empty.
+pub fn settle_cozk2p_message(params: &SettleCoZkParams) -> Vec<u8> {
+    settle_cozk_message_with_prefix("invisibook-cozk2p-settle", params)
+}
+
+/// Verifies an ed25519 signature over `settle_cozk2p_message(params)`.
+/// `pubkey_hex` must be the signer's raw ed25519 public key as a 64-char hex
+/// string and `sig_hex` the 64-byte signature as a 128-char hex string.
+/// Returns `false` (never panics) on any malformed input.
+pub fn verify_settle_cozk2p_sig(
+    params: &SettleCoZkParams,
+    pubkey_hex: &str,
+    sig_hex: &str,
+) -> bool {
+    let Ok(pk_bytes) = hex::decode(pubkey_hex) else {
+        return false;
+    };
+    let Ok(sig_bytes) = hex::decode(sig_hex) else {
+        return false;
+    };
+    let Ok(pk_arr) = <[u8; 32]>::try_from(pk_bytes.as_slice()) else {
+        return false;
+    };
+    let Ok(sig_arr) = <[u8; 64]>::try_from(sig_bytes.as_slice()) else {
+        return false;
+    };
+    let Ok(verifying_key) = VerifyingKey::from_bytes(&pk_arr) else {
+        return false;
+    };
+    let signature = Signature::from_bytes(&sig_arr);
+    verifying_key
+        .verify(&settle_cozk2p_message(params), &signature)
+        .is_ok()
 }
 
 /// Register settle address request params.
@@ -385,6 +473,9 @@ impl ChainClient {
     /// Submits this party's MPC shares for order comparison.
     /// The chain collects both parties' shares and verifies the MAC,
     /// then sets both orders to Compared status.
+    #[deprecated(
+        note = "legacy settlement path; use the 2-party collaborative settle_orders_cozk2p flow"
+    )]
     pub async fn compare_orders(
         &self,
         order_id: OrderID,
@@ -410,6 +501,9 @@ impl ChainClient {
     /// Submits this party's settlement confirmation (after comparison).
     /// The larger party (IsSmaller=false) must provide a ZK `leg`; the smaller
     /// party (IsSmaller=true) confirms without proof (`leg` is `None`).
+    #[deprecated(
+        note = "legacy settlement path; use the 2-party collaborative settle_orders_cozk2p flow"
+    )]
     pub async fn settle_orders(
         &self,
         order_id: OrderID,
@@ -423,6 +517,59 @@ impl ChainClient {
         };
         self.client
             .write_chain("orderbook", "SettleOrders", &params, self.chain_id, 100, 0)
+            .await
+    }
+
+    /// ed25519-signs the canonical co-zk settlement message with this
+    /// client's key, returning the 128-char hex signature. The signature
+    /// fields of `params` are ignored (they are not part of the message).
+    pub fn sign_settle_cozk(&self, params: &SettleCoZkParams) -> String {
+        self.sign(&settle_cozk_message(params))
+    }
+
+    /// Submits the jointly generated co-zk settlement in a single writing.
+    /// `params` must carry both traders' signatures (`sig_a`, `sig_b`) and
+    /// the collaboratively generated proof; either party may submit.
+    pub async fn settle_orders_cozk(
+        &self,
+        params: &SettleCoZkParams,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.client
+            .write_chain(
+                "orderbook",
+                "SettleOrdersCoZk",
+                params,
+                self.chain_id,
+                100,
+                0,
+            )
+            .await
+    }
+
+    /// ed25519-signs the canonical 2-party co-zk settlement message with this
+    /// client's key, returning the 128-char hex signature. The signature
+    /// fields of `params` are ignored (they are not part of the message).
+    pub fn sign_settle_cozk2p(&self, params: &SettleCoZkParams) -> String {
+        self.sign(&settle_cozk2p_message(params))
+    }
+
+    /// Submits the jointly generated 2-party co-zk settlement in a single
+    /// writing. `params` must carry both traders' signatures (`sig_a`,
+    /// `sig_b`) and the collaboratively generated proof; either party may
+    /// submit.
+    pub async fn settle_orders_cozk2p(
+        &self,
+        params: &SettleCoZkParams,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.client
+            .write_chain(
+                "orderbook",
+                "SettleOrdersCoZk2p",
+                params,
+                self.chain_id,
+                100,
+                0,
+            )
             .await
     }
 
@@ -832,5 +979,114 @@ fn query_item_to_order(item: QueryOrderItem) -> Order {
         status,
         match_order: item.match_order,
         is_smaller: item.is_smaller,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a SettleCoZkParams with the given `cmp` and six distinct dummy
+    /// 64-char commitments; signature and proof fields are left empty.
+    fn test_params(cmp: i8) -> SettleCoZkParams {
+        SettleCoZkParams {
+            order_a_id: "order-a-id".to_string(),
+            order_b_id: "order-b-id".to_string(),
+            cmp,
+            new_order_a_commitment: "11".repeat(32),
+            new_order_b_commitment: "22".repeat(32),
+            new_locked_a_commitment: "33".repeat(32),
+            new_locked_b_commitment: "44".repeat(32),
+            recv_a_commitment: "55".repeat(32),
+            recv_b_commitment: "66".repeat(32),
+            sig_a: String::new(),
+            sig_b: String::new(),
+            zk_proof: String::new(),
+        }
+    }
+
+    /// Byte-lockstep check against a hand-concatenated 2p message for every
+    /// `cmp` sign; `cmp_str` is written out explicitly to mirror Go's
+    /// `strconv.Itoa` rendering rather than reusing Rust formatting.
+    #[test]
+    fn settle_cozk2p_message_lockstep() {
+        for (cmp, cmp_str) in [(-1i8, "-1"), (0i8, "0"), (1i8, "1")] {
+            let p = test_params(cmp);
+            let expected = String::from("invisibook-cozk2p-settle:")
+                + &p.order_a_id
+                + ":"
+                + &p.order_b_id
+                + ":"
+                + cmp_str
+                + ":"
+                + &p.new_order_a_commitment
+                + ":"
+                + &p.new_order_b_commitment
+                + ":"
+                + &p.new_locked_a_commitment
+                + ":"
+                + &p.new_locked_b_commitment
+                + ":"
+                + &p.recv_a_commitment
+                + ":"
+                + &p.recv_b_commitment;
+            assert_eq!(settle_cozk2p_message(&p), expected.into_bytes());
+        }
+    }
+
+    /// The 3-party builder must keep its original prefix (domain separation).
+    #[test]
+    fn settle_cozk_message_keeps_3p_prefix() {
+        let p = test_params(1);
+        let msg = settle_cozk_message(&p);
+        assert!(msg.starts_with(b"invisibook-cozk-settle:"));
+        assert!(!msg.starts_with(b"invisibook-cozk2p-settle:"));
+    }
+
+    /// sign_settle_cozk2p output must verify under verify_settle_cozk2p_sig,
+    /// and any tampering (signature bit-flip, different params, wrong domain,
+    /// malformed inputs) must fail verification without panicking.
+    #[test]
+    fn sign_verify_settle_cozk2p_roundtrip() {
+        let seed = [7u8; 32];
+        let client = ChainClient::new("http://localhost:7999", "ws://localhost:8999", seed, 1926);
+        let params = test_params(1);
+
+        let sig = client.sign_settle_cozk2p(&params);
+        assert!(verify_settle_cozk2p_sig(&params, client.pubkey_hex(), &sig));
+
+        // Flipping one bit of the signature must break verification.
+        let mut bad_sig = hex::decode(&sig).unwrap();
+        bad_sig[0] ^= 0x01;
+        assert!(!verify_settle_cozk2p_sig(
+            &params,
+            client.pubkey_hex(),
+            &hex::encode(bad_sig)
+        ));
+
+        // A signature over different params must not verify.
+        let other = test_params(-1);
+        assert!(!verify_settle_cozk2p_sig(&other, client.pubkey_hex(), &sig));
+
+        // A 3-party signature must not verify in the 2-party domain.
+        let sig_3p = client.sign_settle_cozk(&params);
+        assert!(!verify_settle_cozk2p_sig(
+            &params,
+            client.pubkey_hex(),
+            &sig_3p
+        ));
+
+        // Malformed inputs must return false, not panic.
+        assert!(!verify_settle_cozk2p_sig(&params, "zz", &sig));
+        assert!(!verify_settle_cozk2p_sig(
+            &params,
+            client.pubkey_hex(),
+            "zz"
+        ));
+        assert!(!verify_settle_cozk2p_sig(
+            &params,
+            client.pubkey_hex(),
+            "deadbeef"
+        ));
     }
 }

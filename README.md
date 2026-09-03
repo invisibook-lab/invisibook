@@ -92,6 +92,29 @@ Use the trade form on the right panel to place orders:
 - **Your own orders:** amount is displayed in plain text.
 - **Other orders:** amount is shown as encrypted cipher text.
 
+## Collaborative ZK Settlement (co-zk)
+
+Matched orders settle with a **single proof generated jointly by both
+traders**, so neither ever learns the other's hidden amount. The chain
+verifies the proof, removes the fully-filled order from the book, and updates
+the surviving order's hidden amount commitment in place (keeping its time
+priority). The active path is the **2-party** variant ([cozk2p](cozk2p/):
+malicious-secure SPDZ + collaborative TurboPlonk, no helper node). See
+[docs/cozk2p_design.md](docs/cozk2p_design.md) for the protocol, circuit, and
+threat model, and [docs/cozk_experiments.md](docs/cozk_experiments.md) for
+measurements.
+
+```bash
+# unit + satisfiability + 2-party e2e (mock network)
+cd cozk2p && cargo test
+
+# benchmark: single-prover vs full 2-party session
+cargo run --release --bin bench_settle2p -- --runs 5
+
+# real collaborative proof settled on a running chain
+make test-e2e-cozk2p
+```
+
 ## License
 
 See [LICENSE](LICENSE).

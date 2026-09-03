@@ -1420,6 +1420,7 @@ dependencies = [
  "bip39",
  "clap",
  "dirs",
+ "ed25519-dalek",
  "futures-util",
  "hex",
  "hmac",

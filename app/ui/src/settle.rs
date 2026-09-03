@@ -1,228 +1,662 @@
-//! Settlement business logic for the desktop app.
+//! Desktop settlement via the 2-party collaborative-ZK path
+//! (`SettleOrdersCoZk2p`).
 //!
-//! Mirrors the CLI settle flow (`cli_settle.rs`) but adapted for async
-//! desktop use with progress callbacks and on-chain address exchange.
+//! The app owns no cryptography: all of it — the MPC comparison, the fill
+//! reveal, the output-commitment exchange, and the collaborative PLONK
+//! proof — runs in the pre-built `settle2p_session` subprocess (a separate
+//! cargo workspace pinned to an older toolchain, so it cannot be linked).
+//! This module drives that subprocess over piped stdio, ferries the one
+//! ed25519 signature it asks for, submits the single on-chain writing, and
+//! persists the resulting UTXOs.
 //!
-//! NOTE: Peer address is currently exchanged on-chain. In production,
-//! this will use Tor or similar anonymous overlay network for privacy.
+//! NOTE: peer QUIC addresses are exchanged on-chain today; production would
+//! use an anonymous overlay. The subprocess uses mock Beaver triples and a
+//! dev SRS — testnet only.
 
 #[cfg(not(target_os = "android"))]
 mod inner {
-    use std::{collections::HashSet, net::SocketAddr, path::Path, sync::Arc};
+    use std::{
+        collections::HashSet, fmt, fs, path::PathBuf, process::Stdio, sync::Arc, time::Duration,
+    };
 
-    use num_bigint::BigUint;
-    use rand::RngCore;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use serde::{Deserialize, Serialize};
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+        process::Command,
+    };
 
     use invisibook_lib::{
         cash_store::CashRecord,
-        chain::{ChainClient, SettleTokenLegParam},
+        chain::{ChainClient, SettleCoZkParams},
         orderbook,
         types::*,
     };
-    use mpc::{SettleConfig, SettleShare, Side, settle};
-    use zk::{
-        setup::dev_setup_snarkjs,
-        test_circuit::TestCircuitHandle,
-        wallet::{SettleLargerWitness, fr_to_hex, poseidon_commit, prove_settle_larger},
-    };
 
-    const POSEIDON_ZERO_COMMITMENT_HEX: &str =
+    /// `Poseidon(0, 0)` — the zero-commitment used to pad unused locked
+    /// slots to the circuit's fixed N=2 shape.
+    pub const POSEIDON_ZERO_COMMITMENT_HEX: &str =
         "2098f5fb9e239eab3ceac3f27b81e481dc3124d55ffed523a839ee8446b64864";
 
-    /// Outcome of a successful settlement.
-    pub struct SettleOutcome {
-        /// Cash ID of the received cash.
-        pub recv_cash_id: String,
-        /// Token of the received cash.
-        pub recv_token: String,
-        /// Plaintext amount received.
-        pub recv_amount: u64,
-        /// Random used for the received cash commitment.
-        pub recv_random_hex: String,
-        /// Larger party's change cash ID (None for smaller party or no change).
-        pub change_cash_id: Option<String>,
-        /// Larger party's change token.
-        pub change_token: Option<String>,
-        /// Larger party's change plaintext amount.
-        pub change_amount: Option<u64>,
-        /// Larger party's change random (hex).
-        pub change_random_hex: Option<String>,
-        /// Larger party's change commitment (hex).
-        pub change_commitment_hex: Option<String>,
+    /// A newly minted UTXO the wallet must persist to keep it spendable.
+    #[derive(Clone, Debug)]
+    pub struct NewCash {
+        pub cash_id: String,
+        pub token: String,
+        pub amount: u64,
+        pub random_hex: String,
     }
 
-    /// Run the full settlement flow for a matched order.
-    ///
-    /// `progress` is called at each major step so the UI can display status.
-    #[allow(clippy::too_many_arguments)]
+    /// The surviving (larger) side's on-book remainder after settlement: a
+    /// fresh Locked collateral cash plus the order-commitment witness the
+    /// chain relisted the order under.
+    #[derive(Clone, Debug)]
+    pub struct Remainder {
+        pub locked: NewCash,
+        pub order_amount: u64,
+        pub order_random_hex: String,
+    }
+
+    /// The outcome of a successful settlement, from this trader's view.
+    #[derive(Clone, Debug)]
+    pub struct SettleOutcome {
+        pub cmp: i8,
+        pub recv: NewCash,
+        /// Present only when this side survived on the book (had a
+        /// remainder); the chain relisted the order in place.
+        pub remainder: Option<Remainder>,
+        /// Session scratch dir; the caller deletes it after persisting.
+        pub session_dir: PathBuf,
+    }
+
+    /// Why a settlement did not complete. `CrossPrice`/`SelfMatch` are
+    /// permanent (the caller should stop retrying the pair); `Transient`
+    /// and `OnChainRejected` are retryable after a backoff.
+    #[derive(Clone, Debug)]
+    pub enum SettleError {
+        CrossPrice(String),
+        SelfMatch,
+        Transient(String),
+        OnChainRejected(String),
+    }
+
+    impl fmt::Display for SettleError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                SettleError::CrossPrice(m) => write!(f, "cross-price match unsupported: {m}"),
+                SettleError::SelfMatch => write!(f, "self-matched pair cannot settle"),
+                SettleError::Transient(m) => write!(f, "{m}"),
+                SettleError::OnChainRejected(m) => write!(f, "settlement rejected on chain: {m}"),
+            }
+        }
+    }
+
+    /// Everything the settle flow needs from config: the prover binary and
+    /// the two data-dir subpaths.
+    #[derive(Clone, Debug)]
+    pub struct SettleDeps {
+        pub bin: PathBuf,
+        pub keys_dir: PathBuf,
+        pub sessions_dir: PathBuf,
+    }
+
+    /// The set of locked input cash IDs an order spends when it settles.
+    pub fn spent_cash_ids(order: &Order) -> HashSet<String> {
+        order.input_cash_ids.iter().cloned().collect()
+    }
+
+    // ── Subprocess wire structs (mirror cozk2p's session serde exactly) ──
+
+    #[derive(Serialize)]
+    struct LockedCashWire {
+        amount: u64,
+        random: String,
+    }
+
+    #[derive(Serialize)]
+    struct MyPrivateWire {
+        order_amount: u64,
+        r_order: String,
+        locked: Vec<LockedCashWire>,
+    }
+
+    #[derive(Serialize)]
+    struct SessionInputWire {
+        role: String,
+        order_a_id: String,
+        order_b_id: String,
+        my_order_id: String,
+        my_input_cash_ids: Vec<String>,
+        my_lock_token: String,
+        my_recv_token: String,
+        price: u64,
+        a_is_seller: bool,
+        order_a: String,
+        order_b: String,
+        locked_a: [String; 2],
+        locked_b: [String; 2],
+        my: MyPrivateWire,
+    }
+
+    #[derive(Deserialize)]
+    struct NeedSigWire {
+        cmp: i8,
+        new_order_a: String,
+        new_order_b: String,
+        new_locked_a: String,
+        new_locked_b: String,
+        recv_a: String,
+        recv_b: String,
+    }
+
+    /// Subset of the subprocess `SettlePublic` the app cross-checks; serde
+    /// ignores the fields not named here.
+    #[derive(Deserialize)]
+    struct PublicWire {
+        order_a: String,
+        order_b: String,
+    }
+
+    #[derive(Deserialize)]
+    struct MyOutcomeWire {
+        recv_amount: u64,
+        r_recv: String,
+        recv_commitment: String,
+        new_order_amount: u64,
+        r_order_new: String,
+        new_order_commitment: String,
+        new_locked_amount: u64,
+        r_locked_new: String,
+        new_locked_commitment: String,
+    }
+
+    #[derive(Deserialize)]
+    struct SessionResultWire {
+        cmp: i8,
+        public: PublicWire,
+        proof_hex: String,
+        sig_a: String,
+        sig_b: String,
+        my: MyOutcomeWire,
+    }
+
+    /// Crash-recovery record the subprocess writes before releasing its
+    /// signature. Mirrors cozk2p's `SessionWitness`.
+    #[derive(Deserialize)]
+    struct SessionWitnessWire {
+        my_input_cash_ids: Vec<String>,
+        my_lock_token: String,
+        my_recv_token: String,
+        my: MyOutcomeWire,
+    }
+
+    /// Token an order locks as collateral: Token1 for a sell, Token2 for a
+    /// buy.
+    fn lock_token(order: &Order) -> String {
+        match order.trade_type {
+            TradeType::Buy => order.subject.token2.clone(),
+            TradeType::Sell => order.subject.token1.clone(),
+        }
+    }
+
+    /// Token an order's owner receives at settlement (the opposite leg).
+    fn recv_token(order: &Order) -> String {
+        match order.trade_type {
+            TradeType::Buy => order.subject.token1.clone(),
+            TradeType::Sell => order.subject.token2.clone(),
+        }
+    }
+
+    /// Read one order's locked input commitment hexes from chain state,
+    /// padded to two slots with the zero commitment. `order.input_cash_ids`
+    /// must reference cashes owned by `order.pubkey` in `token`.
+    async fn gather_locked_commitments(
+        client: &ChainClient,
+        order: &Order,
+        token: &str,
+    ) -> Result<[String; 2], SettleError> {
+        let account = client
+            .get_account(&order.pubkey, token)
+            .await
+            .map_err(|e| SettleError::Transient(format!("get_account: {e}")))?;
+        let mut out = [
+            POSEIDON_ZERO_COMMITMENT_HEX.to_string(),
+            POSEIDON_ZERO_COMMITMENT_HEX.to_string(),
+        ];
+        for (slot, id) in order.input_cash_ids.iter().take(2).enumerate() {
+            let cash = account.cash.iter().find(|c| &c.id == id).ok_or_else(|| {
+                SettleError::Transient(format!("locked cash {id} not found on chain"))
+            })?;
+            out[slot] = cash.amount.clone();
+        }
+        Ok(out)
+    }
+
+    /// Build this trader's private witness from its local cash records.
+    /// Sells commit the token1 quantity with the locked cash's own random;
+    /// buys (and every co-zk survivor) carry an explicit `order_amount` /
+    /// `order_random` distinct from the locked-cash commitment.
+    fn build_my_private(
+        order: &Order,
+        records: &[CashRecord],
+    ) -> Result<MyPrivateWire, SettleError> {
+        let mut locked = Vec::new();
+        for id in &order.input_cash_ids {
+            let rec = records.iter().find(|r| &r.cash_id == id).ok_or_else(|| {
+                SettleError::Transient(format!("missing local CashRecord for locked input {id}"))
+            })?;
+            locked.push(LockedCashWire {
+                amount: rec.amount,
+                random: rec.random.clone(),
+            });
+        }
+        if locked.is_empty() {
+            return Err(SettleError::Transient("order has no locked inputs".into()));
+        }
+        // The first input carries the order-commitment witness.
+        let first = records
+            .iter()
+            .find(|r| r.cash_id == order.input_cash_ids[0])
+            .expect("checked above");
+        let (order_amount, r_order) = match (first.order_amount, first.order_random.clone()) {
+            (Some(amount), Some(random)) => (amount, random),
+            _ => {
+                let sum: u64 = locked.iter().map(|l| l.amount).sum();
+                (sum, first.random.clone())
+            }
+        };
+        Ok(MyPrivateWire {
+            order_amount,
+            r_order,
+            locked,
+        })
+    }
+
+    /// Run the full 2-party collaborative settlement for a matched pair.
+    /// `my_order` and `counter_order` must be mutually `Matched`.
     pub async fn run_settle(
         client: &Arc<ChainClient>,
         my_order: &Order,
         counter_order: &Order,
         cash_records: &[CashRecord],
+        deps: &SettleDeps,
         mut progress: impl FnMut(&str),
-    ) -> Result<SettleOutcome, String> {
+    ) -> Result<SettleOutcome, SettleError> {
         let my_pubkey = client.pubkey_hex().to_string();
-        let my_order_id = my_order.id.clone();
-        let match_order_id = counter_order.id.clone();
 
-        // Execution price: maker's price (earlier block_height).
-        // Same block height: use the lower price (favorable to buyer).
-        let price = match (my_order.price, counter_order.price) {
-            (Some(p), Some(q)) => {
-                if my_order.block_height < counter_order.block_height {
-                    p
-                } else if counter_order.block_height < my_order.block_height {
-                    q
-                } else {
-                    p.min(q)
-                }
-            }
-            _ => return Err("orders missing price".into()),
-        };
-
-        // Determine locked tokens.
-        let my_lock_token = match my_order.trade_type {
-            TradeType::Buy => my_order.subject.token2.clone(),
-            TradeType::Sell => my_order.subject.token1.clone(),
-        };
-        let counter_lock_token = match counter_order.trade_type {
-            TradeType::Buy => counter_order.subject.token2.clone(),
-            TradeType::Sell => counter_order.subject.token1.clone(),
-        };
-
-        // Load locked CashRecords from the provided records slice.
-        let my_locked_recs: Vec<CashRecord> = my_order
-            .input_cash_ids
-            .iter()
-            .filter_map(|id| cash_records.iter().find(|r| &r.cash_id == id).cloned())
-            .collect();
-        if my_locked_recs.is_empty() {
-            return Err("missing local CashRecord for locked inputs".into());
+        // Self-match would deadlock the serial settle coroutine.
+        if counter_order.pubkey == my_pubkey {
+            return Err(SettleError::SelfMatch);
         }
-        let my_locked_amount: u64 = my_locked_recs.iter().map(|r| r.amount).sum();
 
-        // ═══════════ Phase 0: Bind QUIC and exchange addresses on-chain ═══════════
-        progress("Registering address on chain...");
+        // Deterministic roles: order A is the maker (lower block height,
+        // tie → smaller id), mirroring the chain.
+        let (maker, taker) = orderbook::maker_taker(my_order, counter_order);
+        let i_am_maker = maker.id == my_order.id;
+        let role = if i_am_maker { "trader-a" } else { "trader-b" };
 
-        // Bind ephemeral port for QUIC.
-        let local_sock = tokio::net::UdpSocket::bind("0.0.0.0:0")
-            .await
-            .map_err(|e| format!("bind ephemeral port: {e}"))?;
-        let local_port = local_sock
-            .local_addr()
-            .map_err(|e| format!("local_addr: {e}"))?
-            .port();
-        drop(local_sock); // release so QUIC can bind it
-        let local_addr_str = format!("127.0.0.1:{local_port}");
+        // Equal-price requirement of the co-zk circuit.
+        let (mp, tp) = match (maker.price, taker.price) {
+            (Some(mp), Some(tp)) => (mp, tp),
+            _ => return Err(SettleError::CrossPrice("orders missing price".into())),
+        };
+        if mp != tp {
+            return Err(SettleError::CrossPrice(
+                "co-zk settlement requires equal order prices".into(),
+            ));
+        }
+        let price = mp;
+        let a_is_seller = maker.trade_type == TradeType::Sell;
 
-        // Register our address on chain.
+        // Chain-sourced public inputs.
+        progress("Reading on-chain settlement state...");
+        let order_a = maker.amount.clone();
+        let order_b = taker.amount.clone();
+        let locked_a = gather_locked_commitments(client, maker, &lock_token(maker)).await?;
+        let locked_b = gather_locked_commitments(client, taker, &lock_token(taker)).await?;
+
+        let my_lock_token = lock_token(my_order);
+        let my_recv_token = recv_token(my_order);
+        let my_priv = build_my_private(my_order, cash_records)?;
+
+        let input = SessionInputWire {
+            role: role.to_string(),
+            order_a_id: maker.id.clone(),
+            order_b_id: taker.id.clone(),
+            my_order_id: my_order.id.clone(),
+            my_input_cash_ids: my_order.input_cash_ids.clone(),
+            my_lock_token: my_lock_token.clone(),
+            my_recv_token: my_recv_token.clone(),
+            price,
+            a_is_seller,
+            order_a: order_a.clone(),
+            order_b: order_b.clone(),
+            locked_a,
+            locked_b,
+            my: my_priv,
+        };
+
+        let session_dir = deps.sessions_dir.join(&my_order.id);
+        fs::create_dir_all(&session_dir)
+            .map_err(|e| SettleError::Transient(format!("creating session dir: {e}")))?;
+        let input_path = session_dir.join("input.json");
+        fs::write(
+            &input_path,
+            serde_json::to_vec(&input).expect("SessionInput serializes"),
+        )
+        .map_err(|e| SettleError::Transient(format!("writing session input: {e}")))?;
+
+        // ── Rendezvous: exchange QUIC addresses on chain ──
+        progress("Registering settlement address...");
+        let base = bind_ephemeral_port().await?;
+        let local_addr = format!("127.0.0.1:{base}");
         client
-            .register_settle_addr(my_order_id.clone(), match_order_id.clone(), &local_addr_str)
+            .register_settle_addr(my_order.id.clone(), counter_order.id.clone(), &local_addr)
             .await
-            .map_err(|e| format!("register_settle_addr: {e}"))?;
+            .map_err(|e| SettleError::Transient(format!("register_settle_addr: {e}")))?;
 
-        // Poll for counterparty's address.
-        progress("Waiting for counterparty address...");
-        let peer_addr_str = loop {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        progress("Waiting for counterparty...");
+        let peer_addr = poll_peer_addr(client, &my_order.id, &counter_order.id).await?;
+
+        // ── Prover subprocess ──
+        let result = run_prover_session(
+            client,
+            deps,
+            role,
+            &local_addr,
+            &peer_addr,
+            &input_path,
+            &session_dir,
+            &maker.id,
+            &taker.id,
+            &maker.pubkey,
+            &taker.pubkey,
+            &order_a,
+            &order_b,
+            &mut progress,
+        )
+        .await?;
+
+        // ── Submit and confirm ──
+        progress("Submitting settlement...");
+        let params = SettleCoZkParams {
+            order_a_id: maker.id.clone(),
+            order_b_id: taker.id.clone(),
+            cmp: result.cmp,
+            new_order_a_commitment: result.need.new_order_a.clone(),
+            new_order_b_commitment: result.need.new_order_b.clone(),
+            new_locked_a_commitment: result.need.new_locked_a.clone(),
+            new_locked_b_commitment: result.need.new_locked_b.clone(),
+            recv_a_commitment: result.need.recv_a.clone(),
+            recv_b_commitment: result.need.recv_b.clone(),
+            sig_a: result.res.sig_a.clone(),
+            sig_b: result.res.sig_b.clone(),
+            zk_proof: result.res.proof_hex.clone(),
+        };
+        // Best-effort submit — either party may land it; a duplicate or a
+        // pair already advanced past Matched is a benign race, judged by
+        // the confirm-poll below.
+        if let Err(e) = client.settle_orders_cozk2p(&params).await {
+            let msg = e.to_string();
+            if !(msg.contains("not Matched") || msg.contains("duplicated")) {
+                progress(&format!("submit warning: {msg}"));
+            }
+        }
+
+        progress("Confirming settlement on chain...");
+        let my_new_order = result.res.my.new_order_commitment.clone();
+        confirm_on_chain(client, &my_order.id, &my_new_order).await?;
+
+        Ok(outcome_from_result(
+            &my_pubkey,
+            &my_lock_token,
+            &my_recv_token,
+            result.cmp,
+            &result.res.my,
+            session_dir,
+        ))
+    }
+
+    /// The prover subprocess plus the signature it made this trader produce.
+    struct ProverOutput {
+        cmp: i8,
+        need: NeedSigWire,
+        res: SessionResultWire,
+    }
+
+    /// Bind an ephemeral UDP port and release it, returning the number for
+    /// the QUIC endpoint to reuse.
+    async fn bind_ephemeral_port() -> Result<u16, SettleError> {
+        let sock = tokio::net::UdpSocket::bind("0.0.0.0:0")
+            .await
+            .map_err(|e| SettleError::Transient(format!("bind ephemeral port: {e}")))?;
+        let port = sock
+            .local_addr()
+            .map_err(|e| SettleError::Transient(format!("local_addr: {e}")))?
+            .port();
+        drop(sock);
+        Ok(port)
+    }
+
+    /// Poll the on-chain rendezvous for the counterparty's address, capped
+    /// so a stalled pair does not head-of-line-block the serial coroutine.
+    async fn poll_peer_addr(
+        client: &ChainClient,
+        my_order_id: &str,
+        counter_id: &str,
+    ) -> Result<String, SettleError> {
+        for _ in 0..45 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
             match client
-                .query_settle_addr(my_order_id.clone(), match_order_id.clone())
+                .query_settle_addr(my_order_id.to_string(), counter_id.to_string())
                 .await
             {
-                Ok(Some(addr)) => break addr,
+                Ok(Some(addr)) => return Ok(addr),
                 Ok(None) => continue,
-                Err(e) => {
-                    eprintln!("query_settle_addr error: {e}");
-                    continue;
+                Err(e) => eprintln!("[settle] query_settle_addr: {e}"),
+            }
+        }
+        Err(SettleError::Transient(
+            "timed out waiting for the counterparty to register".into(),
+        ))
+    }
+
+    /// Spawn `settle2p_session`, stream its progress, answer its one
+    /// signature request, and parse its result. Bounded by a 10-minute
+    /// watchdog; the child is killed if this future is dropped.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_prover_session(
+        client: &ChainClient,
+        deps: &SettleDeps,
+        role: &str,
+        local_addr: &str,
+        peer_addr: &str,
+        input_path: &std::path::Path,
+        session_dir: &std::path::Path,
+        order_a_id: &str,
+        order_b_id: &str,
+        maker_pubkey: &str,
+        taker_pubkey: &str,
+        expected_order_a: &str,
+        expected_order_b: &str,
+        progress: &mut impl FnMut(&str),
+    ) -> Result<ProverOutput, SettleError> {
+        let mut child = Command::new(&deps.bin)
+            .arg("--role")
+            .arg(role)
+            .arg("--listen")
+            .arg(local_addr)
+            .arg("--peer")
+            .arg(peer_addr)
+            .arg("--input")
+            .arg(input_path)
+            .arg("--out-dir")
+            .arg(session_dir)
+            .arg("--keys-dir")
+            .arg(&deps.keys_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                SettleError::Transient(format!("spawning prover {}: {e}", deps.bin.display()))
+            })?;
+
+        let stdout = child.stdout.take().expect("piped stdout");
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let mut stderr = child.stderr.take().expect("piped stderr");
+        let mut lines = BufReader::new(stdout).lines();
+
+        let mut need: Option<NeedSigWire> = None;
+
+        let interaction = async {
+            loop {
+                let line = lines
+                    .next_line()
+                    .await
+                    .map_err(|e| SettleError::Transient(format!("prover stdout: {e}")))?;
+                let Some(line) = line else {
+                    break;
+                };
+                let value: serde_json::Value = match serde_json::from_str(line.trim()) {
+                    Ok(v) => v,
+                    Err(_) => continue, // ignore non-JSON lines
+                };
+                match value.get("event").and_then(|e| e.as_str()) {
+                    Some("phase") => {
+                        if let Some(msg) = value.get("msg").and_then(|m| m.as_str()) {
+                            progress(msg);
+                        }
+                    }
+                    Some("need_sig") => {
+                        let ns: NeedSigWire = serde_json::from_value(value)
+                            .map_err(|e| SettleError::Transient(format!("bad need_sig: {e}")))?;
+                        let params = SettleCoZkParams {
+                            order_a_id: order_a_id.to_string(),
+                            order_b_id: order_b_id.to_string(),
+                            cmp: ns.cmp,
+                            new_order_a_commitment: ns.new_order_a.clone(),
+                            new_order_b_commitment: ns.new_order_b.clone(),
+                            new_locked_a_commitment: ns.new_locked_a.clone(),
+                            new_locked_b_commitment: ns.new_locked_b.clone(),
+                            recv_a_commitment: ns.recv_a.clone(),
+                            recv_b_commitment: ns.recv_b.clone(),
+                            sig_a: String::new(),
+                            sig_b: String::new(),
+                            zk_proof: String::new(),
+                        };
+                        let sig = client.sign_settle_cozk2p(&params);
+                        let sig_line = format!("{{\"sig\":\"{sig}\"}}\n");
+                        stdin
+                            .write_all(sig_line.as_bytes())
+                            .await
+                            .map_err(|e| SettleError::Transient(format!("prover stdin: {e}")))?;
+                        stdin
+                            .flush()
+                            .await
+                            .map_err(|e| SettleError::Transient(format!("prover stdin: {e}")))?;
+                        need = Some(ns);
+                    }
+                    Some("done") => break,
+                    _ => {}
                 }
             }
+            Ok::<(), SettleError>(())
         };
 
-        let local: SocketAddr = local_addr_str
-            .parse()
-            .map_err(|e| format!("parse local addr: {e}"))?;
-        let peer: SocketAddr = peer_addr_str
-            .parse()
-            .map_err(|e| format!("parse peer addr: {e}"))?;
-
-        // ═══════════ Phase 1: MPC comparison ═══════════
-        progress("Running MPC comparison...");
-
-        let mpc_side = match my_order.trade_type {
-            TradeType::Buy => Side::Buy,
-            TradeType::Sell => Side::Sell,
-        };
-
-        // MPC compares token1 quantities. For sell orders, the locked amount IS
-        // the token1 qty. For buy orders, order_amount/order_random store the
-        // token1 qty and its separate blinding factor.
-        let (my_mpc_value, my_mpc_random_hex) = match my_order.trade_type {
-            TradeType::Buy => {
-                let oa = my_locked_recs[0]
-                    .order_amount
-                    .ok_or("buy order missing order_amount in CashRecord")?;
-                let or = my_locked_recs[0]
-                    .order_random
-                    .as_ref()
-                    .ok_or("buy order missing order_random in CashRecord")?
-                    .clone();
-                (oa, or)
+        // 10-minute watchdog over the whole interaction.
+        match tokio::time::timeout(Duration::from_secs(600), interaction).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                let _ = child.start_kill();
+                return Err(e);
             }
-            TradeType::Sell => (my_locked_amount, my_locked_recs[0].random.clone()),
-        };
+            Err(_) => {
+                let _ = child.start_kill();
+                return Err(SettleError::Transient(
+                    "prover timed out after 10 minutes".into(),
+                ));
+            }
+        }
 
-        let my_random_dec = hex_to_fr_decimal(&my_mpc_random_hex);
-        let my_commit = fr_to_hex(&poseidon_commit(
-            my_mpc_value,
-            &hex_to_bytes32(&my_mpc_random_hex),
-        ));
-        let my_commit_dec = hex_to_fr_decimal(&my_commit);
-        let counter_commit_dec = hex_to_fr_decimal(&counter_order.amount);
-
-        let (c1, c2) = match mpc_side {
-            Side::Buy => (my_commit_dec.clone(), counter_commit_dec.clone()),
-            Side::Sell => (counter_commit_dec.clone(), my_commit_dec.clone()),
-        };
-
-        let mpc_config = SettleConfig {
-            local_addr: local,
-            peer_addr: peer,
-        };
-        let mpc_result: SettleShare = settle(
-            &mpc_config,
-            mpc_side,
-            my_mpc_value,
-            &my_random_dec,
-            &c1,
-            &c2,
-        )
-        .await
-        .map_err(|e| format!("MPC settle: {e}"))?;
-
-        let mpc_share = MpcShareParam {
-            cmp_share: mpc_result.cmp_share,
-            cmp_mac: mpc_result.cmp_mac,
-            r_smaller_share: mpc_result.r_smaller_share,
-            r_smaller_mac: mpc_result.r_smaller_mac,
-            mac_key_share: mpc_result.mac_key_share,
-        };
-
-        // ═══════════ Phase 2: Submit CompareOrders ═══════════
-        progress("Submitting comparison to chain...");
-        client
-            .compare_orders(my_order_id.clone(), match_order_id.clone(), mpc_share)
+        let status = child
+            .wait()
             .await
-            .map_err(|e| format!("compare_orders: {e}"))?;
+            .map_err(|e| SettleError::Transient(format!("awaiting prover: {e}")))?;
+        if !status.success() {
+            let mut err = String::new();
+            let _ = stderr.read_to_string(&mut err).await;
+            let err = err.trim();
+            let hint = if err.contains("memory") || err.contains("alloc") {
+                " (out of memory — collaborative proving needs several GB)"
+            } else {
+                ""
+            };
+            return Err(SettleError::Transient(format!(
+                "prover exited with failure{hint}: {err}"
+            )));
+        }
 
-        // ═══════════ Phase 3: Poll until Settling ═══════════
-        progress("Waiting for chain comparison result...");
-        let settled_order = loop {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            match client
+        let need = need
+            .ok_or_else(|| SettleError::Transient("prover never requested a signature".into()))?;
+        let result_bytes = fs::read(session_dir.join("result.json"))
+            .map_err(|e| SettleError::Transient(format!("reading prover result: {e}")))?;
+        let res: SessionResultWire = serde_json::from_slice(&result_bytes)
+            .map_err(|e| SettleError::Transient(format!("parsing prover result: {e}")))?;
+
+        // The proven statement's order commitments must equal the ones read
+        // from chain (the prover is a trusted local component, but this
+        // catches a stale read or a corrupt result file cheaply).
+        if res.public.order_a != expected_order_a || res.public.order_b != expected_order_b {
+            return Err(SettleError::Transient(
+                "prover statement does not match on-chain order commitments".into(),
+            ));
+        }
+
+        // Sanity: the proven statement must match the chain-sourced inputs,
+        // and both signatures must verify (the chain re-verifies regardless).
+        let params = SettleCoZkParams {
+            order_a_id: order_a_id.to_string(),
+            order_b_id: order_b_id.to_string(),
+            cmp: res.cmp,
+            new_order_a_commitment: need.new_order_a.clone(),
+            new_order_b_commitment: need.new_order_b.clone(),
+            new_locked_a_commitment: need.new_locked_a.clone(),
+            new_locked_b_commitment: need.new_locked_b.clone(),
+            recv_a_commitment: need.recv_a.clone(),
+            recv_b_commitment: need.recv_b.clone(),
+            sig_a: res.sig_a.clone(),
+            sig_b: res.sig_b.clone(),
+            zk_proof: res.proof_hex.clone(),
+        };
+        if !invisibook_lib::chain::verify_settle_cozk2p_sig(&params, maker_pubkey, &res.sig_a)
+            || !invisibook_lib::chain::verify_settle_cozk2p_sig(&params, taker_pubkey, &res.sig_b)
+        {
+            return Err(SettleError::Transient(
+                "settlement signatures failed local verification".into(),
+            ));
+        }
+
+        Ok(ProverOutput {
+            cmp: res.cmp,
+            need,
+            res,
+        })
+    }
+
+    /// Poll until this trader's order is `Done` or has been relisted with
+    /// its new remainder commitment. Timing out while the pair is still
+    /// mutually matched means the writing was rejected.
+    async fn confirm_on_chain(
+        client: &ChainClient,
+        my_order_id: &str,
+        my_new_order_commitment: &str,
+    ) -> Result<(), SettleError> {
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let orders = match client
                 .query_orders(
-                    Some(my_order_id.clone()),
+                    Some(my_order_id.to_string()),
                     None,
                     None,
                     None,
@@ -232,445 +666,169 @@ mod inner {
                 )
                 .await
             {
-                Ok(orders) => {
-                    if let Some(o) = orders.into_iter().find(|o| o.id == my_order_id) {
-                        if o.status == OrderStatus::Settling {
-                            break o;
-                        }
-                    }
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("[settle] confirm poll: {e}");
+                    continue;
                 }
-                Err(e) => eprintln!("poll error: {e}"),
+            };
+            if let Some(order) = orders.into_iter().find(|o| o.id == my_order_id) {
+                if order.status == OrderStatus::Done || order.amount == *my_new_order_commitment {
+                    return Ok(());
+                }
             }
+        }
+        Err(SettleError::OnChainRejected(
+            "settlement not observed on chain within the confirmation window".into(),
+        ))
+    }
+
+    /// Assemble the local outcome from the subprocess result. Cash ids are
+    /// content-addressed over the commitment hex, matching the chain.
+    fn outcome_from_result(
+        my_pubkey: &str,
+        my_lock_token: &str,
+        my_recv_token: &str,
+        cmp: i8,
+        my: &MyOutcomeWire,
+        session_dir: PathBuf,
+    ) -> SettleOutcome {
+        let recv = NewCash {
+            cash_id: orderbook::compute_cash_id(my_pubkey, my_recv_token, &my.recv_commitment),
+            token: my_recv_token.to_string(),
+            amount: my.recv_amount,
+            random_hex: my.r_recv.clone(),
         };
-
-        let my_is_smaller = settled_order.is_smaller;
-
-        // ═══════════ Phase 3.5: P2P — smaller sends amount to larger ═══════════
-        // Smaller party sends its locked amount; larger party receives it.
-        // Larger party must NOT send its amount back.
-        progress("Exchanging amount via P2P...");
-        let counter_locked_amount =
-            p2p_exchange_amount(my_is_smaller, my_locked_amount, local, peer).await?;
-
-        // ═══════════ Phase 4: Build ZK leg and submit ═══════════
-        // Prepare change info (only for larger party).
-        let mut change_info: Option<(u64, [u8; 32], String)> = None;
-        // The blinding factor for counter's recv cash (generated by larger, sent to smaller).
-        let mut counter_recv_random_for_send: Option<[u8; 32]> = None;
-        // The blinding factor for larger's own recv cash (generated fresh, kept locally).
-        let mut my_recv_random_for_larger: Option<[u8; 32]> = None;
-
-        let leg = if my_is_smaller {
-            progress("Smaller party — confirming settlement...");
+        let remainder = if my.new_order_amount > 0 {
+            Some(Remainder {
+                locked: NewCash {
+                    cash_id: orderbook::compute_cash_id(
+                        my_pubkey,
+                        my_lock_token,
+                        &my.new_locked_commitment,
+                    ),
+                    token: my_lock_token.to_string(),
+                    amount: my.new_locked_amount,
+                    random_hex: my.r_locked_new.clone(),
+                },
+                order_amount: my.new_order_amount,
+                order_random_hex: my.r_order_new.clone(),
+            })
+        } else {
             None
-        } else {
-            progress("Generating ZK proof (larger party)...");
-
-            // Larger knows both amounts → compute fills.
-            let (fill_t1, fill_t2) = compute_fills(
-                my_order,
-                counter_order,
-                my_locked_amount,
-                counter_locked_amount,
-                price,
-            );
-
-            // Generate fresh blinding factors for both recv outputs.
-            let mut counter_recv_random = [0u8; 32];
-            rand::rng().fill_bytes(&mut counter_recv_random);
-            counter_recv_random_for_send = Some(counter_recv_random);
-
-            let mut my_recv_random = [0u8; 32];
-            rand::rng().fill_bytes(&mut my_recv_random);
-            my_recv_random_for_larger = Some(my_recv_random);
-
-            // Counter receives MY token. Amount = my fill in my lock token.
-            let counter_recv_amount = if my_lock_token == my_order.subject.token1 {
-                fill_t1
-            } else {
-                fill_t2
-            };
-            let counter_recv_commit_hex =
-                fr_to_hex(&poseidon_commit(counter_recv_amount, &counter_recv_random));
-
-            let larger_setup =
-                dev_setup_snarkjs("settle_larger").map_err(|e| format!("setup: {e}"))?;
-            let larger_handle = TestCircuitHandle::from_compiled(&larger_setup.circuit_dir)
-                .map_err(|e| format!("handle: {e}"))?;
-
-            let my_fill = if my_lock_token == my_order.subject.token1 {
-                fill_t1
-            } else {
-                fill_t2
-            };
-            let change_amount = my_locked_amount.saturating_sub(my_fill);
-
-            // Generate change_random before build_larger_leg so we can capture it.
-            let mut change_random = [0u8; 32];
-            if change_amount > 0 {
-                rand::rng().fill_bytes(&mut change_random);
-            }
-
-            let leg_result = build_larger_leg(
-                &my_locked_recs,
-                &my_recv_random,
-                &counter_recv_random,
-                price,
-                &my_lock_token,
-                my_order,
-                change_amount,
-                &change_random,
-                &counter_recv_commit_hex,
-                &counter_order.pubkey,
-                &larger_handle,
-                &larger_setup.zkey,
-            )?;
-
-            // Capture change info for SettleOutcome.
-            if change_amount > 0 {
-                let change_commit_hex = fr_to_hex(&poseidon_commit(change_amount, &change_random));
-                change_info = Some((change_amount, change_random, change_commit_hex));
-            }
-
-            Some(leg_result)
         };
+        SettleOutcome {
+            cmp,
+            recv,
+            remainder,
+            session_dir,
+        }
+    }
 
-        progress("Submitting settlement to chain...");
-        client
-            .settle_orders(my_order_id.clone(), match_order_id.clone(), leg)
-            .await
-            .map_err(|e| format!("settle_orders: {e}"))?;
+    // ── Crash recovery ──
 
-        // ═══════════ Phase 4.5: P2P — larger sends blinding factor to smaller ═══════════
-        // The smaller party needs the blinding factor to construct its recv CashRecord.
-        // Even though it can infer the amount, it cannot spend the cash without the random.
-        progress("Exchanging blinding factor via P2P...");
-        let recv_blinding_from_p2p =
-            p2p_exchange_blinding(my_is_smaller, counter_recv_random_for_send, local, peer).await?;
+    /// A landed-but-unpersisted session recovered from its witness file.
+    #[derive(Clone, Debug)]
+    pub struct Recovered {
+        pub spent_ids: Vec<String>,
+        pub add: Vec<CashRecord>,
+        pub dir: PathBuf,
+    }
 
-        // ═══════════ Phase 5: Compute recv info ═══════════
-        let my_recv_token = counter_lock_token.clone();
-
-        // Determine recv blinding factor:
-        // - Smaller party: received from larger party via P2P (Phase 4.5).
-        // - Larger party: generated fresh in Phase 4, kept locally.
-        let my_recv_random = if my_is_smaller {
-            recv_blinding_from_p2p
-        } else {
-            my_recv_random_for_larger.expect("larger party must have generated recv random")
+    /// Inspect every session dir and decide, per the recovery predicate
+    /// (recv-cash existence on chain), whether it LANDED (materialize its
+    /// records) or did not (delete it). Session dirs whose settlement has
+    /// not yet finished (no witness.json) are left untouched.
+    pub async fn recover_all_sessions(
+        client: &ChainClient,
+        sessions_dir: &std::path::Path,
+    ) -> Vec<Recovered> {
+        let mut out = Vec::new();
+        let entries = match fs::read_dir(sessions_dir) {
+            Ok(e) => e,
+            Err(_) => return out,
         };
-
-        // Compute recv amount:
-        // - Smaller party: its full amount is consumed → recv = own amount converted at price.
-        // - Larger party: recv = counter's full amount converted at price (counter_locked_amount).
-        let my_recv_amount = if my_is_smaller {
-            // Smaller party's fill = all of its locked amount.
-            // recv token is in the other denomination.
-            match my_order.trade_type {
-                // I sell t1: recv t2 = my_locked_amount * price
-                TradeType::Sell => my_locked_amount * price,
-                // I buy with t2: recv t1 = my_locked_amount / price
-                TradeType::Buy => {
-                    if price > 0 {
-                        my_locked_amount / price
-                    } else {
-                        0
-                    }
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            match try_recover_session(client, &dir).await {
+                Recovery::Landed(rec) => out.push(rec),
+                Recovery::Deleted => {
+                    let _ = fs::remove_dir_all(&dir);
                 }
+                Recovery::InProgress => {}
             }
-        } else {
-            // Larger party: recv = counter's locked amount converted at price.
-            match my_order.trade_type {
-                // I sell t1, counter buys with t2: recv t2 = counter_locked_amount (already in t2)
-                // Wait — counter locks the OTHER token. recv = fill in my recv token.
-                TradeType::Sell => {
-                    // I sell t1. Counter buys with t2. Counter locks t2.
-                    // fill_t1 = min(my_lock_t1, counter_lock_t2/price)
-                    // Since I'm larger: fill_t1 = counter_lock_t2/price
-                    // My recv = fill_t2 = fill_t1 * price = counter_lock_t2
-                    counter_locked_amount
-                }
-                TradeType::Buy => {
-                    // I buy with t2. Counter sells t1. Counter locks t1.
-                    // fill_t1 = min(counter_lock_t1, my_lock_t2/price)
-                    // Since I'm larger: fill_t1 = counter_lock_t1
-                    // My recv = fill_t1 = counter_lock_t1
-                    counter_locked_amount
-                }
-            }
+        }
+        out
+    }
+
+    /// Outcome of examining one session dir for recovery.
+    pub enum Recovery {
+        /// Landed on chain — records in the payload should be materialized.
+        Landed(Recovered),
+        /// Did not land — the dir is stale and should be removed.
+        Deleted,
+        /// No witness yet (mid-flight or never started) — leave it alone.
+        InProgress,
+    }
+
+    /// Recovery predicate for one session dir: read `witness.json`, compute
+    /// the recv cash id, and check on-chain existence. `dir` must be a
+    /// session scratch directory.
+    pub async fn try_recover_session(client: &ChainClient, dir: &std::path::Path) -> Recovery {
+        let witness_bytes = match fs::read(dir.join("witness.json")) {
+            Ok(b) => b,
+            Err(_) => return Recovery::InProgress,
         };
-
-        let my_recv_commit_hex = fr_to_hex(&poseidon_commit(my_recv_amount, &my_recv_random));
-        let recv_cash_id =
-            orderbook::compute_cash_id(&my_pubkey, &my_recv_token, &my_recv_commit_hex);
-
-        // Build change fields for larger party.
-        let (
-            out_change_cash_id,
-            out_change_token,
-            out_change_amount,
-            out_change_random_hex,
-            out_change_commit_hex,
-        ) = if let Some((amt, rnd, commit_hex)) = change_info {
-            let change_cash_id =
-                orderbook::compute_cash_id(&my_pubkey, &my_lock_token, &commit_hex);
-            (
-                Some(change_cash_id),
-                Some(my_lock_token.clone()),
-                Some(amt),
-                Some(hex::encode(rnd)),
-                Some(commit_hex),
-            )
-        } else {
-            (None, None, None, None, None)
+        let witness: SessionWitnessWire = match serde_json::from_slice(&witness_bytes) {
+            Ok(w) => w,
+            Err(_) => return Recovery::Deleted,
         };
-
-        progress("Settlement complete!");
-
-        Ok(SettleOutcome {
-            recv_cash_id,
-            recv_token: my_recv_token,
-            recv_amount: my_recv_amount,
-            recv_random_hex: hex::encode(my_recv_random),
-            change_cash_id: out_change_cash_id,
-            change_token: out_change_token,
-            change_amount: out_change_amount,
-            change_random_hex: out_change_random_hex,
-            change_commitment_hex: out_change_commit_hex,
+        let my_pubkey = client.pubkey_hex().to_string();
+        let recv_id = orderbook::compute_cash_id(
+            &my_pubkey,
+            &witness.my_recv_token,
+            &witness.my.recv_commitment,
+        );
+        let account = match client.get_account(&my_pubkey, &witness.my_recv_token).await {
+            Ok(a) => a,
+            Err(_) => return Recovery::InProgress, // can't decide now; retry later
+        };
+        if !account.cash.iter().any(|c| c.id == recv_id) {
+            return Recovery::Deleted; // never landed; blindings are stale
+        }
+        // Landed: materialize spent inputs + recv + optional remainder.
+        let mut add = vec![CashRecord {
+            cash_id: recv_id,
+            token: witness.my_recv_token.clone(),
+            amount: witness.my.recv_amount,
+            random: witness.my.r_recv.clone(),
+            status: CASH_ACTIVE,
+            order_amount: None,
+            order_random: None,
+        }];
+        if witness.my.new_order_amount > 0 {
+            add.push(CashRecord {
+                cash_id: orderbook::compute_cash_id(
+                    &my_pubkey,
+                    &witness.my_lock_token,
+                    &witness.my.new_locked_commitment,
+                ),
+                token: witness.my_lock_token.clone(),
+                amount: witness.my.new_locked_amount,
+                random: witness.my.r_locked_new.clone(),
+                status: CASH_LOCKED,
+                order_amount: Some(witness.my.new_order_amount),
+                order_random: Some(witness.my.r_order_new.clone()),
+            });
+        }
+        Recovery::Landed(Recovered {
+            spent_ids: witness.my_input_cash_ids,
+            add,
+            dir: dir.to_path_buf(),
         })
-    }
-
-    /// Return the set of locked input cash IDs that should be marked as spent.
-    pub fn spent_cash_ids(order: &Order) -> HashSet<String> {
-        order.input_cash_ids.iter().cloned().collect()
-    }
-
-    // ────────────────────── Helper Functions ──────────────────────
-
-    /// P2P amount exchange: smaller party sends its locked amount to larger party.
-    ///
-    /// - Smaller: connect to larger, send `my_locked_amount` (8 bytes LE). Returns 0 (unused).
-    /// - Larger: listen, receive counter's locked amount. Returns the received value.
-    ///
-    /// Port: QUIC port + 1.
-    async fn p2p_exchange_amount(
-        my_is_smaller: bool,
-        my_locked_amount: u64,
-        local: SocketAddr,
-        peer: SocketAddr,
-    ) -> Result<u64, String> {
-        use tokio::net::TcpListener;
-
-        let tcp_local = SocketAddr::new(local.ip(), local.port().wrapping_add(1));
-        let tcp_peer = SocketAddr::new(peer.ip(), peer.port().wrapping_add(1));
-
-        if my_is_smaller {
-            // Smaller → larger: send my amount.
-            let mut stream = tcp_connect_retry(&tcp_peer).await?;
-            stream
-                .write_all(&my_locked_amount.to_le_bytes())
-                .await
-                .map_err(|e| format!("P2P send amount: {e}"))?;
-            Ok(0) // smaller doesn't need counter's amount
-        } else {
-            // Larger: listen for smaller's amount.
-            let listener = TcpListener::bind(tcp_local)
-                .await
-                .map_err(|e| format!("P2P bind (amount): {e}"))?;
-            let (mut stream, _) =
-                tokio::time::timeout(std::time::Duration::from_secs(30), listener.accept())
-                    .await
-                    .map_err(|_| "P2P: timeout waiting for smaller party amount".to_string())?
-                    .map_err(|e| format!("P2P accept (amount): {e}"))?;
-            let mut buf = [0u8; 8];
-            stream
-                .read_exact(&mut buf)
-                .await
-                .map_err(|e| format!("P2P recv amount: {e}"))?;
-            Ok(u64::from_le_bytes(buf))
-        }
-    }
-
-    /// P2P blinding factor exchange: larger party sends recv blinding factor to smaller.
-    ///
-    /// - Larger: connect to smaller, send 32-byte blinding factor. Returns own recv random
-    ///   (ECDH-derived r_match, already known).
-    /// - Smaller: listen, receive 32-byte blinding factor.
-    ///
-    /// Port: QUIC port + 2 (different from amount exchange).
-    async fn p2p_exchange_blinding(
-        my_is_smaller: bool,
-        blinding_to_send: Option<[u8; 32]>,
-        local: SocketAddr,
-        peer: SocketAddr,
-    ) -> Result<[u8; 32], String> {
-        use tokio::net::TcpListener;
-
-        let tcp_local = SocketAddr::new(local.ip(), local.port().wrapping_add(2));
-        let tcp_peer = SocketAddr::new(peer.ip(), peer.port().wrapping_add(2));
-
-        if my_is_smaller {
-            // Smaller: listen for blinding factor from larger.
-            let listener = TcpListener::bind(tcp_local)
-                .await
-                .map_err(|e| format!("P2P bind (blinding): {e}"))?;
-            let (mut stream, _) =
-                tokio::time::timeout(std::time::Duration::from_secs(60), listener.accept())
-                    .await
-                    .map_err(|_| "P2P: timeout waiting for blinding factor".to_string())?
-                    .map_err(|e| format!("P2P accept (blinding): {e}"))?;
-            let mut buf = [0u8; 32];
-            stream
-                .read_exact(&mut buf)
-                .await
-                .map_err(|e| format!("P2P recv blinding: {e}"))?;
-            Ok(buf)
-        } else {
-            // Larger → smaller: send blinding factor.
-            let blinding = blinding_to_send.ok_or("larger party must have blinding factor")?;
-            let mut stream = tcp_connect_retry(&tcp_peer).await?;
-            stream
-                .write_all(&blinding)
-                .await
-                .map_err(|e| format!("P2P send blinding: {e}"))?;
-            // Larger party's own recv random: not received via P2P; caller computes it.
-            // Return a placeholder — caller will override.
-            Ok([0u8; 32])
-        }
-    }
-
-    /// TCP connect with retry (peer may not be listening yet).
-    async fn tcp_connect_retry(addr: &SocketAddr) -> Result<tokio::net::TcpStream, String> {
-        use tokio::net::TcpStream;
-        for _ in 0..15 {
-            match TcpStream::connect(addr).await {
-                Ok(s) => return Ok(s),
-                Err(_) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-            }
-        }
-        Err(format!("P2P: failed to connect to {addr}"))
-    }
-
-    /// Convert hex string to BN254 Fr decimal string.
-    fn hex_to_fr_decimal(hex_str: &str) -> String {
-        let bytes = hex::decode(hex_str).expect("valid hex");
-        let n = BigUint::from_bytes_be(&bytes);
-        n.to_string()
-    }
-
-    /// Convert hex string to [u8; 32].
-    fn hex_to_bytes32(hex_str: &str) -> [u8; 32] {
-        let raw = hex::decode(hex_str).expect("valid hex");
-        let mut arr = [0u8; 32];
-        let start = 32usize.saturating_sub(raw.len());
-        arr[start..].copy_from_slice(&raw[..raw.len().min(32)]);
-        arr
-    }
-
-    /// Compute (fill_t1, fill_t2) for a matched pair.
-    fn compute_fills(
-        order_a: &Order,
-        _order_b: &Order,
-        locked_a: u64,
-        locked_b: u64,
-        price: u64,
-    ) -> (u64, u64) {
-        let (seller_lock_t1, buyer_lock_t2) = match order_a.trade_type {
-            TradeType::Sell => (locked_a, locked_b),
-            TradeType::Buy => (locked_b, locked_a),
-        };
-        let buyer_wanted_t1 = if price > 0 { buyer_lock_t2 / price } else { 0 };
-        let fill_t1 = seller_lock_t1.min(buyer_wanted_t1);
-        let fill_t2 = fill_t1 * price;
-        (fill_t1, fill_t2)
-    }
-
-    /// Build the larger party's ZK settlement leg with proof.
-    ///
-    /// `my_recv_random` / `counter_recv_random`: fresh blinding factors for recv outputs.
-    /// `change_random` is pre-generated by the caller so it can be captured.
-    #[allow(clippy::too_many_arguments)]
-    fn build_larger_leg(
-        inputs: &[CashRecord],
-        my_recv_random: &[u8; 32],
-        counter_recv_random: &[u8; 32],
-        price: u64,
-        token: &TokenID,
-        order: &Order,
-        change_amount: u64,
-        change_random: &[u8; 32],
-        counterparty_recv_commit_hex: &str,
-        counterparty_pubkey: &str,
-        handle: &TestCircuitHandle,
-        zkey: &Path,
-    ) -> Result<SettleTokenLegParam, String> {
-        let inputs_for_witness = decode_inputs(inputs)?;
-        let inputs_sum: u64 = inputs.iter().map(|r| r.amount).sum();
-        let my_fill = inputs_sum
-            .checked_sub(change_amount)
-            .ok_or("change > inputs.sum")?;
-        let is_token2_sender = token == &order.subject.token2;
-        let (other_fill, r_my, r_other) = if is_token2_sender {
-            (
-                my_fill / price.max(1),
-                *my_recv_random,
-                *counter_recv_random,
-            )
-        } else {
-            (my_fill * price, *my_recv_random, *counter_recv_random)
-        };
-        let sp = prove_settle_larger(
-            SettleLargerWitness {
-                r_my,
-                other_fill,
-                r_other,
-                price,
-                is_token2_sender,
-                inputs: inputs_for_witness,
-                change_amount,
-                change_random: *change_random,
-                counterparty_recv_commitment_hex: counterparty_recv_commit_hex.to_string(),
-            },
-            handle,
-            zkey,
-        )
-        .map_err(|e| format!("prove_settle_larger: {e}"))?;
-        let change_commitment_hex = if change_amount == 0 {
-            POSEIDON_ZERO_COMMITMENT_HEX.to_string()
-        } else {
-            sp.change_commitment_hex.clone()
-        };
-        Ok(SettleTokenLegParam {
-            side: "larger".to_string(),
-            token: token.clone(),
-            my_match_commitment: Some(sp.my_match_commitment_hex),
-            other_match_commitment: Some(sp.other_match_commitment_hex),
-            price: Some(price),
-            is_token2_sender: Some(is_token2_sender),
-            change_commitment: Some(change_commitment_hex),
-            change_pubkey: String::new(),
-            match_commitment: None,
-            recv_commitment: counterparty_recv_commit_hex.to_string(),
-            recv_pubkey: counterparty_pubkey.to_string(),
-            zk_proof: serde_json::to_string(&sp.proof_json).map_err(|e| e.to_string())?,
-        })
-    }
-
-    /// Decode CashRecord randoms from hex to (amount, [u8; 32]) pairs.
-    fn decode_inputs(inputs: &[CashRecord]) -> Result<Vec<(u64, [u8; 32])>, String> {
-        let mut out = Vec::with_capacity(inputs.len());
-        for rec in inputs {
-            let raw = hex::decode(&rec.random).map_err(|e| format!("bad random hex: {e}"))?;
-            if raw.len() != 32 {
-                return Err(format!("cash {} random must be 32 bytes", rec.cash_id));
-            }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&raw);
-            out.push((rec.amount, arr));
-        }
-        Ok(out)
     }
 }
 
