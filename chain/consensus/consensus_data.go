@@ -8,12 +8,12 @@ import (
 
 // ConsensusData holds the PoB-specific data stored in block.Header.Extra.
 type ConsensusData struct {
-	VDFResult  *VDFResult `json:"vdf_result"`
+	VRFResult  *VRFResult `json:"vrf_result"`
 	L1Payment  *L1Payment `json:"l1_payment"`
 	BlockScore string     `json:"block_score"` // big.Int decimal string
 }
 
-// consensusDataJSON is an intermediate type for JSON marshalling of L1Payment,
+// l1PaymentJSON is an intermediate type for JSON marshalling of L1Payment,
 // since big.Int does not have a default JSON representation.
 type l1PaymentJSON struct {
 	TxHash      string `json:"tx_hash"`
@@ -23,7 +23,7 @@ type l1PaymentJSON struct {
 }
 
 type consensusDataJSON struct {
-	VDFResult  *VDFResult     `json:"vdf_result"`
+	VRFResult  *VRFResult     `json:"vrf_result"`
 	L1Payment  *l1PaymentJSON `json:"l1_payment"`
 	BlockScore string         `json:"block_score"`
 }
@@ -31,7 +31,7 @@ type consensusDataJSON struct {
 // EncodeConsensusData serializes ConsensusData into JSON bytes for block.Extra.
 func EncodeConsensusData(data *ConsensusData) ([]byte, error) {
 	j := &consensusDataJSON{
-		VDFResult:  data.VDFResult,
+		VRFResult:  data.VRFResult,
 		BlockScore: data.BlockScore,
 	}
 	if data.L1Payment != nil {
@@ -52,7 +52,7 @@ func DecodeConsensusData(raw []byte) (*ConsensusData, error) {
 		return nil, fmt.Errorf("decode consensus data: %w", err)
 	}
 	data := &ConsensusData{
-		VDFResult:  j.VDFResult,
+		VRFResult:  j.VRFResult,
 		BlockScore: j.BlockScore,
 	}
 	if j.L1Payment != nil {

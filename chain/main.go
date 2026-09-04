@@ -30,18 +30,29 @@ func main() {
 		coreCfg = core.DefaultConfig()
 	}
 
-	// Generate keypair for single-node mode (same secret as PoA default)
-	pubkey, privkey, err := keypair.GenKeyPairWithSecret(keypair.Sr25519, []byte("node1"))
+	// Generate the miner keypair for single-node mode. secp256k1 is used
+	// throughout: the same key signs L2 blocks, evaluates the VRF, and (via
+	// blake160 of its compressed pubkey) owns the CKB address that pays on L1.
+	nodeSecret := []byte("node1")
+	pubkey, privkey, err := keypair.GenKeyPairWithSecret(keypair.Secp256k1, nodeSecret)
 	if err != nil {
 		logrus.Fatal("generate keypair failed: ", err)
 	}
 
+	// Reuse the very same secp256k1 scalar for VRF evaluation, so the VRF
+	// public key is the block producer's public key by construction.
+	vrfPrivKey, err := consensus.SecpPrivKeyToECDSA(privkey.Bytes())
+	if err != nil {
+		logrus.Fatal("derive VRF key from miner key failed: ", err)
+	}
+
 	l1Verifier := &consensus.MockL1PaymentVerifier{}
-	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier)
+	l1Submitter := consensus.NewMockL1HeaderSubmitter(coreCfg.Consensus.MockL1ConfirmDelay)
+	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, vrfPrivKey, l1Submitter)
 	accountTri := core.NewAccount(&coreCfg.Account)
 	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook)
 
-	consensus.StartPaymentServer(coreCfg.Consensus.PaymentListen, coreCfg.Consensus.FiberRPCUrl)
+	consensus.StartPaymentServer(coreCfg.Consensus.PaymentListen)
 
 	startup.InitDefaultKernel(yuCfg).WithTripods(pobTri, accountTri, orderBookTri).Startup()
 }

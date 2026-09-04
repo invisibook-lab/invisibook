@@ -1,10 +1,7 @@
 package consensus
 
-// Config holds all configurable parameters for the Proof-of-Buying consensus.
+// Config holds all configurable parameters for the Proof-of-Buy consensus.
 type Config struct {
-	// VDFDifficulty is the number of squaring iterations for the Wesolowski VDF.
-	// Linearly controls computation delay (~1.1ms per iteration).
-	VDFDifficulty uint64 `toml:"vdf_difficulty"`
 	// MinPayment is the minimum L1 payment amount (decimal string).
 	MinPayment string `toml:"min_payment"`
 	// FinalityPeriod is the number of L2 blocks per finality cycle.
@@ -13,21 +10,23 @@ type Config struct {
 	BlockInterval int `toml:"block_interval"`
 	// PackNum is the maximum number of transactions to pack per block.
 	PackNum uint64 `toml:"pack_num"`
-	// FiberRPCUrl is the Fiber node JSON-RPC endpoint for send_payment.
-	FiberRPCUrl string `toml:"fiber_rpc_url"`
 	// PaymentListen is the listen address for the gin payment HTTP server.
 	PaymentListen string `toml:"payment_listen"`
+	// L1PollInterval is the interval in milliseconds for polling L1 confirmation.
+	L1PollInterval int `toml:"l1_poll_interval"`
+	// MockL1ConfirmDelay is the simulated L1 confirmation delay in milliseconds.
+	MockL1ConfirmDelay int `toml:"mock_l1_confirm_delay"`
 }
 
 // DefaultConsensusConfig returns a Config with sensible defaults.
 func DefaultConsensusConfig() Config {
 	return Config{
-		VDFDifficulty:  1000,
-		MinPayment:     "100",
-		FinalityPeriod: 10,
-		BlockInterval:  3000,
-		PackNum:        30000,
-		FiberRPCUrl:    "http://127.0.0.1:8227",
-		PaymentListen:  ":8081",
+		MinPayment:         "100",
+		FinalityPeriod:     10,
+		BlockInterval:      3000,
+		PackNum:            30000,
+		PaymentListen:      ":8081",
+		L1PollInterval:     1000,
+		MockL1ConfirmDelay: 2000,
 	}
 }

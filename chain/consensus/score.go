@@ -5,14 +5,14 @@ import (
 	"math/big"
 )
 
-// CalcBlockScore computes a block's score as paymentAmount * vdfFactor,
-// where vdfFactor is derived from the first 8 bytes of vdfOutput interpreted
+// CalcBlockScore computes a block's score as paymentAmount * vrfFactor,
+// where vrfFactor is derived from the first 8 bytes of vrfOutput interpreted
 // as a big-endian uint64.
-// `paymentAmount` and `vdfOutput` must not be nil; `vdfOutput` must be >= 8 bytes.
-func CalcBlockScore(paymentAmount *big.Int, vdfOutput []byte) *big.Int {
-	vdfUint64 := binary.BigEndian.Uint64(vdfOutput[:8])
-	vdfFactor := new(big.Int).SetUint64(vdfUint64)
-	return new(big.Int).Mul(paymentAmount, vdfFactor)
+// `paymentAmount` must not be nil; `vrfOutput` must be >= 8 bytes.
+func CalcBlockScore(paymentAmount *big.Int, vrfOutput []byte) *big.Int {
+	vrfUint64 := binary.BigEndian.Uint64(vrfOutput[:8])
+	vrfFactor := new(big.Int).SetUint64(vrfUint64)
+	return new(big.Int).Mul(paymentAmount, vrfFactor)
 }
 
 // CalcCumulativeScore sums all provided block scores.

@@ -5,12 +5,14 @@ go 1.25.7
 require (
 	github.com/BurntSushi/toml v1.2.1
 	github.com/consensys/gnark-crypto v0.20.1
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
+	github.com/gin-gonic/gin v1.9.1
 	github.com/go-playground/validator/v10 v10.30.1
 	github.com/gorilla/websocket v1.5.3
-	github.com/harmony-one/vdf v1.0.0
 	github.com/iden3/go-rapidsnark/types v0.0.3
 	github.com/iden3/go-rapidsnark/verifier v0.0.5
 	github.com/sirupsen/logrus v1.9.3
+	github.com/vechain/go-ecvrf v0.0.0-20251211112124-5d5a3ef70fc9
 	github.com/yu-org/yu v1.3.4
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.1
@@ -42,7 +44,6 @@ require (
 	github.com/cosmos/go-bip39 v0.0.0-20180819234021-555e2067c45d // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/davidlazar/go-crypto v0.0.0-20200604182044-b73af7476f6c // indirect
-	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.3.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/elastic/gosigar v0.14.3 // indirect
@@ -52,7 +53,6 @@ require (
 	github.com/gabriel-vasile/mimetype v1.4.12 // indirect
 	github.com/getsentry/sentry-go v0.27.0 // indirect
 	github.com/gin-contrib/sse v0.1.0 // indirect
-	github.com/gin-gonic/gin v1.9.1 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-sql-driver/mysql v1.9.3 // indirect
