@@ -6,12 +6,15 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"gorm.io/gorm/logger"
+
+	"github.com/invisibook-lab/invisibook/consensus"
 )
 
 // Config holds all configurable parameters for the core tripods.
 type Config struct {
-	OrderBook OrderBookConfig `toml:"orderbook"`
-	Account   AccountConfig   `toml:"account"`
+	Consensus consensus.Config `toml:"consensus"`
+	OrderBook OrderBookConfig  `toml:"orderbook"`
+	Account   AccountConfig    `toml:"account"`
 }
 
 // OrderBookConfig holds configuration for the OrderBook tripod.
@@ -69,6 +72,7 @@ type GenesisCash struct {
 // DBLogLevel defaults to "warn" to suppress expected "record not found" noise.
 func DefaultConfig() *Config {
 	return &Config{
+		Consensus: consensus.DefaultConsensusConfig(),
 		OrderBook: OrderBookConfig{
 			DBPath:     "orders.db",
 			DBLogLevel: "warn",

@@ -625,18 +625,18 @@ func buildTestMpcShares(t *testing.T) (map[string]string, map[string]string) {
 	// r_smaller_mac_A + r_smaller_mac_B = delta * r_smaller = 18 * 42 = 756
 	// Let r_smaller_mac_A = 356, r_smaller_mac_B = 400
 	alice := map[string]string{
-		"cmp_share":        "0",
-		"cmp_mac":          "8",
-		"r_smaller_share":  "42",
-		"r_smaller_mac":    "356",
-		"mac_key_share":    "7",
+		"cmp_share":       "0",
+		"cmp_mac":         "8",
+		"r_smaller_share": "42",
+		"r_smaller_mac":   "356",
+		"mac_key_share":   "7",
 	}
 	bob := map[string]string{
-		"cmp_share":        "1",
-		"cmp_mac":          "10",
-		"r_smaller_share":  "0",
-		"r_smaller_mac":    "400",
-		"mac_key_share":    "11",
+		"cmp_share":       "1",
+		"cmp_mac":         "10",
+		"r_smaller_share": "0",
+		"r_smaller_mac":   "400",
+		"mac_key_share":   "11",
 	}
 	return alice, bob
 }

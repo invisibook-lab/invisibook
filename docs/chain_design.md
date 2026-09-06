@@ -56,11 +56,11 @@ Design invariants:
 │         ▼                       ▼                             ▼                    │
 │   ┌───────────┐        ┌────────────────┐            ┌──────────────────┐          │
 │   │consensus/ │        │ core/orderbook │            │  core/account    │          │
-│   │ PoA       │        │  tripod        │◀──────────▶│  tripod          │          │
-│   │ (yu poa)  │        │                │   uses     │                  │          │
-│   │ (VDF /    │        │ SendOrder      │            │ Deposit          │          │
-│   │  PoBuy    │        │ SettleOrder    │            │ Withdraw         │          │
-│   │  stubs)   │        │ QueryOrders    │            │ GetAccount       │          │
+│   │ PoBuy     │        │  tripod        │◀──────────▶│  tripod          │          │
+│   │           │        │                │   uses     │                  │          │
+│   │ VRF       │        │ SendOrder      │            │ Deposit          │          │
+│   │ L1 payment│        │ SettleOrder    │            │ Withdraw         │          │
+│   │ L1 finality        │ QueryOrders    │            │ GetAccount       │          │
 │   └───────────┘        │                │            │                  │          │
 │                        │ matchOrder     │            │ LockCash         │          │
 │                        │ InsertOrder    │            │ SpendCash        │          │
@@ -144,15 +144,46 @@ points plus internal helpers (`LockCash`, `SpendCash`, `CreateCash`,
 
 ### 2.5 Consensus — [chain/consensus/](../chain/consensus/)
 
-Currently the chain runs under yu's single-node PoA for development
-(`poa.SingleNodeCfg()`). Two future tripods are stubbed:
+The chain runs the Proof-of-Buy consensus tripod (`consensus.NewProofOfBuy`,
+wired in [main.go](../chain/main.go)). Each block a miner declares an L1
+payment, evaluates a VRF, and the highest `score = payment × vrf` wins the
+height; the block header is then submitted to L1 and the block is finalized
+only once that submission confirms.
 
-- [`proof_of_buying.go`](../chain/consensus/proof_of_buying.go) — a custom
-  consensus hook keyed off order-book activity (stub).
-- [`vdf.go`](../chain/consensus/vdf.go) — verifiable-delay-function step
-  (stub, used to resist front-running in the matching phase).
+- [`proof_of_buy.go`](../chain/consensus/proof_of_buy.go) — the tripod:
+  `StartBlock` (pay → VRF → score → produce → collect and compare rivals),
+  `EndBlock` (verify, execute, persist), and a `finalityWorker` goroutine
+  that finalizes blocks in height order behind L1 confirmation.
+- [`vrf.go`](../chain/consensus/vrf.go) — ECVRF-SECP256K1-SHA256-TAI
+  (suite `0xFE`, via [go-ecvrf](https://github.com/vechain/go-ecvrf)).
+- [`score.go`](../chain/consensus/score.go) — `CalcBlockScore`.
+- [`l1_payment.go`](../chain/consensus/l1_payment.go) — payment types, the
+  `L1PaymentVerifier` interface, and a gin `POST /pay_l1_token` endpoint
+  through which a miner declares the payment for the next block.
+- [`l1_submitter.go`](../chain/consensus/l1_submitter.go) — the
+  `L1HeaderSubmitter` interface plus its mock.
 
-Swapping from PoA to PoBuy is a one-line change in `main.go`.
+**One key, three roles.** The miner keypair is **secp256k1** everywhere
+(`keypair.Secp256k1` in `main.go`), because that is the curve of CKB's
+default lock, `secp256k1_blake160_sighash_all`. The same key therefore
+
+1. signs L2 blocks (yu / tendermint ECDSA over SHA-256),
+2. evaluates the VRF (ECVRF on the same curve — so `VRFVerify` takes
+   `block.MinerPubkey` and there is no separate, grindable VRF key), and
+3. owns the CKB address that pays on L1 — `lock.args` is
+   `blake160(block.MinerPubkey)`, the compressed 33-byte encoding, so
+   binding an L1 payment to a block producer is a byte comparison rather
+   than a registration protocol.
+
+The three hash domains never overlap (CKB blake2b with the
+`ckb-default-hash` personalization, yu's SHA-256, ECVRF's suite string
+`0xFE`), which keeps the shared key safe across the three protocols.
+
+*Still mocked / not yet implemented*: real CKB payment verification
+(`MockL1PaymentVerifier` accepts everything), real header submission
+(`MockL1HeaderSubmitter`), the payment commit-reveal timing, prepayment
+allocation proofs, miner rewards, fork choice by cumulative score, and
+block-signature verification on received candidates.
 
 ## 3. Business-Scenario Walkthroughs
 
@@ -244,8 +275,11 @@ relayer, gated on the same `zk_proof`.
 | [chain/core/cash.go](../chain/core/cash.go) | `Cash`, `CashStatus`, `AccountRecord`, `ChangeOutput`, `generateCashID`, `verifyProof` (TODO) |
 | [chain/core/config.go](../chain/core/config.go) | TOML loader + `DefaultConfig` |
 | [chain/core/udt.go](../chain/core/udt.go) | `TokenID`, `UDT`, `NativeToken` |
-| [chain/consensus/proof_of_buying.go](../chain/consensus/proof_of_buying.go) | PoBuy tripod stub |
-| [chain/consensus/vdf.go](../chain/consensus/vdf.go) | VDF tripod stub |
+| [chain/consensus/proof_of_buy.go](../chain/consensus/proof_of_buy.go) | PoBuy tripod: block production, scoring, L1-gated finality |
+| [chain/consensus/vrf.go](../chain/consensus/vrf.go) | ECVRF-SECP256K1-SHA256-TAI + secp256k1 key helpers |
+| [chain/consensus/score.go](../chain/consensus/score.go) | `CalcBlockScore` = payment × VRF factor |
+| [chain/consensus/l1_payment.go](../chain/consensus/l1_payment.go) | L1 payment types, verifier interface, `/pay_l1_token` endpoint |
+| [chain/consensus/l1_submitter.go](../chain/consensus/l1_submitter.go) | L2 header → L1 submission interface + mock |
 
 ### 4.2 Core types cheat sheet
 
@@ -292,4 +326,6 @@ type Cash struct {
 - **[yu-sdk (Rust)](https://github.com/yu-org/yu-sdk)** — Rust client SDK used by [lib/chain/src/chain.rs](../lib/chain/src/chain.rs) to drive `SendOrder` / `SettleOrder` / `QueryOrders`.
 - **[GORM](https://gorm.io/)** + **SQLite** — persistence for orders and cash (`chain/data/*.db`, paths in `core.toml`).
 - **[go-playground/validator](https://github.com/go-playground/validator)** — struct-tag validation on all request types.
+- **[go-ecvrf](https://github.com/vechain/go-ecvrf)** — ECVRF on secp256k1 (`Secp256k1Sha256Tai`), used by the PoBuy consensus.
+- **[dcrd/dcrec/secp256k1](https://github.com/decred/dcrd)** — secp256k1 key parsing / compression, bridging yu keys to `ecdsa.PrivateKey`.
 - **Related client-side crypto** — amount ciphertext is produced off-chain in [lib/chain/src/orderbook.rs](../lib/chain/src/orderbook.rs) via Poseidon (BN254) on desktop, SHA-256 on Android; ZK proofs for deposit / settle / withdraw are produced in [lib/zk/](../lib/zk/) and verified by the three TODOs in `Deposit`, `SettleOrder`, `Withdraw`.
