@@ -48,11 +48,19 @@ func main() {
 
 	l1Verifier := &consensus.MockL1PaymentVerifier{}
 	l1Submitter := consensus.NewMockL1HeaderSubmitter(coreCfg.Consensus.MockL1ConfirmDelay)
-	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, vrfPrivKey, l1Submitter)
+
+	// The payment book is shared: the HTTP endpoint writes declarations into it
+	// and the consensus loop takes them out at the matching height.
+	paymentBook := consensus.NewPaymentBook()
+	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, vrfPrivKey, l1Submitter, paymentBook)
 	accountTri := core.NewAccount(&coreCfg.Account)
 	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook)
 
-	consensus.StartPaymentServer(coreCfg.Consensus.PaymentListen)
+	// The payment endpoint confirms each declaration against L1 before it
+	// reaches the book, so it needs the same verifier and miner identity the
+	// consensus loop uses.
+	paymentServer := consensus.NewPaymentServer(paymentBook, l1Verifier, consensus.MinerPubkeyHex(pubkey))
+	paymentServer.Start(coreCfg.Consensus.PaymentListen)
 
 	startup.InitDefaultKernel(yuCfg).WithTripods(pobTri, accountTri, orderBookTri).Startup()
 }

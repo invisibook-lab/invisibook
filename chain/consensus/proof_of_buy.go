@@ -30,9 +30,9 @@ type ProofOfBuy struct {
 	// key as myPrivKey — block signing and VRF evaluation share one identity.
 	vrfPrivKey *ecdsa.PrivateKey
 
-	// lastPaymentInput holds the most recent payment input received from
-	// PendingPaymentCh by the paymentListener goroutine.
-	lastPaymentInput *L1PaymentInput
+	// paymentBook holds the per-height payment declarations submitted by the
+	// miner through the HTTP endpoint.
+	paymentBook *PaymentBook
 	// blockCh receives blocks broadcast by other miners via P2P.
 	blockCh chan *types.Block
 
@@ -43,10 +43,11 @@ type ProofOfBuy struct {
 }
 
 // NewProofOfBuy constructs a ProofOfBuy tripod with the given config, keypair,
-// L1 verifier, VRF private key, and L1 header submitter.
+// L1 verifier, VRF private key, L1 header submitter, and payment book.
 // `cfg` must not be nil; `pubkey`/`privkey` must be a secp256k1 keypair and
-// `vrfPrivKey` must be the same key in ecdsa form (see SecpPrivKeyToECDSA).
-func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1HeaderSubmitter) *ProofOfBuy {
+// `vrfPrivKey` must be the same key in ecdsa form (see SecpPrivKeyToECDSA);
+// `paymentBook` must be the same instance the HTTP endpoint writes into.
+func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1HeaderSubmitter, paymentBook *PaymentBook) *ProofOfBuy {
 	tri := tripod.NewTripod()
 	p := &ProofOfBuy{
 		Tripod:               tri,
@@ -55,6 +56,7 @@ func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, 
 		myPrivKey:            privkey,
 		l1Verifier:           l1Verifier,
 		vrfPrivKey:           vrfPrivKey,
+		paymentBook:          paymentBook,
 		blockCh:              make(chan *types.Block, 16),
 		l1Submitter:          l1Submitter,
 		pendingFinalizations: make(chan *pendingFinalization, 100),
@@ -62,23 +64,10 @@ func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, 
 	return p
 }
 
-// InitChain starts the block listener, payment listener, and finality worker goroutines.
+// InitChain starts the block listener and finality worker goroutines.
 func (p *ProofOfBuy) InitChain(_ *types.Block) {
 	go p.blockListener()
-	go p.paymentListener()
 	go p.finalityWorker()
-}
-
-// paymentListener reads from the global PendingPaymentCh and stores
-// the latest payment input for StartBlock to consume.
-func (p *ProofOfBuy) paymentListener() {
-	for {
-		select {
-		case input := <-PendingPaymentCh:
-			p.lastPaymentInput = input
-			logrus.Infof("PoB: paymentListener received payment_hash=%s", input.PaymentHash)
-		}
-	}
 }
 
 // blockListener subscribes to the P2P block topic and forwards
@@ -109,15 +98,12 @@ func (p *ProofOfBuy) blockListener() {
 }
 
 // myPubkeyHex returns this node's compressed secp256k1 public key as hex.
-// The raw 33-byte encoding is used rather than yu's BytesWithType, whose
-// secp256k1 branch tags the key as sr25519, and because it is exactly the
-// byte string CKB blake160-hashes into a lock's args.
 func (p *ProofOfBuy) myPubkeyHex() string {
-	return hex.EncodeToString(p.myPubkey.Bytes())
+	return MinerPubkeyHex(p.myPubkey)
 }
 
 // StartBlock runs at the beginning of each block:
-//  1. Consumes the latest external L1 payment input
+//  1. Takes this height's declared L1 payment (already confirmed on L1)
 //  2. Computes VRF from the previous block hash using this node's VRF key
 //  3. Calculates this node's score using L1 payment amount and VRF output
 //  4. Packs transactions, signs and broadcasts the block
@@ -136,22 +122,8 @@ func (p *ProofOfBuy) StartBlock(block *types.Block) {
 
 	logrus.Infof("PoB: start block height=%d", block.Height)
 
-	// Step 1: Consume the latest external payment input.
-	var myPayment *L1Payment
-	if p.lastPaymentInput != nil {
-		logrus.Infof("PoB: using payment_hash=%s", p.lastPaymentInput.PaymentHash)
-		amount, ok := new(big.Int).SetString(p.lastPaymentInput.Amount, 10)
-		if !ok {
-			logrus.Warnf("PoB: invalid payment amount %q, falling back to MinPayment", p.lastPaymentInput.Amount)
-			amount, _ = new(big.Int).SetString(p.cfg.MinPayment, 10)
-		}
-		myPayment = MockL1Payment(amount, p.myPubkeyHex())
-		p.lastPaymentInput = nil
-	} else {
-		logrus.Info("PoB: no external payment input, using fallback mock payment")
-		fallback, _ := new(big.Int).SetString(p.cfg.MinPayment, 10)
-		myPayment = MockL1Payment(fallback, p.myPubkeyHex())
-	}
+	// Step 1: Take this height's L1-confirmed payment declaration.
+	myPayment := p.resolvePayment(block.Height)
 
 	// Step 2: Compute VRF from previous block hash, using the miner key.
 	vrfInput := block.PrevHash.Bytes()
@@ -190,16 +162,12 @@ func (p *ProofOfBuy) StartBlock(block *types.Block) {
 			continue
 		}
 
-		// The payment must have been made by the same identity that produced
-		// the block, otherwise a miner could claim someone else's payment.
-		if cdata.L1Payment == nil || cdata.L1Payment.MinerPubkey != hex.EncodeToString(candidate.MinerPubkey) {
-			logrus.Warn("PoB: candidate payment not bound to its miner key, skipping")
-			continue
-		}
-
-		// Verify L1 payment existence.
-		if !p.l1Verifier.VerifyPayment(context.Background(), cdata.L1Payment) {
-			logrus.Warn("PoB: candidate L1 payment verification failed, skipping")
+		// Confirm the candidate's payment the same way this node's own
+		// declarations were confirmed: bound to the block producer, and
+		// findable on L1.
+		producer := hex.EncodeToString(candidate.MinerPubkey)
+		if err := ConfirmPayment(context.Background(), p.l1Verifier, cdata.L1Payment, producer); err != nil {
+			logrus.Warnf("PoB: candidate payment rejected: %v, skipping", err)
 			continue
 		}
 
@@ -216,6 +184,38 @@ func (p *ProofOfBuy) StartBlock(block *types.Block) {
 		logrus.Infof("PoB: another miner won with score=%s, replacing block", bestScore)
 		*block = *bestBlock
 	}
+}
+
+// resolvePayment returns the L1 payment this node competes with at `height`.
+//
+// The miner declares payments per height through POST /pay_l1_token, and that
+// endpoint has already confirmed each one against L1 — anything sitting in the
+// book is known to exist. No L1 round-trip happens here, so block production
+// never blocks on the L1 node. A height the miner declared nothing for falls
+// back to the configured minimum payment and will lose the round to any miner
+// that actually paid.
+func (p *ProofOfBuy) resolvePayment(height common.BlockNum) *L1Payment {
+	declared := p.paymentBook.Take(height)
+	if declared == nil {
+		logrus.Infof("PoB: no payment declared for height=%d, using min payment", height)
+		return p.minPayment()
+	}
+
+	logrus.Infof("PoB: using declared payment height=%d amount=%s tx_hash=%s",
+		height, declared.Amount, declared.TxHash)
+	return NewL1Payment(declared.TxHash, declared.Amount, p.myPubkeyHex())
+}
+
+// minPayment builds the fallback payment used when this node has no verified
+// declaration for the current height. A malformed `min_payment` in the config
+// degrades to zero rather than a nil amount, which would panic scoring.
+func (p *ProofOfBuy) minPayment() *L1Payment {
+	amount, ok := new(big.Int).SetString(p.cfg.MinPayment, 10)
+	if !ok {
+		logrus.Warnf("PoB: invalid min_payment %q in config, using 0", p.cfg.MinPayment)
+		amount = new(big.Int)
+	}
+	return MockL1Payment(amount, p.myPubkeyHex())
 }
 
 // collectCandidateBlocks drains all pending blocks from blockCh.
