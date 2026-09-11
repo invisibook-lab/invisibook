@@ -36,6 +36,11 @@ type ProofOfBuy struct {
 	// blockCh receives blocks broadcast by other miners via P2P.
 	blockCh chan *types.Block
 
+	// blockSettled reports whether the current round produced or adopted a
+	// block. StartBlock, EndBlock and FinalizeBlock run in sequence on the
+	// kernel's single block-cycle goroutine, so a plain field suffices.
+	blockSettled bool
+
 	// l1Submitter submits block headers to L1 and polls for confirmation.
 	l1Submitter L1HeaderSubmitter
 	// pendingFinalizations is a buffered channel for blocks awaiting L1 finalization.
@@ -107,9 +112,14 @@ func (p *ProofOfBuy) myPubkeyHex() string {
 //  2. Computes VRF from the previous block hash using this node's VRF key
 //  3. Calculates this node's score using L1 payment amount and VRF output
 //  4. Packs transactions, signs and broadcasts the block
-//  5. Collects candidate blocks from other miners during BlockInterval
-//  6. For each candidate: verifies VRF, verifies L1 payment, compares score
-//  7. If another miner wins, replaces this block with the winner's
+//  5. Collects candidate blocks from other miners
+//  6. For each candidate: verifies VRF, confirms the payment, compares score
+//  7. Settles on the highest-scoring block
+//
+// A node that declared no payment for this height does not compete: it
+// produces nothing and only looks at what rivals sent. If nothing valid turns
+// up either, the round ends unsettled — EndBlock skips the height and the
+// kernel retries it, so the node simply waits for a block it can accept.
 func (p *ProofOfBuy) StartBlock(block *types.Block) {
 	now := time.Now()
 	defer func() {
@@ -120,33 +130,38 @@ func (p *ProofOfBuy) StartBlock(block *types.Block) {
 		}
 	}()
 
+	// Until this round settles on a block, EndBlock and FinalizeBlock must
+	// leave the height alone.
+	p.blockSettled = false
+
 	logrus.Infof("PoB: start block height=%d", block.Height)
 
-	// Step 1: Take this height's L1-confirmed payment declaration.
-	myPayment := p.resolvePayment(block.Height)
-
-	// Step 2: Compute VRF from previous block hash, using the miner key.
 	vrfInput := block.PrevHash.Bytes()
-	vrfResult, err := VRFProve(p.vrfPrivKey, vrfInput)
-	if err != nil {
-		logrus.Panic("VRF prove failed: ", err)
+
+	// Steps 1-4: compete for this height, but only with a payment this node
+	// actually declared and had confirmed on L1.
+	var (
+		bestBlock *types.Block
+		bestScore *big.Int
+		// mined records whether we opened a state snapshot for this height,
+		// which produceBlock does and adopting a rival's block does not.
+		mined bool
+	)
+	if myPayment := p.resolvePayment(block.Height); myPayment != nil {
+		vrfResult, err := VRFProve(p.vrfPrivKey, vrfInput)
+		if err != nil {
+			logrus.Panic("VRF prove failed: ", err)
+		}
+		logrus.Infof("PoB: VRF computed, pubkey=%s", p.myPubkeyHex())
+
+		myScore := CalcBlockScore(myPayment.Amount, vrfResult.Output)
+		p.produceBlock(block, vrfResult, myPayment, myScore)
+
+		bestBlock, bestScore, mined = block, myScore, true
 	}
-	logrus.Infof("PoB: VRF computed, pubkey=%s", p.myPubkeyHex())
 
-	// Step 3: Calculate this node's score.
-	myScore := CalcBlockScore(myPayment.Amount, vrfResult.Output)
-
-	// Step 4: Produce, sign and broadcast our block.
-	p.produceBlock(block, vrfResult, myPayment, myScore)
-
-	// Step 5: Collect candidate blocks during the remaining block interval.
-	candidates := p.collectCandidateBlocks()
-
-	// Step 6: Verify each candidate and find the highest-scoring block.
-	bestBlock := block
-	bestScore := myScore
-
-	for _, candidate := range candidates {
+	// Steps 5-6: verify each candidate and find the highest-scoring block.
+	for _, candidate := range p.collectCandidateBlocks() {
 		// Decode consensus data from candidate's Extra field.
 		cdata, err := DecodeConsensusData(candidate.Extra)
 		if err != nil {
@@ -163,52 +178,72 @@ func (p *ProofOfBuy) StartBlock(block *types.Block) {
 		}
 
 		// Confirm the candidate's payment the same way this node's own
-		// declarations were confirmed: bound to the block producer, and
-		// findable on L1.
+		// declarations were confirmed: bound to the block producer, backed by
+		// an allocation on L1, and opening that allocation's commitment.
 		producer := hex.EncodeToString(candidate.MinerPubkey)
-		if err := ConfirmPayment(context.Background(), p.l1Verifier, cdata.L1Payment, producer); err != nil {
+		if err := ConfirmPayment(context.Background(), p.l1Verifier, cdata.L1Payment, producer, candidate.Height); err != nil {
 			logrus.Warnf("PoB: candidate payment rejected: %v, skipping", err)
 			continue
 		}
 
-		// Recalculate candidate's score.
 		candidateScore := CalcBlockScore(cdata.L1Payment.Amount, cdata.VRFResult.Output)
-		if candidateScore.Cmp(bestScore) > 0 {
-			bestBlock = candidate
-			bestScore = candidateScore
+		if bestScore == nil || candidateScore.Cmp(bestScore) > 0 {
+			bestBlock, bestScore = candidate, candidateScore
 		}
 	}
 
-	// Step 7: If another miner won, replace our block with theirs.
-	if bestBlock != block {
-		logrus.Infof("PoB: another miner won with score=%s, replacing block", bestScore)
-		*block = *bestBlock
+	// Step 7: settle on the winner, if there is one.
+	if bestBlock == nil {
+		logrus.Infof("PoB: height=%d unsettled — this node did not compete and no valid rival block arrived", block.Height)
+		return
 	}
+	if bestBlock != block {
+		logrus.Infof("PoB: another miner won with score=%s, adopting their block", bestScore)
+		*block = *bestBlock
+		if !mined {
+			// produceBlock never ran, so open the state snapshot the execution
+			// in EndBlock needs.
+			p.State.StartBlock(block)
+		}
+	}
+	// The chain has a block for this height now: close it off so a late
+	// declaration for it is refused and stale entries below it are dropped.
+	p.paymentBook.Settle(block.Height)
+	p.blockSettled = true
 }
 
-// resolvePayment returns the L1 payment this node competes with at `height`.
+// resolvePayment returns the L1 payment this node competes with at `height`,
+// or nil when it has no business competing for it.
 //
 // The miner declares payments per height through POST /pay_l1_token, and that
 // endpoint has already confirmed each one against L1 — anything sitting in the
-// book is known to exist. No L1 round-trip happens here, so block production
-// never blocks on the L1 node. A height the miner declared nothing for falls
-// back to the configured minimum payment and will lose the round to any miner
-// that actually paid.
+// book is known to be backed by an allocation there. No L1 round-trip happens
+// here, so block production never blocks on the L1 node.
+//
+// A height with no declaration yields nil: paying nothing buys nothing, and a
+// block carrying a payment L1 cannot confirm would be discarded by every peer
+// anyway. `require_declared_payment = false` relaxes this for development
+// against a mock L1, falling back to `min_payment` so a lone node keeps
+// producing blocks.
 func (p *ProofOfBuy) resolvePayment(height common.BlockNum) *L1Payment {
 	declared := p.paymentBook.Take(height)
 	if declared == nil {
-		logrus.Infof("PoB: no payment declared for height=%d, using min payment", height)
+		if p.cfg.RequireDeclaredPayment {
+			logrus.Infof("PoB: no payment declared for height=%d, standing down", height)
+			return nil
+		}
+		logrus.Infof("PoB: no payment declared for height=%d, using min payment (dev mode)", height)
 		return p.minPayment()
 	}
 
 	logrus.Infof("PoB: using declared payment height=%d amount=%s tx_hash=%s",
 		height, declared.Amount, declared.TxHash)
-	return NewL1Payment(declared.TxHash, declared.Amount, p.myPubkeyHex())
+	return NewL1Payment(declared.TxHash, declared.Amount, declared.Random, p.myPubkeyHex())
 }
 
-// minPayment builds the fallback payment used when this node has no verified
-// declaration for the current height. A malformed `min_payment` in the config
-// degrades to zero rather than a nil amount, which would panic scoring.
+// minPayment builds the fallback bid used in development mode, when this node
+// has no declaration for the current height. A malformed `min_payment` in the
+// config degrades to zero rather than a nil amount, which would panic scoring.
 func (p *ProofOfBuy) minPayment() *L1Payment {
 	amount, ok := new(big.Int).SetString(p.cfg.MinPayment, 10)
 	if !ok {
@@ -289,6 +324,10 @@ func (p *ProofOfBuy) produceBlock(block *types.Block, vrfResult *VRFResult, paym
 //  3. Executes all transactions
 //  4. Persists the block and finalizes state
 func (p *ProofOfBuy) EndBlock(block *types.Block) {
+	if !p.blockSettled {
+		logrus.Infof("PoB: skipping EndBlock for height=%d, the round did not settle", block.Height)
+		return
+	}
 	logrus.Infof("PoB: EndBlock height=%d", block.Height)
 
 	// Decode consensus data from Extra
@@ -327,6 +366,9 @@ func (p *ProofOfBuy) EndBlock(block *types.Block) {
 // The actual finalization happens in the finalityWorker goroutine after
 // the block header is submitted to and confirmed on L1.
 func (p *ProofOfBuy) FinalizeBlock(block *types.Block) {
+	if !p.blockSettled {
+		return
+	}
 	logrus.Infof("PoB: queuing block for L1 finalization height=%d, hash=%s", block.Height, block.Hash.String())
 	p.pendingFinalizations <- &pendingFinalization{block: block}
 }

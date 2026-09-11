@@ -160,18 +160,34 @@ only once that submission confirms.
 - [`l1_payment.go`](../chain/consensus/l1_payment.go) — payment types, the
   `L1PaymentVerifier` interface, the `PaymentBook` that holds declarations
   keyed by L2 height, and a gin `POST /pay_l1_token` endpoint through which a
-  miner declares payments — `{block_height, amount, tx_hash}` — for any number
-  of future heights in one batch. The endpoint looks every declared
-  transaction up on L1 *before* storing it, so an unfindable payment is
-  reported in the HTTP response rather than discovered blocks later; a batch is
-  accepted or rejected as a whole. `StartBlock` then simply takes the
-  declaration for its own height — no L1 round-trip on the block path — and a
-  height the miner declared nothing for falls back to `min_payment`.
-  `ConfirmPayment` is the single gate every payment claim passes through
-  (well-formed → bound to its block producer → findable on L1): the endpoint
-  applies it to the miner's own declarations, and `StartBlock` applies it to
-  each candidate block arriving over P2P, so both sides judge a payment by
-  exactly the same rules.
+  miner declares payments — `{block_height, amount, random, tx_hash}` — for any
+  number of future heights in one batch, and a batch is accepted or rejected as
+  a whole.
+
+  On L1 a miner makes **one large prepayment** and then allocates parts of it
+  to individual L2 heights. Each allocation is stored as a **Poseidon
+  commitment**, so rivals cannot read how much a miner bid for an upcoming
+  height. What the miner submits here is the plaintext *opening* of that
+  commitment: `amount` plus the blinding factor `random`. The endpoint
+  confirms it against L1 immediately, so a bad opening is reported in the HTTP
+  response rather than discovered blocks later.
+
+  `ConfirmPayment` is the single gate every payment claim passes through:
+  well-formed → bound to its block producer → L1 holds an allocation for that
+  height → `Poseidon(amount, random)` equals the commitment recorded there.
+  The endpoint applies it to the miner's own declarations, and `StartBlock`
+  applies it to each candidate block arriving over P2P, so both sides judge a
+  payment by exactly the same rules. Since the commitment is posted before the
+  miner can see anyone else's bid, revealing the opening later cannot be a lie
+  — a larger claimed amount simply hashes to something else and is rejected.
+
+  `StartBlock` then takes the declaration for its own height — no L1 round-trip
+  on the block path — and a height the miner declared nothing for falls back to
+  `min_payment`, a placeholder no L1 allocation backs, which peers will
+  therefore reject.
+- [`commitment.go`](../chain/consensus/commitment.go) — `PoseidonCommit`, the
+  Go side of the commitment shape the wallet circuits use (circom-parameterized
+  Poseidon(2) over BN254, rendered as 64-char hex).
 - [`l1_submitter.go`](../chain/consensus/l1_submitter.go) — the
   `L1HeaderSubmitter` interface plus its mock.
 

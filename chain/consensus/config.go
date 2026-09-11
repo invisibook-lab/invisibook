@@ -2,8 +2,14 @@ package consensus
 
 // Config holds all configurable parameters for the Proof-of-Buy consensus.
 type Config struct {
-	// MinPayment is the minimum L1 payment amount (decimal string).
+	// MinPayment is the minimum L1 payment amount (decimal string), used as
+	// the fallback bid when RequireDeclaredPayment is off.
 	MinPayment string `toml:"min_payment"`
+	// RequireDeclaredPayment makes a height with no confirmed declaration a
+	// round this node sits out, which is the protocol behaviour. Turn it off
+	// only for development against a mock L1, where no declaration can ever be
+	// confirmed and a lone node would otherwise never produce a block.
+	RequireDeclaredPayment bool `toml:"require_declared_payment"`
 	// FinalityPeriod is the number of L2 blocks per finality cycle.
 	FinalityPeriod uint64 `toml:"finality_period"`
 	// BlockInterval is the target block time in milliseconds.
@@ -21,12 +27,13 @@ type Config struct {
 // DefaultConsensusConfig returns a Config with sensible defaults.
 func DefaultConsensusConfig() Config {
 	return Config{
-		MinPayment:         "100",
-		FinalityPeriod:     10,
-		BlockInterval:      3000,
-		PackNum:            30000,
-		PaymentListen:      ":8081",
-		L1PollInterval:     1000,
-		MockL1ConfirmDelay: 2000,
+		MinPayment:             "100",
+		RequireDeclaredPayment: true,
+		FinalityPeriod:         10,
+		BlockInterval:          3000,
+		PackNum:                30000,
+		PaymentListen:          ":8081",
+		L1PollInterval:         1000,
+		MockL1ConfirmDelay:     2000,
 	}
 }

@@ -2,6 +2,11 @@
 
 [consensus]
 min_payment     = "100"
+# Protocol behaviour is to sit out any height with no L1-confirmed declaration.
+# The mock L1 holds no allocations, so no declaration can ever be confirmed and
+# a lone node would never produce a block — keep this off until a real CKB
+# client is wired in, then delete this line.
+require_declared_payment = false
 finality_period = 10
 block_interval  = 3000   # milliseconds between blocks
 pack_num        = 30000  # max transactions per block

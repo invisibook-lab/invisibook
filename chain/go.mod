@@ -9,6 +9,7 @@ require (
 	github.com/gin-gonic/gin v1.9.1
 	github.com/go-playground/validator/v10 v10.30.1
 	github.com/gorilla/websocket v1.5.3
+	github.com/iden3/go-iden3-crypto v0.0.15
 	github.com/iden3/go-rapidsnark/types v0.0.3
 	github.com/iden3/go-rapidsnark/verifier v0.0.5
 	github.com/sirupsen/logrus v1.9.3
@@ -70,7 +71,6 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/huin/goupnp v1.3.0 // indirect
-	github.com/iden3/go-iden3-crypto v0.0.15 // indirect
 	github.com/ipfs/go-cid v0.4.1 // indirect
 	github.com/ipfs/go-log/v2 v2.5.1 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect

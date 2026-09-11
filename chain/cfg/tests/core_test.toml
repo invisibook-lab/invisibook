@@ -1,6 +1,12 @@
 # Core Tripod Configuration — test mode (no ZK verification)
 # VK paths are left empty so VerifyGroth16 is skipped.
 
+[consensus]
+# The mock L1 holds no allocations, so no payment declaration can ever be
+# confirmed. Without this the node would sit out every height and never
+# produce a block, and the e2e test would have nothing to run against.
+require_declared_payment = false
+
 [orderbook]
 db_path = "data/orders.db"
 
