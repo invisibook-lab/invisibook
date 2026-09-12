@@ -1,4 +1,4 @@
-package core
+package account
 
 import (
 	"fmt"
@@ -19,7 +19,7 @@ import (
 type Account struct {
 	*tripod.Tripod
 	db         *gorm.DB
-	cfg        *AccountConfig
+	cfg        *Config
 	depositVK  *CircuitVK
 	withdrawVK *CircuitVK
 }
@@ -28,7 +28,7 @@ type Account struct {
 // `cfg` must carry a valid SQLite DSN and readable `DepositVKPath` /
 // `WithdrawVKPath`. DB init and VK loading panic on failure — the chain will
 // not start without all wallet circuits' verifying keys in memory.
-func NewAccount(cfg *AccountConfig) *Account {
+func NewAccount(cfg *Config) *Account {
 	tri := tripod.NewTripodWithName("account")
 	depositVK, err := LoadVK("deposit", cfg.DepositVKPath)
 	if err != nil {
@@ -89,7 +89,7 @@ func (a *Account) GetAccount(ctx *context.ReadContext) {
 		ctx.Json(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := Validator.Struct(req); err != nil {
+	if err := validate.Struct(req); err != nil {
 		ctx.Json(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -134,7 +134,7 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 	if err := ctx.BindJson(req); err != nil {
 		return err
 	}
-	if err := Validator.Struct(req); err != nil {
+	if err := validate.Struct(req); err != nil {
 		return err
 	}
 
@@ -160,7 +160,7 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 	}
 
 	cash := &Cash{
-		ID:      computeCashID(req.Pubkey, req.Token, CipherText(req.OutputCommitment)),
+		ID:      ComputeCashID(req.Pubkey, req.Token, CipherText(req.OutputCommitment)),
 		Pubkey:  req.Pubkey,
 		Token:   req.Token,
 		Amount:  CipherText(req.OutputCommitment),
@@ -211,7 +211,7 @@ func (a *Account) Withdraw(ctx *context.WriteContext) error {
 	if err := ctx.BindJson(req); err != nil {
 		return err
 	}
-	if err := Validator.Struct(req); err != nil {
+	if err := validate.Struct(req); err != nil {
 		return err
 	}
 
@@ -289,7 +289,7 @@ func (a *Account) Withdraw(ctx *context.WriteContext) error {
 			changePubkey = req.Pubkey
 		}
 		changeCash := &Cash{
-			ID:      computeCashID(changePubkey, req.Token, CipherText(req.OutputCommitments[0])),
+			ID:      ComputeCashID(changePubkey, req.Token, CipherText(req.OutputCommitments[0])),
 			Pubkey:  changePubkey,
 			Token:   req.Token,
 			Amount:  CipherText(req.OutputCommitments[0]),

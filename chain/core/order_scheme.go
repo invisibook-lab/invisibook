@@ -3,13 +3,12 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/invisibook-lab/invisibook/account"
 	"math/big"
 
 	"log"
 	"os"
 	"time"
-
-	"github.com/yu-org/yu/common"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -154,26 +153,6 @@ func (ot *OrderBook) FindPendingCounterOrders(pair TradePair, counterType TradeT
 	return schemesToOrders(rows), nil
 }
 
-// HandlingFeesAtHeight sums the handling fees of every order that entered the
-// chain at `height`. These are the fees the block's producer earns on top of
-// the coinbase.
-func (ot *OrderBook) HandlingFeesAtHeight(height common.BlockNum) (*big.Int, error) {
-	var rows []OrderScheme
-	if err := ot.db.Where("block_height = ?", uint32(height)).Find(&rows).Error; err != nil {
-		return nil, err
-	}
-
-	total := new(big.Int)
-	for _, row := range rows {
-		var fees []string
-		if row.HandlingFee != "" {
-			_ = json.Unmarshal([]byte(row.HandlingFee), &fees)
-		}
-		total.Add(total, new(big.Int).SetUint64(totalFee(fees)))
-	}
-	return total, nil
-}
-
 // FindAllOrders returns every order in the database.
 func (ot *OrderBook) FindAllOrders() ([]*Order, error) {
 	var rows []OrderScheme
@@ -189,8 +168,8 @@ func (ot *OrderBook) FindAllOrders() ([]*Order, error) {
 type OrderFilter struct {
 	ID     *OrderID
 	Type   *TradeType
-	Token1 *TokenID
-	Token2 *TokenID
+	Token1 *account.TokenID
+	Token2 *account.TokenID
 	Status *OrderStat
 	Limit  int
 	Offset int
@@ -295,11 +274,11 @@ func schemeToOrder(s *OrderScheme) *Order {
 		ID:   OrderID(s.ID),
 		Type: TradeType(s.Type),
 		Subject: TradePair{
-			Token1: TokenID(s.Token1),
-			Token2: TokenID(s.Token2),
+			Token1: account.TokenID(s.Token1),
+			Token2: account.TokenID(s.Token2),
 		},
 		Price:        price,
-		Amount:       CipherText(s.Amount),
+		Amount:       account.CipherText(s.Amount),
 		Pubkey:       s.Pubkey,
 		InputCashIDs: cashIDs,
 		HandlingFee:  fees,

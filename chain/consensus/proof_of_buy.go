@@ -15,6 +15,8 @@ import (
 	"github.com/yu-org/yu/core/keypair"
 	"github.com/yu-org/yu/core/tripod"
 	"github.com/yu-org/yu/core/types"
+
+	"github.com/invisibook-lab/invisibook/account"
 )
 
 // ProofOfBuy implements the Proof-of-Buy consensus as a yu tripod.
@@ -37,8 +39,9 @@ type ProofOfBuy struct {
 	// blockCh receives blocks broadcast by other miners via P2P.
 	blockCh chan *types.Block
 
-	// rewarder pays out block rewards; nil disables the incentive layer.
-	rewarder BlockRewarder
+	// Account is injected by the kernel (yu's `tripod` struct tag). Block
+	// rewards are minted as cash on it.
+	Account *account.Account `tripod:"account"`
 
 	// l1Submitter submits block headers to L1 and polls for confirmation.
 	l1Submitter L1HeaderSubmitter
@@ -50,10 +53,8 @@ type ProofOfBuy struct {
 // L1 verifier, VRF private key, L1 header submitter, and payment book.
 // `cfg` must not be nil; `pubkey`/`privkey` must be a secp256k1 keypair and
 // `vrfPrivKey` must be the same key in ecdsa form (see SecpPrivKeyToECDSA);
-// `paymentBook` must be the same instance the HTTP endpoint writes into;
-// `rewarder` pays block rewards and may be nil to run without an incentive
-// layer.
-func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1HeaderSubmitter, paymentBook *PaymentBook, rewarder BlockRewarder) *ProofOfBuy {
+// `paymentBook` must be the same instance the HTTP endpoint writes into.
+func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1HeaderSubmitter, paymentBook *PaymentBook) *ProofOfBuy {
 	tri := tripod.NewTripod()
 	p := &ProofOfBuy{
 		Tripod:               tri,
@@ -63,7 +64,6 @@ func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, 
 		l1Verifier:           l1Verifier,
 		vrfPrivKey:           vrfPrivKey,
 		paymentBook:          paymentBook,
-		rewarder:             rewarder,
 		blockCh:              make(chan *types.Block, 16),
 		l1Submitter:          l1Submitter,
 		pendingFinalizations: make(chan *pendingFinalization, 100),

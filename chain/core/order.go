@@ -3,6 +3,7 @@ package core
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"github.com/invisibook-lab/invisibook/account"
 	"math/big"
 
 	"github.com/go-playground/validator/v10"
@@ -12,21 +13,21 @@ import (
 var Validator = validator.New()
 
 // Order is the on-chain domain model of a buy or sell intent.
-// `Amount` is encrypted ciphertext; `InputCashIDs` references the locked Cash
+// `Amount` is encrypted ciphertext; `InputCashIDs` references the locked account.Cash
 // that will fund settlement once the order is matched.
 type Order struct {
-	ID           OrderID    `json:"id"      validate:"required"`
-	Type         TradeType  `json:"type"    validate:"oneof=0 1"`
-	Subject      TradePair  `json:"subject"`
-	Price        *big.Int   `json:"price,omitempty"`
-	Amount       CipherText `json:"amount"  validate:"required"`
-	Pubkey       string     `json:"pubkey"  validate:"required"` // owner's compressed secp256k1 pubkey (66-char hex)
-	InputCashIDs []string   `json:"input_cash_ids" validate:"required,min=1"`
-	HandlingFee  []string   `json:"handling_fee,omitempty"`
-	BlockHeight  uint32     `json:"block_height"`
-	MatchOrder   OrderID    `json:"match_order,omitempty"`
-	Status       OrderStat  `json:"status"  validate:"oneof=0 1 2 3 4 5"`
-	IsSmaller    bool       `json:"is_smaller"` // true if this order is the smaller side after MPC comparison
+	ID           OrderID            `json:"id"      validate:"required"`
+	Type         TradeType          `json:"type"    validate:"oneof=0 1"`
+	Subject      TradePair          `json:"subject"`
+	Price        *big.Int           `json:"price,omitempty"`
+	Amount       account.CipherText `json:"amount"  validate:"required"`
+	Pubkey       string             `json:"pubkey"  validate:"required"` // owner's compressed secp256k1 pubkey (66-char hex)
+	InputCashIDs []string           `json:"input_cash_ids" validate:"required,min=1"`
+	HandlingFee  []string           `json:"handling_fee,omitempty"`
+	BlockHeight  uint32             `json:"block_height"`
+	MatchOrder   OrderID            `json:"match_order,omitempty"`
+	Status       OrderStat          `json:"status"  validate:"oneof=0 1 2 3 4 5"`
+	IsSmaller    bool               `json:"is_smaller"` // true if this order is the smaller side after MPC comparison
 }
 
 // Validate checks all struct tag constraints on the Order.
@@ -35,7 +36,7 @@ func (o *Order) Validate() error {
 }
 
 // ComputeOrderID derives a deterministic order ID by SHA-256 hashing the
-// concatenation of all input Cash IDs.
+// concatenation of all input account.Cash IDs.
 // Must match the Rust compute_order_id in invisibook-lib.
 func ComputeOrderID(inputCashIDs []string) OrderID {
 	h := sha256.New()
@@ -47,10 +48,9 @@ func ComputeOrderID(inputCashIDs []string) OrderID {
 
 // Domain identifier and enum types used across the order/cash modules.
 type (
-	OrderID    string // hex-encoded SHA-256 of the order's input cash IDs
-	TradeType  int    // Buy or Sell
-	CipherText string // opaque encrypted amount, never decrypted on-chain
-	OrderStat  int    // Pending, Matched, Done, Cancelled, Frozen, Compared
+	OrderID   string // hex-encoded SHA-256 of the order's input cash IDs
+	TradeType int    // Buy or Sell
+	OrderStat int    // Pending, Matched, Done, Cancelled, Frozen, Compared
 )
 
 const (
@@ -70,8 +70,8 @@ const (
 // TradePair names the two tokens involved in an order. By convention Token1
 // is the asset being bought/sold and Token2 is the quote/payment asset.
 type TradePair struct {
-	Token1 TokenID `json:"token1" validate:"required"`
-	Token2 TokenID `json:"token2" validate:"required"`
+	Token1 account.TokenID `json:"token1" validate:"required"`
+	Token2 account.TokenID `json:"token2" validate:"required"`
 }
 
 // String renders the pair as "Token1/Token2".

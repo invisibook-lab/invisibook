@@ -1,8 +1,9 @@
-package core
+package account
 
 import (
 	"crypto/sha256"
 	"fmt"
+	"github.com/go-playground/validator/v10"
 
 	"github.com/yu-org/yu/common"
 )
@@ -31,6 +32,12 @@ func (s CashStatus) String() string {
 		return "Unknown"
 	}
 }
+
+// validate is this package's struct-tag validator.
+var validate = validator.New()
+
+// CipherText is an opaque encrypted amount, never decrypted on-chain.
+type CipherText string
 
 // ────────────────────── Domain Models ──────────────────────
 
@@ -70,8 +77,8 @@ type ChangeOutput struct {
 
 // ────────────────────── Helpers ──────────────────────
 
-// computeCashID derives a deterministic Cash ID from its contents: SHA256(pubkey + token + amount).
-func computeCashID(pubkey string, token TokenID, amount CipherText) string {
+// ComputeCashID derives a deterministic Cash ID from its contents: SHA256(pubkey + token + amount).
+func ComputeCashID(pubkey string, token TokenID, amount CipherText) string {
 	h := sha256.New()
 	h.Write([]byte(pubkey))
 	h.Write([]byte(token))
@@ -79,10 +86,10 @@ func computeCashID(pubkey string, token TokenID, amount CipherText) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// computeRewardCashID derives a coinbase Cash ID from its contents plus the
+// ComputeRewardCashID derives a coinbase Cash ID from its contents plus the
 // block that paid it. The block hash is what keeps two identical rewards to
 // the same account from colliding into one record.
-func computeRewardCashID(pubkey string, token TokenID, amount CipherText, blockHash common.Hash) string {
+func ComputeRewardCashID(pubkey string, token TokenID, amount CipherText, blockHash common.Hash) string {
 	h := sha256.New()
 	h.Write([]byte(pubkey))
 	h.Write([]byte(token))

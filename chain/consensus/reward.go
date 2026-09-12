@@ -3,31 +3,22 @@ package consensus
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"math/big"
 
 	"github.com/sirupsen/logrus"
 
 	"github.com/yu-org/yu/common"
 	"github.com/yu-org/yu/core/types"
+
+	"github.com/invisibook-lab/invisibook/account"
+	"github.com/invisibook-lab/invisibook/core"
 )
 
 // rewardRandomDomain separates the coinbase blinding factor from every other
 // value derived from a block hash.
 const rewardRandomDomain = "invisibook/pob/coinbase"
-
-// BlockRewarder pays out what a block earned its producer. The consensus
-// tripod decides the amount; the account and orderbook state behind this
-// interface is owned by the core tripods.
-type BlockRewarder interface {
-	// HandlingFees returns the total handling fee declared by the orders that
-	// entered the chain at `height`.
-	HandlingFees(height common.BlockNum) (*big.Int, error)
-
-	// CreditReward mints native-token cash holding `commitment` for `pubkey`.
-	// `blockHash` is what makes the record unique: two blocks paying the same
-	// miner the same amount must not collapse into one cash entry.
-	CreditReward(pubkey, commitment string, blockHash common.Hash) error
-}
 
 // CalcBlockReward returns what the producer of a block earns: a fixed coinbase
 // plus every handling fee the block collected.
@@ -51,6 +42,51 @@ func RewardRandomHex(blockHash common.Hash) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// handlingFees returns the total handling fee carried by the writings in
+// `block`.
+//
+// The fees are read out of the block's own transactions rather than looked up
+// in orderbook state. A block's reward has to be computable from the block
+// alone: every node must arrive at the same figure from the same bytes,
+// before and independently of whatever state executing it happens to produce.
+func handlingFees(block *types.Block) (*big.Int, error) {
+	total := new(big.Int)
+	for i, txn := range block.Txns {
+		if txn.Raw == nil || txn.Raw.WrCall == nil {
+			continue
+		}
+		call := txn.Raw.WrCall
+		if call.TripodName != core.OrderBookTripodName || call.FuncName != core.SendOrderFuncName {
+			continue
+		}
+
+		var req core.SendOrderRequest
+		if err := json.Unmarshal([]byte(call.Params), &req); err != nil {
+			return nil, fmt.Errorf("decoding %s params of txn %d (%s): %w",
+				core.SendOrderFuncName, i, txn.TxnHash.String(), err)
+		}
+		total.Add(total, new(big.Int).SetUint64(core.TotalFee(req.HandlingFee)))
+	}
+	return total, nil
+}
+
+// creditReward mints native-token cash holding `commitment` for `owner`.
+//
+// `blockHash` is mixed into the cash ID so that two blocks paying the same
+// owner the same amount stay two distinct records. The reward is Active on
+// creation: unlike bridged cash there is nothing to prove about where it came
+// from, the block itself is the proof.
+func (p *ProofOfBuy) creditReward(owner, commitment string, blockHash common.Hash) error {
+	return p.Account.CreateCash(&account.Cash{
+		ID:      account.ComputeRewardCashID(owner, account.NativeToken.Name, account.CipherText(commitment), blockHash),
+		Pubkey:  owner,
+		Token:   account.NativeToken.Name,
+		Amount:  account.CipherText(commitment),
+		ZkProof: fmt.Sprintf("coinbase:%s", blockHash.String()),
+		Status:  account.Active,
+	})
+}
+
 // payBlockReward credits the block's producer with the coinbase plus this
 // block's handling fees.
 //
@@ -66,7 +102,7 @@ func RewardRandomHex(blockHash common.Hash) string {
 // which rivals bid, which means their losing blocks have to be retained and
 // their payments confirmed, none of which happens yet.
 func (p *ProofOfBuy) payBlockReward(block *types.Block) {
-	if p.rewarder == nil {
+	if p.Account == nil {
 		return
 	}
 	if len(block.MinerPubkey) == 0 {
@@ -82,7 +118,7 @@ func (p *ProofOfBuy) payBlockReward(block *types.Block) {
 		return
 	}
 
-	fees, err := p.rewarder.HandlingFees(block.Height)
+	fees, err := handlingFees(block)
 	if err != nil {
 		logrus.Errorf("PoB: summing handling fees at height=%d: %v, paying coinbase only", block.Height, err)
 		fees = new(big.Int)
@@ -98,7 +134,7 @@ func (p *ProofOfBuy) payBlockReward(block *types.Block) {
 		logrus.Errorf("PoB: committing block reward at height=%d: %v", block.Height, err)
 		return
 	}
-	if err := p.rewarder.CreditReward(owner, commitment, block.Hash); err != nil {
+	if err := p.creditReward(owner, commitment, block.Hash); err != nil {
 		logrus.Errorf("PoB: crediting block reward at height=%d: %v", block.Height, err)
 		return
 	}

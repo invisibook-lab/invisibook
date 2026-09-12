@@ -1,11 +1,15 @@
 package consensus
 
 import (
+	"encoding/json"
 	"math/big"
 	"strings"
 	"testing"
 
 	"github.com/yu-org/yu/common"
+	"github.com/yu-org/yu/core/types"
+
+	"github.com/invisibook-lab/invisibook/core"
 )
 
 func TestCalcBlockReward(t *testing.T) {
@@ -53,5 +57,95 @@ func TestVerifyAllocationBudgetRejectsMissingInputs(t *testing.T) {
 	}
 	if err := VerifyAllocationBudget("deadbeef", "", nil); err == nil {
 		t.Fatal("a missing allocation must be rejected")
+	}
+}
+
+// sendOrderTxn builds a signed SendOrder writing carrying `fees`.
+func sendOrderTxn(t *testing.T, fees []string) *types.SignedTxn {
+	t.Helper()
+	params, err := json.Marshal(core.SendOrderRequest{HandlingFee: fees})
+	if err != nil {
+		t.Fatalf("marshalling params: %v", err)
+	}
+	return &types.SignedTxn{
+		Raw: &types.UnsignedTxn{
+			WrCall: &common.WrCall{
+				TripodName: core.OrderBookTripodName,
+				FuncName:   core.SendOrderFuncName,
+				Params:     string(params),
+			},
+		},
+	}
+}
+
+// otherTxn builds a writing that carries no handling fee.
+func otherTxn(tripod, fn string) *types.SignedTxn {
+	return &types.SignedTxn{
+		Raw: &types.UnsignedTxn{
+			WrCall: &common.WrCall{TripodName: tripod, FuncName: fn, Params: "{}"},
+		},
+	}
+}
+
+func blockWith(txns ...*types.SignedTxn) *types.Block {
+	block := &types.Block{}
+	block.SetTxns(txns)
+	return block
+}
+
+func TestHandlingFeesSumsSendOrderWritings(t *testing.T) {
+	got, err := handlingFees(blockWith(
+		sendOrderTxn(t, []string{"10", "5"}),
+		sendOrderTxn(t, []string{"7"}),
+	))
+	if err != nil {
+		t.Fatalf("handlingFees: %v", err)
+	}
+	if got.Cmp(big.NewInt(22)) != 0 {
+		t.Fatalf("handlingFees = %s, want 22", got)
+	}
+}
+
+// TestHandlingFeesIgnoresOtherWritings pins the filter: only the writing that
+// actually declares a fee contributes, so an unrelated call cannot inflate a
+// miner's reward.
+func TestHandlingFeesIgnoresOtherWritings(t *testing.T) {
+	got, err := handlingFees(blockWith(
+		sendOrderTxn(t, []string{"10"}),
+		otherTxn(core.OrderBookTripodName, "SettleOrders"),
+		otherTxn("account", "Deposit"),
+	))
+	if err != nil {
+		t.Fatalf("handlingFees: %v", err)
+	}
+	if got.Cmp(big.NewInt(10)) != 0 {
+		t.Fatalf("handlingFees = %s, want 10", got)
+	}
+}
+
+func TestHandlingFeesOnEmptyBlock(t *testing.T) {
+	got, err := handlingFees(blockWith())
+	if err != nil {
+		t.Fatalf("handlingFees: %v", err)
+	}
+	if got.Sign() != 0 {
+		t.Fatalf("handlingFees = %s, want 0", got)
+	}
+}
+
+// TestHandlingFeesReportsUndecodableParams makes sure a malformed writing is
+// surfaced rather than silently counted as zero.
+func TestHandlingFeesReportsUndecodableParams(t *testing.T) {
+	bad := &types.SignedTxn{
+		Raw: &types.UnsignedTxn{
+			WrCall: &common.WrCall{
+				TripodName: core.OrderBookTripodName,
+				FuncName:   core.SendOrderFuncName,
+				Params:     "not json",
+			},
+		},
+	}
+	if _, err := handlingFees(blockWith(bad)); err == nil {
+		t.Fatal("undecodable SendOrder params must be reported")
 	}
 }

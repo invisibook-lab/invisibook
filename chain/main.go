@@ -8,6 +8,8 @@ import (
 	"github.com/yu-org/yu/core/keypair"
 	"github.com/yu-org/yu/core/startup"
 
+	"github.com/invisibook-lab/invisibook/account"
+	"github.com/invisibook-lab/invisibook/config"
 	"github.com/invisibook-lab/invisibook/consensus"
 	"github.com/invisibook-lab/invisibook/core"
 )
@@ -24,10 +26,10 @@ func main() {
 
 	// Core config is optional: missing or malformed files fall back to defaults
 	// so a fresh node can boot without a hand-written core.toml.
-	coreCfg, err := core.LoadConfig(*coreCfgPath)
+	coreCfg, err := config.Load(*coreCfgPath)
 	if err != nil {
 		log.Printf("WARN: failed to load core config (%s), using defaults: %v", *coreCfgPath, err)
-		coreCfg = core.DefaultConfig()
+		coreCfg = config.Default()
 	}
 
 	// Generate the miner keypair for single-node mode. secp256k1 is used
@@ -53,13 +55,9 @@ func main() {
 	// and the consensus loop takes them out at the matching height.
 	paymentBook := consensus.NewPaymentBook()
 
-	accountTri := core.NewAccount(&coreCfg.Account)
+	accountTri := account.NewAccount(&coreCfg.Account)
 	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook)
-
-	// Block rewards are an account mutation driven by an orderbook fact, so
-	// consensus reaches both through one adapter rather than either directly.
-	rewarder := core.NewRewardAdapter(orderBookTri, accountTri)
-	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, vrfPrivKey, l1Submitter, paymentBook, rewarder)
+	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, vrfPrivKey, l1Submitter, paymentBook)
 
 	// The payment endpoint confirms each declaration against L1 before it
 	// reaches the book, so it needs the same verifier and miner identity the
