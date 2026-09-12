@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/hex"
+	"fmt"
 	"math/big"
 	"sort"
 	"time"
@@ -35,11 +36,6 @@ type ProofOfBuy struct {
 	paymentBook *PaymentBook
 	// blockCh receives blocks broadcast by other miners via P2P.
 	blockCh chan *types.Block
-
-	// blockSettled reports whether the current round produced or adopted a
-	// block. StartBlock, EndBlock and FinalizeBlock run in sequence on the
-	// kernel's single block-cycle goroutine, so a plain field suffices.
-	blockSettled bool
 
 	// l1Submitter submits block headers to L1 and polls for confirmation.
 	l1Submitter L1HeaderSubmitter
@@ -112,104 +108,136 @@ func (p *ProofOfBuy) myPubkeyHex() string {
 //  2. Computes VRF from the previous block hash using this node's VRF key
 //  3. Calculates this node's score using L1 payment amount and VRF output
 //  4. Packs transactions, signs and broadcasts the block
-//  5. Collects candidate blocks from other miners
+//  5. Collects rival blocks for the rest of the block interval
 //  6. For each candidate: verifies VRF, confirms the payment, compares score
 //  7. Settles on the highest-scoring block
 //
-// A node that declared no payment for this height does not compete: it
-// produces nothing and only looks at what rivals sent. If nothing valid turns
-// up either, the round ends unsettled — EndBlock skips the height and the
-// kernel retries it, so the node simply waits for a block it can accept.
+// A node that declared no payment has no way to win the height and nothing
+// worth broadcasting, so it takes none of those steps: it parks on the P2P
+// channel and waits for a block from a miner that did pay. That wait has no
+// deadline — an idle miner simply stops here until the network moves the chain
+// forward. StartBlock therefore always returns with a block in hand, which is
+// what EndBlock and FinalizeBlock rely on.
 func (p *ProofOfBuy) StartBlock(block *types.Block) {
-	now := time.Now()
-	defer func() {
-		elapsed := time.Since(now)
-		remaining := time.Duration(p.cfg.BlockInterval)*time.Millisecond - elapsed
-		if remaining > 0 {
-			time.Sleep(remaining)
-		}
-	}()
-
-	// Until this round settles on a block, EndBlock and FinalizeBlock must
-	// leave the height alone.
-	p.blockSettled = false
+	deadline := time.Now().Add(time.Duration(p.cfg.BlockInterval) * time.Millisecond)
 
 	logrus.Infof("PoB: start block height=%d", block.Height)
 
 	vrfInput := block.PrevHash.Bytes()
 
-	// Steps 1-4: compete for this height, but only with a payment this node
-	// actually declared and had confirmed on L1.
-	var (
-		bestBlock *types.Block
-		bestScore *big.Int
-		// mined records whether we opened a state snapshot for this height,
-		// which produceBlock does and adopting a rival's block does not.
-		mined bool
-	)
-	if myPayment := p.resolvePayment(block.Height); myPayment != nil {
-		vrfResult, err := VRFProve(p.vrfPrivKey, vrfInput)
-		if err != nil {
-			logrus.Panic("VRF prove failed: ", err)
-		}
-		logrus.Infof("PoB: VRF computed, pubkey=%s", p.myPubkeyHex())
-
-		myScore := CalcBlockScore(myPayment.Amount, vrfResult.Output)
-		p.produceBlock(block, vrfResult, myPayment, myScore)
-
-		bestBlock, bestScore, mined = block, myScore, true
-	}
-
-	// Steps 5-6: verify each candidate and find the highest-scoring block.
-	for _, candidate := range p.collectCandidateBlocks() {
-		// Decode consensus data from candidate's Extra field.
-		cdata, err := DecodeConsensusData(candidate.Extra)
-		if err != nil {
-			logrus.Warnf("PoB: decode candidate consensus data failed: %v", err)
-			continue
-		}
-
-		// Verify the VRF proof against the candidate's own block key. Because
-		// that key also owns the L1 payment, a miner can neither grind VRF
-		// keys nor borrow another miner's randomness.
-		if !VRFVerify(candidate.MinerPubkey, vrfInput, cdata.VRFResult) {
-			logrus.Warn("PoB: candidate VRF verification failed, skipping")
-			continue
-		}
-
-		// Confirm the candidate's payment the same way this node's own
-		// declarations were confirmed: bound to the block producer, backed by
-		// an allocation on L1, and opening that allocation's commitment.
-		producer := hex.EncodeToString(candidate.MinerPubkey)
-		if err := ConfirmPayment(context.Background(), p.l1Verifier, cdata.L1Payment, producer, candidate.Height); err != nil {
-			logrus.Warnf("PoB: candidate payment rejected: %v, skipping", err)
-			continue
-		}
-
-		candidateScore := CalcBlockScore(cdata.L1Payment.Amount, cdata.VRFResult.Output)
-		if bestScore == nil || candidateScore.Cmp(bestScore) > 0 {
-			bestBlock, bestScore = candidate, candidateScore
-		}
-	}
-
-	// Step 7: settle on the winner, if there is one.
-	if bestBlock == nil {
-		logrus.Infof("PoB: height=%d unsettled — this node did not compete and no valid rival block arrived", block.Height)
+	// Step 1: take this height's L1-confirmed payment declaration.
+	myPayment := p.resolvePayment(block.Height)
+	if myPayment == nil {
+		p.awaitRivalBlock(block, vrfInput)
+		p.paymentBook.Settle(block.Height)
 		return
 	}
-	if bestBlock != block {
-		logrus.Infof("PoB: another miner won with score=%s, adopting their block", bestScore)
-		*block = *bestBlock
-		if !mined {
-			// produceBlock never ran, so open the state snapshot the execution
-			// in EndBlock needs.
-			p.State.StartBlock(block)
+
+	// Steps 2-4: compete for the height.
+	vrfResult, err := VRFProve(p.vrfPrivKey, vrfInput)
+	if err != nil {
+		// Without a VRF output there is no score to compete with.
+		logrus.Errorf("PoB: VRF prove failed at height=%d: %v, standing down", block.Height, err)
+		p.awaitRivalBlock(block, vrfInput)
+		p.paymentBook.Settle(block.Height)
+		return
+	}
+	logrus.Infof("PoB: VRF computed, pubkey=%s", p.myPubkeyHex())
+
+	bestScore := CalcBlockScore(myPayment.Amount, vrfResult.Output)
+	if err := p.produceBlock(block, vrfResult, myPayment, bestScore); err != nil {
+		logrus.Errorf("PoB: building block at height=%d: %v, standing down", block.Height, err)
+		p.awaitRivalBlock(block, vrfInput)
+		p.paymentBook.Settle(block.Height)
+		return
+	}
+
+	// Steps 5-6: give rivals the rest of the interval to broadcast, and keep
+	// the best block among theirs and ours.
+	var bestRival *types.Block
+	for _, candidate := range p.collectCandidateBlocks(block.Height, deadline) {
+		score, ok := p.verifyCandidate(candidate, vrfInput)
+		if !ok {
+			continue
+		}
+		if score.Cmp(bestScore) > 0 {
+			bestRival, bestScore = candidate, score
 		}
 	}
-	// The chain has a block for this height now: close it off so a late
-	// declaration for it is refused and stale entries below it are dropped.
+
+	// Step 7: adopt a rival's block if it outbid us.
+	if bestRival != nil {
+		logrus.Infof("PoB: another miner won height=%d with score=%s, adopting their block",
+			block.Height, bestScore)
+		*block = *bestRival
+	}
+
+	// The chain has a block for this height now: close it off so stale
+	// declarations at or below it are dropped.
 	p.paymentBook.Settle(block.Height)
-	p.blockSettled = true
+}
+
+// awaitRivalBlock blocks until a miner that paid for this height broadcasts a
+// block this node can verify, then adopts it into `block`.
+//
+// Nothing else depends on this goroutine making progress — the payment
+// endpoint, the P2P listener and the finality worker all run on their own — so
+// parking here costs nothing but this node's participation in a height it
+// cannot win anyway. `vrfInput` must be the VRF input for `block`'s height.
+func (p *ProofOfBuy) awaitRivalBlock(block *types.Block, vrfInput []byte) {
+	logrus.Infof("PoB: waiting for a block from a miner that paid for height=%d", block.Height)
+
+	for candidate := range p.blockCh {
+		if candidate.Height != block.Height {
+			logrus.Warnf("PoB: ignoring block for height=%d while waiting on height=%d",
+				candidate.Height, block.Height)
+			continue
+		}
+		score, ok := p.verifyCandidate(candidate, vrfInput)
+		if !ok {
+			continue
+		}
+
+		logrus.Infof("PoB: adopting block for height=%d from another miner, score=%s",
+			block.Height, score)
+		*block = *candidate
+		// produceBlock never ran, so open the state snapshot EndBlock's
+		// execution needs.
+		p.State.StartBlock(block)
+		return
+	}
+}
+
+// verifyCandidate checks a rival's block and returns its score.
+// Both the competing path and the waiting path judge candidates through here,
+// so a block this node adopts has passed exactly the checks it would have
+// applied to its own. `vrfInput` must be the VRF input for the candidate's
+// height. Returns false when the candidate must be discarded.
+func (p *ProofOfBuy) verifyCandidate(candidate *types.Block, vrfInput []byte) (*big.Int, bool) {
+	cdata, err := DecodeConsensusData(candidate.Extra)
+	if err != nil {
+		logrus.Warnf("PoB: decode candidate consensus data failed: %v", err)
+		return nil, false
+	}
+
+	// Verify the VRF proof against the candidate's own block key. Because that
+	// key also owns the L1 payment, a miner can neither grind VRF keys nor
+	// borrow another miner's randomness.
+	if !VRFVerify(candidate.MinerPubkey, vrfInput, cdata.VRFResult) {
+		logrus.Warn("PoB: candidate VRF verification failed, skipping")
+		return nil, false
+	}
+
+	// Confirm the candidate's payment the same way this node's own
+	// declarations were confirmed: bound to the block producer, backed by an
+	// allocation on L1, and opening that allocation's commitment.
+	producer := hex.EncodeToString(candidate.MinerPubkey)
+	if err := ConfirmPayment(context.Background(), p.l1Verifier, cdata.L1Payment, producer, candidate.Height); err != nil {
+		logrus.Warnf("PoB: candidate payment rejected: %v, skipping", err)
+		return nil, false
+	}
+
+	return CalcBlockScore(cdata.L1Payment.Amount, cdata.VRFResult.Output), true
 }
 
 // resolvePayment returns the L1 payment this node competes with at `height`,
@@ -253,31 +281,46 @@ func (p *ProofOfBuy) minPayment() *L1Payment {
 	return MockL1Payment(amount, p.myPubkeyHex())
 }
 
-// collectCandidateBlocks drains all pending blocks from blockCh.
-// Returns all candidate blocks received from other miners.
-func (p *ProofOfBuy) collectCandidateBlocks() []*types.Block {
+// collectCandidateBlocks gathers rival blocks for `height` until `deadline`.
+// Waiting out the interval is what gives rivals a chance to be heard at all —
+// draining only what has already arrived would mostly collect blocks from the
+// previous height. Blocks for any other height are dropped.
+func (p *ProofOfBuy) collectCandidateBlocks(height common.BlockNum, deadline time.Time) []*types.Block {
 	var candidates []*types.Block
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+
 	for {
 		select {
 		case candidate := <-p.blockCh:
+			if candidate.Height != height {
+				logrus.Warnf("PoB: ignoring block for height=%d while building height=%d",
+					candidate.Height, height)
+				continue
+			}
 			candidates = append(candidates, candidate)
-		default:
+		case <-timer.C:
 			return candidates
 		}
 	}
 }
 
-// produceBlock packs transactions, encodes consensus data, signs and broadcasts the block.
-func (p *ProofOfBuy) produceBlock(block *types.Block, vrfResult *VRFResult, payment *L1Payment, score *big.Int) {
-	// Pack transactions from pool
+// produceBlock packs transactions, encodes consensus data, signs `block` and
+// broadcasts it, returning an error if the block could not be built.
+//
+// A returned error leaves no state snapshot open, so the caller is free to
+// abandon the round and adopt someone else's block instead. Failing to gossip
+// a block that was otherwise built correctly is not an error: the block stands
+// locally and only loses its chance of being adopted elsewhere.
+func (p *ProofOfBuy) produceBlock(block *types.Block, vrfResult *VRFResult, payment *L1Payment, score *big.Int) error {
 	txns, err := p.Pool.Pack(p.cfg.PackNum)
 	if err != nil {
-		logrus.Panic("pack txns from pool: ", err)
+		return fmt.Errorf("packing txns from pool: %w", err)
 	}
 
 	txnRoot, err := types.MakeTxnRoot(txns)
 	if err != nil {
-		logrus.Panic("make txn-root failed: ", err)
+		return fmt.Errorf("making txn root: %w", err)
 	}
 	block.TxnRoot = txnRoot
 
@@ -289,33 +332,36 @@ func (p *ProofOfBuy) produceBlock(block *types.Block, vrfResult *VRFResult, paym
 	}
 	extra, err := EncodeConsensusData(cdata)
 	if err != nil {
-		logrus.Panic("encode consensus data: ", err)
+		return fmt.Errorf("encoding consensus data: %w", err)
 	}
 	block.Extra = extra
 
 	// Compute block hash and sign
-	byt, _ := block.Encode()
+	byt, err := block.Encode()
+	if err != nil {
+		return fmt.Errorf("encoding block for hashing: %w", err)
+	}
 	block.Hash = common.BytesToHash(common.Sha256(byt))
 
 	block.MinerSignature, err = p.myPrivKey.SignData(block.Hash.Bytes())
 	if err != nil {
-		logrus.Panic("sign block failed: ", err)
+		return fmt.Errorf("signing block: %w", err)
 	}
 	block.MinerPubkey = p.myPubkey.Bytes()
 
 	block.SetTxns(txns)
 
-	// Initialize state snapshot for this block
-	p.State.StartBlock(block)
+	// Broadcast the block. A failure here costs this node the round elsewhere
+	// but does not invalidate the block, so it is logged rather than returned.
+	if blockByt, err := block.Encode(); err != nil {
+		logrus.Errorf("PoB: encoding block for p2p at height=%d: %v", block.Height, err)
+	} else if err = p.P2pNetwork.PubP2P(common.StartBlockTopic, blockByt); err != nil {
+		logrus.Errorf("PoB: publishing block to p2p at height=%d: %v", block.Height, err)
+	}
 
-	// Broadcast block via P2P
-	blockByt, err := block.Encode()
-	if err != nil {
-		logrus.Panic("encode block for p2p: ", err)
-	}
-	if err = p.P2pNetwork.PubP2P(common.StartBlockTopic, blockByt); err != nil {
-		logrus.Panic("publish block to p2p: ", err)
-	}
+	// Open the state snapshot last: every error above returns without one.
+	p.State.StartBlock(block)
+	return nil
 }
 
 // EndBlock runs after StartBlock:
@@ -323,39 +369,45 @@ func (p *ProofOfBuy) produceBlock(block *types.Block, vrfResult *VRFResult, paym
 //  2. Verifies VRF proof
 //  3. Executes all transactions
 //  4. Persists the block and finalizes state
+//
+// Any failure here leaves the block unappended and the chain tip where it was.
+// The kernel then rebuilds the same height on the next round, which gives a
+// transient fault a chance to clear and keeps a permanent one loud in the log
+// rather than killing the node.
 func (p *ProofOfBuy) EndBlock(block *types.Block) {
-	if !p.blockSettled {
-		logrus.Infof("PoB: skipping EndBlock for height=%d, the round did not settle", block.Height)
-		return
-	}
 	logrus.Infof("PoB: EndBlock height=%d", block.Height)
 
 	// Decode consensus data from Extra
 	cdata, err := DecodeConsensusData(block.Extra)
 	if err != nil {
-		logrus.Panic("decode consensus data: ", err)
+		logrus.Errorf("PoB: decoding consensus data at height=%d: %v", block.Height, err)
+		return
 	}
 
 	// Verify VRF proof against the block producer's key
 	vrfInput := block.PrevHash.Bytes()
 	if !VRFVerify(block.MinerPubkey, vrfInput, cdata.VRFResult) {
-		logrus.Panic("VRF verification failed")
+		logrus.Errorf("PoB: VRF verification failed at height=%d, discarding the block", block.Height)
+		return
 	}
 
 	// Execute all transactions in the block
 	logrus.Infof("PoB: executing block %d", block.Height)
 	if err = p.Execute(block); err != nil {
-		logrus.Panic("execute block failed: ", err)
+		logrus.Errorf("PoB: executing block at height=%d: %v", block.Height, err)
+		return
 	}
 
 	// Persist block to chain storage
 	if err = p.Chain.AppendBlock(block); err != nil {
-		logrus.Panic("append block failed: ", err)
+		logrus.Errorf("PoB: appending block at height=%d: %v", block.Height, err)
+		return
 	}
 
-	// Reset txpool with executed transactions
+	// Reset txpool with executed transactions. The block is already on the
+	// chain at this point, so a stale pool is logged and carried on with.
 	if err = p.Pool.Reset(block.Txns); err != nil {
-		logrus.Panic("reset pool failed: ", err)
+		logrus.Errorf("PoB: resetting txpool after height=%d: %v", block.Height, err)
 	}
 
 	// Finalize state changes for this block
@@ -365,10 +417,20 @@ func (p *ProofOfBuy) EndBlock(block *types.Block) {
 // FinalizeBlock enqueues the block for asynchronous L1-driven finalization.
 // The actual finalization happens in the finalityWorker goroutine after
 // the block header is submitted to and confirmed on L1.
+//
+// A block EndBlock failed to append must not be submitted to L1, so the chain
+// tip is consulted rather than assumed.
 func (p *ProofOfBuy) FinalizeBlock(block *types.Block) {
-	if !p.blockSettled {
+	tip, err := p.Chain.GetEndCompactBlock()
+	if err != nil {
+		logrus.Errorf("PoB: reading chain tip before finalizing height=%d: %v", block.Height, err)
 		return
 	}
+	if tip.Hash != block.Hash {
+		logrus.Warnf("PoB: height=%d was not appended, skipping L1 finalization", block.Height)
+		return
+	}
+
 	logrus.Infof("PoB: queuing block for L1 finalization height=%d, hash=%s", block.Height, block.Hash.String())
 	p.pendingFinalizations <- &pendingFinalization{block: block}
 }
