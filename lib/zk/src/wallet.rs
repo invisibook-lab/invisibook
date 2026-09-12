@@ -11,7 +11,7 @@ use anyhow::Result;
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
 use light_poseidon::{Poseidon, PoseidonHasher};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{
     circom_bridge::fr_to_decimal_string, prover::run_rapidsnark, test_circuit::TestCircuitHandle,
@@ -650,8 +650,329 @@ pub fn prove_settle_smaller(
     })
 }
 
+// ────────────────────── Settle (co-zk joint circuit) ──────────────────────
+
+/// Hard-coded N=2 locked-cash slots per party, matching `settle_cozk.circom`'s
+/// `main` instantiation.
+pub const SETTLE_COZK_N: usize = 2;
+
+/// One trader's secrets for the joint `settle_cozk` circuit. In the
+/// collaborative flow each trader builds only their own side and secret-shares
+/// it; in the single-prover baseline both sides are known to one process.
+pub struct SettleCoZkSide {
+    /// Order amount in token1 quantity — the value `Order.Amount` commits to
+    /// (for buy and sell orders alike).
+    pub order_amount: u64,
+    /// Blinding of the on-chain order commitment.
+    pub r_order: [u8; 32],
+    /// Fresh blinding for the remainder order commitment (used only if this
+    /// side survives as the larger order, but always part of the witness).
+    pub r_order_new: [u8; 32],
+    /// Locked collateral cashes backing the order: `(amount, blinding)`,
+    /// 1..=`SETTLE_COZK_N` entries. Amounts are token1 for a seller and
+    /// token2 for a buyer; their sum must exactly back the order
+    /// (`order_amount` resp. `order_amount * price`).
+    pub locked: Vec<(u64, [u8; 32])>,
+    /// Fresh blinding for the remainder collateral cash.
+    pub r_locked_new: [u8; 32],
+    /// Fresh blinding for the received cash (chosen by the receiving party so
+    /// it can always open its own new UTXO).
+    pub r_recv: [u8; 32],
+}
+
+/// Full witness of the joint settlement circuit. Party A must be the maker
+/// (the order with the lower block height) by protocol convention.
+pub struct SettleCoZkWitness {
+    pub a: SettleCoZkSide,
+    pub b: SettleCoZkSide,
+    /// Execution price (the maker's price), token2 units per token1 unit.
+    pub price: u64,
+    /// True when A sells token1 (and therefore B buys).
+    pub a_is_seller: bool,
+}
+
+/// Plaintext settlement outcome, mirroring the circuit's arithmetic. Useful
+/// for wallet bookkeeping and for cross-checking the circuit's public outputs.
+pub struct SettleCoZkOutcome {
+    /// sign(a - b): -1 when A fully fills, 0 when both do, 1 when B does.
+    pub cmp: i8,
+    /// Fill in token1 quantity (= min(a, b)).
+    pub fill_t1: u64,
+    /// Fill in token2 quantity (= fill_t1 * price).
+    pub fill_t2: u64,
+    /// Remainder order amounts (token1 qty).
+    pub a_prime: u64,
+    pub b_prime: u64,
+    /// Remainder collateral amounts in each party's locked token.
+    pub a_new_locked: u64,
+    pub b_new_locked: u64,
+    /// Received amounts in each party's received token.
+    pub a_recv: u64,
+    pub b_recv: u64,
+}
+
+/// Proof bundle for `settle_cozk.circom`. The seven `*_hex` output commitments
+/// echo the circuit's public outputs; the chain rebuilds the 15-signal public
+/// vector as `[cmp, new_order_a, new_order_b, new_locked_a, new_locked_b,
+/// recv_a, recv_b, order_a, order_b, price, a_is_seller, locked_a_hashes[2],
+/// locked_b_hashes[2]]`.
+pub struct SettleCoZkProof {
+    pub cmp: i8,
+    pub new_order_a_commitment_hex: String,
+    pub new_order_b_commitment_hex: String,
+    pub new_locked_a_commitment_hex: String,
+    pub new_locked_b_commitment_hex: String,
+    pub recv_a_commitment_hex: String,
+    pub recv_b_commitment_hex: String,
+    pub order_a_commitment_hex: String,
+    pub order_b_commitment_hex: String,
+    /// Locked commitments padded to `SETTLE_COZK_N` with the zero commitment.
+    pub locked_a_hashes_hex: Vec<String>,
+    pub locked_b_hashes_hex: Vec<String>,
+    pub proof_json: Value,
+    pub public_json: Value,
+}
+
+/// Compute the plaintext settlement outcome for a witness, validating the same
+/// invariants the circuit enforces: 1..=N locked slots per side, locked sums
+/// exactly backing each order, and every derived amount fitting in a u64.
+pub fn settle_cozk_outcome(w: &SettleCoZkWitness) -> Result<SettleCoZkOutcome> {
+    for (tag, side) in [("a", &w.a), ("b", &w.b)] {
+        if side.locked.is_empty() || side.locked.len() > SETTLE_COZK_N {
+            anyhow::bail!(
+                "settle_cozk side {tag} takes 1..={SETTLE_COZK_N} locked inputs, got {}",
+                side.locked.len()
+            );
+        }
+    }
+    let locked_needed = |amount: u64, is_seller: bool| -> Result<u64> {
+        if is_seller {
+            Ok(amount)
+        } else {
+            amount
+                .checked_mul(w.price)
+                .ok_or_else(|| anyhow::anyhow!("order amount * price overflows u64"))
+        }
+    };
+    let a_locked_sum: u64 = w.a.locked.iter().map(|(v, _)| *v).sum();
+    let b_locked_sum: u64 = w.b.locked.iter().map(|(v, _)| *v).sum();
+    if a_locked_sum != locked_needed(w.a.order_amount, w.a_is_seller)? {
+        anyhow::bail!("side a locked sum {a_locked_sum} does not back the order");
+    }
+    if b_locked_sum != locked_needed(w.b.order_amount, !w.a_is_seller)? {
+        anyhow::bail!("side b locked sum {b_locked_sum} does not back the order");
+    }
+
+    let (a, b) = (w.a.order_amount, w.b.order_amount);
+    let cmp: i8 = match a.cmp(&b) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    };
+    let fill_t1 = a.min(b);
+    let fill_t2 = fill_t1
+        .checked_mul(w.price)
+        .ok_or_else(|| anyhow::anyhow!("fill_t1 * price overflows u64"))?;
+    let a_prime = a - fill_t1;
+    let b_prime = b - fill_t1;
+    let a_new_locked = locked_needed(a_prime, w.a_is_seller)?;
+    let b_new_locked = locked_needed(b_prime, !w.a_is_seller)?;
+    let (a_recv, b_recv) = if w.a_is_seller {
+        (fill_t2, fill_t1)
+    } else {
+        (fill_t1, fill_t2)
+    };
+
+    Ok(SettleCoZkOutcome {
+        cmp,
+        fill_t1,
+        fill_t2,
+        a_prime,
+        b_prime,
+        a_new_locked,
+        b_new_locked,
+        a_recv,
+        b_recv,
+    })
+}
+
+/// Render one side's private signals as circom input JSON. `tag` must be
+/// `"a"` or `"b"` and match the side's role in the witness; `side.locked`
+/// must hold 1..=`SETTLE_COZK_N` entries (zero-padded here). This is the map
+/// each trader secret-shares in the collaborative flow.
+pub fn settle_cozk_side_json(side: &SettleCoZkSide, tag: &str) -> Result<Value> {
+    if side.locked.is_empty() || side.locked.len() > SETTLE_COZK_N {
+        anyhow::bail!(
+            "settle_cozk side {tag} takes 1..={SETTLE_COZK_N} locked inputs, got {}",
+            side.locked.len()
+        );
+    }
+    let zero_random_dec = fr_to_decimal_string(&Fr::from(0u64));
+    let locked_amounts = pad_to(
+        side.locked.iter().map(|(v, _)| v.to_string()).collect(),
+        SETTLE_COZK_N,
+        "0",
+    );
+    let locked_randomness = pad_to(
+        side.locked
+            .iter()
+            .map(|(_, r)| fr_to_decimal_string(&Fr::from_be_bytes_mod_order(r)))
+            .collect(),
+        SETTLE_COZK_N,
+        &zero_random_dec,
+    );
+    let random_dec = |r: &[u8; 32]| fr_to_decimal_string(&Fr::from_be_bytes_mod_order(r));
+    let mut map = Map::new();
+    map.insert(tag.to_string(), json!(side.order_amount.to_string()));
+    map.insert(format!("r_{tag}"), json!(random_dec(&side.r_order)));
+    map.insert(format!("r_{tag}_new"), json!(random_dec(&side.r_order_new)));
+    map.insert(format!("locked_{tag}_amounts"), json!(locked_amounts));
+    map.insert(format!("locked_{tag}_randomness"), json!(locked_randomness));
+    map.insert(
+        format!("r_locked_{tag}_new"),
+        json!(random_dec(&side.r_locked_new)),
+    );
+    map.insert(format!("r_recv_{tag}"), json!(random_dec(&side.r_recv)));
+    Ok(Value::Object(map))
+}
+
+/// Compute one side's locked commitments padded to `SETTLE_COZK_N` with the
+/// zero commitment, as Fr values. `side.locked` must hold 1..=N entries.
+pub fn settle_cozk_locked_hashes(side: &SettleCoZkSide) -> Vec<Fr> {
+    let mut hashes: Vec<Fr> = side
+        .locked
+        .iter()
+        .map(|(v, r)| poseidon_commit(*v, r))
+        .collect();
+    let zero_commitment = poseidon_commit(0, &[0u8; 32]);
+    while hashes.len() < SETTLE_COZK_N {
+        hashes.push(zero_commitment);
+    }
+    hashes
+}
+
+/// Render the circuit's public inputs as circom input JSON. Both traders must
+/// produce identical maps (all values are on-chain state), otherwise the
+/// collaborative share merge rejects the inputs.
+pub fn settle_cozk_public_json(
+    order_a_commitment: &Fr,
+    order_b_commitment: &Fr,
+    price: u64,
+    a_is_seller: bool,
+    locked_a_hashes: &[Fr],
+    locked_b_hashes: &[Fr],
+) -> Value {
+    let dec = |v: &[Fr]| -> Vec<String> { v.iter().map(fr_to_decimal_string).collect() };
+    json!({
+        "order_a_commitment": fr_to_decimal_string(order_a_commitment),
+        "order_b_commitment": fr_to_decimal_string(order_b_commitment),
+        "price": price.to_string(),
+        "a_is_seller": if a_is_seller { "1" } else { "0" },
+        "locked_a_hashes": dec(locked_a_hashes),
+        "locked_b_hashes": dec(locked_b_hashes),
+    })
+}
+
+/// Build the full input JSON (public + both private sides) for
+/// `settle_cozk.circom`. Used by the single-prover baseline and by tests; the
+/// collaborative flow splits the same maps across parties instead.
+pub fn settle_cozk_input_json(w: &SettleCoZkWitness) -> Result<Value> {
+    let order_a_commitment = poseidon_commit(w.a.order_amount, &w.a.r_order);
+    let order_b_commitment = poseidon_commit(w.b.order_amount, &w.b.r_order);
+    let mut input = settle_cozk_public_json(
+        &order_a_commitment,
+        &order_b_commitment,
+        w.price,
+        w.a_is_seller,
+        &settle_cozk_locked_hashes(&w.a),
+        &settle_cozk_locked_hashes(&w.b),
+    );
+    let obj = input.as_object_mut().expect("public json is an object");
+    for (tag, side) in [("a", &w.a), ("b", &w.b)] {
+        let side_json = settle_cozk_side_json(side, tag)?;
+        for (k, v) in side_json.as_object().expect("side json is an object") {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    Ok(input)
+}
+
+/// Single-prover baseline for `settle_cozk.circom`: build the full witness,
+/// run rapidsnark, and cross-check the circuit's public outputs against the
+/// locally computed outcome. The collaborative flow in `lib/cozk` produces a
+/// byte-compatible proof for the same public vector without any single party
+/// knowing both sides.
+pub fn prove_settle_cozk(
+    w: &SettleCoZkWitness,
+    circuit_handle: &TestCircuitHandle,
+    zkey: &Path,
+) -> Result<SettleCoZkProof> {
+    let outcome = settle_cozk_outcome(w)?;
+    let input = settle_cozk_input_json(w)?;
+
+    let wtns = circuit_handle.gen_witness(&input)?;
+    let (proof_json, public_json) = run_rapidsnark(zkey, &wtns)?;
+
+    // Cross-check the first 7 public signals (the circuit outputs) against
+    // the plaintext outcome — catches witness/zkey drift early.
+    let expected_outputs = [
+        settle_cozk_cmp_fr(outcome.cmp),
+        poseidon_commit(outcome.a_prime, &w.a.r_order_new),
+        poseidon_commit(outcome.b_prime, &w.b.r_order_new),
+        poseidon_commit(outcome.a_new_locked, &w.a.r_locked_new),
+        poseidon_commit(outcome.b_new_locked, &w.b.r_locked_new),
+        poseidon_commit(outcome.a_recv, &w.a.r_recv),
+        poseidon_commit(outcome.b_recv, &w.b.r_recv),
+    ];
+    let publics = public_json
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("public.json is not an array"))?;
+    for (i, expected) in expected_outputs.iter().enumerate() {
+        let got = publics
+            .get(i)
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("public signal {i} missing"))?;
+        if got != fr_to_decimal_string(expected) {
+            anyhow::bail!("public output {i} mismatch: circuit produced {got}");
+        }
+    }
+
+    Ok(SettleCoZkProof {
+        cmp: outcome.cmp,
+        new_order_a_commitment_hex: fr_to_hex(&expected_outputs[1]),
+        new_order_b_commitment_hex: fr_to_hex(&expected_outputs[2]),
+        new_locked_a_commitment_hex: fr_to_hex(&expected_outputs[3]),
+        new_locked_b_commitment_hex: fr_to_hex(&expected_outputs[4]),
+        recv_a_commitment_hex: fr_to_hex(&expected_outputs[5]),
+        recv_b_commitment_hex: fr_to_hex(&expected_outputs[6]),
+        order_a_commitment_hex: fr_to_hex(&poseidon_commit(w.a.order_amount, &w.a.r_order)),
+        order_b_commitment_hex: fr_to_hex(&poseidon_commit(w.b.order_amount, &w.b.r_order)),
+        locked_a_hashes_hex: settle_cozk_locked_hashes(&w.a)
+            .iter()
+            .map(fr_to_hex)
+            .collect(),
+        locked_b_hashes_hex: settle_cozk_locked_hashes(&w.b)
+            .iter()
+            .map(fr_to_hex)
+            .collect(),
+        proof_json,
+        public_json,
+    })
+}
+
+/// Encode the three-way comparison result as the field element the circuit
+/// outputs (-1 is p - 1). `cmp` must be -1, 0, or 1.
+pub fn settle_cozk_cmp_fr(cmp: i8) -> Fr {
+    match cmp {
+        -1 => -Fr::from(1u64),
+        0 => Fr::from(0u64),
+        1 => Fr::from(1u64),
+        _ => panic!("cmp must be -1, 0, or 1"),
+    }
+}
+
 /// Decode a 64-char lowercase hex string into a BN254 Fr.
-fn hex_to_fr(s: &str) -> Result<Fr> {
+pub fn hex_to_fr(s: &str) -> Result<Fr> {
     let bytes = (0..s.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16))

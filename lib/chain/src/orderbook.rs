@@ -172,6 +172,23 @@ pub fn compute_cash_id(pubkey: &str, token: &str, amount: &str) -> String {
 
 // ────────────────────── Order Helpers ──────────────────────
 
+/// Orders a matched pair deterministically, mirroring Go `makerTakerOrder`
+/// (chain/core/orderbook_cozk.go): the maker is the order with the lower
+/// `block_height`; on a tie, the order with the lexicographically smaller
+/// `id`. Returns `(maker, taker)`.
+pub fn maker_taker<'a>(x: &'a Order, y: &'a Order) -> (&'a Order, &'a Order) {
+    if x.block_height < y.block_height {
+        return (x, y);
+    }
+    if y.block_height < x.block_height {
+        return (y, x);
+    }
+    if x.id <= y.id {
+        return (x, y);
+    }
+    (y, x)
+}
+
 pub fn sort_orders(orders: &mut [Order]) {
     orders.sort_by(|a, b| match (a.price, b.price) {
         (None, None) => Ordering::Equal,
@@ -280,6 +297,72 @@ pub fn sample_orders() -> Vec<Order> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds a minimal Order with the given id, block height, and a tag
+    /// stored in `pubkey` so tests can tell the two arguments apart.
+    fn test_order(id: &str, block_height: u32, tag: &str) -> Order {
+        Order {
+            id: id.to_string(),
+            trade_type: TradeType::Buy,
+            subject: TradePair {
+                token1: "ETH".into(),
+                token2: "USDT".into(),
+            },
+            price: None,
+            amount: String::new(),
+            pubkey: tag.to_string(),
+            input_cash_ids: Vec::new(),
+            handling_fee: Vec::new(),
+            block_height,
+            status: OrderStatus::Pending,
+            match_order: None,
+            is_smaller: false,
+        }
+    }
+
+    /// The order with the lower block height is the maker, regardless of
+    /// argument order.
+    #[test]
+    fn maker_taker_lower_height_wins() {
+        let early = test_order("bbb", 5, "early");
+        let late = test_order("aaa", 9, "late");
+
+        let (maker, taker) = maker_taker(&early, &late);
+        assert_eq!(maker.pubkey, "early");
+        assert_eq!(taker.pubkey, "late");
+
+        let (maker, taker) = maker_taker(&late, &early);
+        assert_eq!(maker.pubkey, "early");
+        assert_eq!(taker.pubkey, "late");
+    }
+
+    /// On equal heights the lexicographically smaller id is the maker,
+    /// regardless of argument order.
+    #[test]
+    fn maker_taker_equal_height_smaller_id_wins() {
+        let small_id = test_order("aaa", 7, "small");
+        let big_id = test_order("bbb", 7, "big");
+
+        let (maker, taker) = maker_taker(&small_id, &big_id);
+        assert_eq!(maker.pubkey, "small");
+        assert_eq!(taker.pubkey, "big");
+
+        let (maker, taker) = maker_taker(&big_id, &small_id);
+        assert_eq!(maker.pubkey, "small");
+        assert_eq!(taker.pubkey, "big");
+    }
+
+    /// Degenerate case: equal height and equal id — the first argument is
+    /// the maker (id <= other.id).
+    #[test]
+    fn maker_taker_equal_height_equal_id_first_arg_wins() {
+        let x = test_order("same", 3, "x");
+        let y = test_order("same", 3, "y");
+
+        let (maker, taker) = maker_taker(&x, &y);
+        assert_eq!(maker.pubkey, "x");
+        assert_eq!(taker.pubkey, "y");
+    }
 
     #[test]
     fn print_genesis_ciphertexts() {

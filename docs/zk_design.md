@@ -17,6 +17,7 @@ Five circuits cover the four wallet operations:
 | SendOrder split | `split.circom` | Splitting an Active Cash into a Locked output + a change output preserves total value |
 | SettleOrder (larger side) | `settle_larger.circom` | Conservation of the side that has change + cross-leg ratio `fill_t2 == fill_t1 * price` |
 | SettleOrder (smaller side) | `settle_smaller.circom` | Conservation of the side that fully fills (no change) |
+| SettleOrdersCoZk (joint) | `settle_cozk.circom` | Joint settlement of a matched pair, proven **collaboratively** by both traders via MPC (co-snarks REP3) — neither learns the other's amounts. See [cozk_design.md](cozk_design.md) |
 
 Toolchain (curve = BN254 throughout):
 

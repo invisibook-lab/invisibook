@@ -72,9 +72,10 @@ mod tests {
         setup::dev_setup_snarkjs,
         test_circuit::TestCircuitHandle,
         wallet::{
-            DepositWitness, SettleLargerWitness, SettleSmallerWitness, SplitWitness,
-            WithdrawWitness, fr_to_hex, poseidon_commit, prove_deposit, prove_settle_larger,
-            prove_settle_smaller, prove_split, prove_withdraw,
+            DepositWitness, SettleCoZkSide, SettleCoZkWitness, SettleLargerWitness,
+            SettleSmallerWitness, SplitWitness, WithdrawWitness, fr_to_hex, poseidon_commit,
+            prove_deposit, prove_settle_cozk, prove_settle_larger, prove_settle_smaller,
+            prove_split, prove_withdraw,
         },
     };
 
@@ -294,6 +295,60 @@ mod tests {
         assert_eq!(
             sp.match_commitment_hex,
             fr_to_hex(&poseidon_commit(60, &r_match))
+        );
+    }
+
+    #[test]
+    fn settle_cozk_proof_round_trips_through_rapidsnark() {
+        // A (maker) sells 80 token1 at price 3, B buys 60 → cmp = 1, A keeps 20.
+        // The single-prover baseline path; the collaborative flow in lib/cozk
+        // must produce a proof over the identical 15-signal public vector.
+        let setup = dev_setup_snarkjs("settle_cozk").expect("snarkjs setup");
+        let handle = TestCircuitHandle::from_compiled(&setup.circuit_dir).expect("circuit handle");
+        let witness = SettleCoZkWitness {
+            a: SettleCoZkSide {
+                order_amount: 80,
+                r_order: [0xA1u8; 32],
+                r_order_new: [0xA2u8; 32],
+                locked: vec![(80, [0xA3u8; 32])],
+                r_locked_new: [0xA4u8; 32],
+                r_recv: [0xA5u8; 32],
+            },
+            b: SettleCoZkSide {
+                order_amount: 60,
+                r_order: [0xB1u8; 32],
+                r_order_new: [0xB2u8; 32],
+                locked: vec![(180, [0xB3u8; 32])],
+                r_locked_new: [0xB4u8; 32],
+                r_recv: [0xB5u8; 32],
+            },
+            price: 3,
+            a_is_seller: true,
+        };
+        let sp = prove_settle_cozk(&witness, &handle, &setup.zkey)
+            .expect("rapidsnark prove settle_cozk");
+
+        assert_eq!(sp.proof_json["protocol"], "groth16");
+        let public = sp.public_json.as_array().expect("public is array");
+        assert_eq!(public.len(), 15);
+        assert_eq!(sp.cmp, 1);
+        // A keeps 20 on the book; B's remainder commitments commit to zero.
+        assert_eq!(
+            sp.new_order_a_commitment_hex,
+            fr_to_hex(&poseidon_commit(20, &[0xA2u8; 32]))
+        );
+        assert_eq!(
+            sp.new_order_b_commitment_hex,
+            fr_to_hex(&poseidon_commit(0, &[0xB2u8; 32]))
+        );
+        // A (seller) receives the token2 leg 60*3, B receives 60 token1.
+        assert_eq!(
+            sp.recv_a_commitment_hex,
+            fr_to_hex(&poseidon_commit(180, &[0xA5u8; 32]))
+        );
+        assert_eq!(
+            sp.recv_b_commitment_hex,
+            fr_to_hex(&poseidon_commit(60, &[0xB5u8; 32]))
         );
     }
 

@@ -45,9 +45,15 @@ func deriveKeypair(t *testing.T, seedHex string) (keypair.PrivKey, string) {
 // signOrderID signs the order ID string with the given private key and returns a hex signature.
 func signOrderID(t *testing.T, priv keypair.PrivKey, orderID string) string {
 	t.Helper()
-	sig, err := priv.SignData([]byte(orderID))
+	return signBytes(t, priv, []byte(orderID))
+}
+
+// signBytes signs `msg` with the given private key and returns a hex signature.
+func signBytes(t *testing.T, priv keypair.PrivKey, msg []byte) string {
+	t.Helper()
+	sig, err := priv.SignData(msg)
 	if err != nil {
-		t.Fatalf("signing order %s: %v", orderID, err)
+		t.Fatalf("signing message: %v", err)
 	}
 	return hex.EncodeToString(sig)
 }
@@ -566,6 +572,7 @@ func getAccount(t *testing.T, pubkey, token string) []CashItem {
 type OrderItem struct {
 	ID           string   `json:"id"`
 	Status       int      `json:"status"`
+	Amount       string   `json:"amount"`
 	MatchOrder   string   `json:"match_order"`
 	Pubkey       string   `json:"pubkey"`
 	InputCashIDs []string `json:"input_cash_ids"`

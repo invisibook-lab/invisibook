@@ -1,0 +1,8 @@
+[toolchain]
+# Pinned to the toolchain renegade-fi/ark-mpc itself pins. ark-mpc uses the
+# unstable `inherent_associated_types` feature, whose resolution regressed on
+# newer nightlies (every `Self::Output` / serde-derive `Value` fails E0220),
+# so this workspace intentionally builds with an older nightly than the rest
+# of the repo. Cargo.lock additionally holds back `time`/`time-core` (their
+# MSRV is newer than this toolchain).
+channel = "nightly-2025-02-20"

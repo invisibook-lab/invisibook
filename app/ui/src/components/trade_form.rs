@@ -287,13 +287,12 @@ pub fn TradeForm(
                         rec.status = CASH_SPENT;
                     }
                 }
-                // For buy orders, store order_amount (token1 qty) and order_random
-                // so settle can pass them to MPC for commitment verification.
-                let (rec_order_amount, rec_order_random) = if trade_type == TradeType::Buy {
-                    (Some(_amount), Some(order_random_hex.clone()))
-                } else {
-                    (None, None)
-                };
+                // order.amount commits the token1 qty under a fresh order_random_hex
+                // (kept unlinkable to the locked-cash commitment), so BOTH sides must
+                // persist it to reconstruct the order witness at settle time — sells
+                // included, not just buys.
+                let (rec_order_amount, rec_order_random) =
+                    (Some(_amount), Some(order_random_hex.clone()));
                 store.records_mut().push(CashRecord {
                     cash_id: locked_cash_id.clone(),
                     token: input_token.clone(),
@@ -321,11 +320,11 @@ pub fn TradeForm(
                 for rec in store.records_mut().iter_mut() {
                     if input_cash_ids.contains(&rec.cash_id) {
                         rec.status = CASH_LOCKED;
-                        // For buy orders, store order amount/random for MPC.
-                        if trade_type == TradeType::Buy {
-                            rec.order_amount = Some(_amount);
-                            rec.order_random = Some(order_random_hex.clone());
-                        }
+                        // Persist the order-commitment witness (token1 qty + its fresh
+                        // random) for BOTH sides; a sell that omits it cannot reopen
+                        // order.amount at settle time.
+                        rec.order_amount = Some(_amount);
+                        rec.order_random = Some(order_random_hex.clone());
                     }
                 }
             }

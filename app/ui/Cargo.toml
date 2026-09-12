@@ -7,11 +7,20 @@ edition = "2021"
 dioxus = "0.7"
 hex = "0.4"
 invisibook-lib = { path = "../../lib/chain" }
-tokio = { version = "1", features = ["time", "net", "io-util"] }
+tokio = { version = "1", features = ["time", "net", "io-util", "process"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The settlement path links no cryptography (it runs the collaborative proof
+# in the settle2p_session subprocess). `zk` remains only for the SendOrder
+# split proof in trade_form.rs (order placement, not settlement) — a
+# follow-up can move that to a subprocess too. `zk` is ark-groth16/circom,
+# NOT ark-mpc, so it does not reintroduce a second ark-mpc.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 zk = { path = "../../lib/zk" }
-mpc = { path = "../../lib/mpc" }
-num-bigint = "0.4"
-rand = "0.9"
+
+# Dev-only: the headless settle_e2e integration test needs the tokio test
+# macro and a multi-thread runtime. Features unify with the normal `tokio`
+# dependency above; this stays webkit-free and adds no crypto/MPC crates.
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

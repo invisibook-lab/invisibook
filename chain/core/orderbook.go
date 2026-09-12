@@ -39,13 +39,15 @@ type OrderEvent struct {
 
 // OrderBook is the tripod that owns the order table: it accepts new orders,
 // runs the matching engine, and settles matched pairs. It depends on the
-// Account tripod (injected via the `tripod` struct tag) for Cash state changes.
+// account.Account tripod (injected via the `tripod` struct tag) for account.Cash state changes.
 type OrderBook struct {
 	*tripod.Tripod
 	Account        *account.Account `tripod:"account"`
 	db             *gorm.DB
 	splitVK        *account.CircuitVK
 	settleLargerVK *account.CircuitVK
+	settleCoZkVK   *account.CircuitVK
+	settleCoZk2pVK *PlonkVK
 }
 
 // NewOrderBook constructs the OrderBook tripod and registers its writings and
@@ -63,13 +65,38 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	if err != nil {
 		panic(fmt.Sprintf("loading settle_larger VK: %v", err))
 	}
+	settleCoZkVK, err := account.LoadVK("settle_cozk", cfg.SettleCoZkVKPath)
+	if err != nil {
+		panic(fmt.Sprintf("loading settle_cozk VK: %v", err))
+	}
+	settleCoZk2pVK, err := LoadPlonkVK("settle_cozk2p", cfg.SettleCoZk2pVKPath)
+	if err != nil {
+		panic(fmt.Sprintf("loading settle_cozk2p VK: %v", err))
+	}
+	// Fail-closed in production: a nil VK means account.LoadVK/LoadPlonkVK found an
+	// empty path and verification would be silently skipped. Refuse to boot
+	// so a misconfigured node never accepts unverified settlements.
+	if cfg.RequireProofs {
+		for name, missing := range map[string]bool{
+			"split":         splitVK == nil,
+			"settle_larger": settleLargerVK == nil,
+			"settle_cozk":   settleCoZkVK == nil,
+			"settle_cozk2p": settleCoZk2pVK == nil,
+		} {
+			if missing {
+				panic(fmt.Sprintf("require_proofs is set but %s VK path is empty; refusing to start with proof verification disabled", name))
+			}
+		}
+	}
 	ot := &OrderBook{
 		Tripod:         tri,
 		db:             InitOrderDB(cfg.DBPath, account.ParseGormLogLevel(cfg.DBLogLevel)),
 		splitVK:        splitVK,
 		settleLargerVK: settleLargerVK,
+		settleCoZkVK:   settleCoZkVK,
+		settleCoZk2pVK: settleCoZk2pVK,
 	}
-	ot.SetWritings(ot.SendOrder, ot.CompareOrders, ot.SettleOrders, ot.RegisterSettleAddr)
+	ot.SetWritings(ot.SendOrder, ot.CompareOrders, ot.SettleOrders, ot.SettleOrdersCoZk, ot.SettleOrdersCoZk2p, ot.RegisterSettleAddr)
 	ot.SetReadings(ot.QueryOrders, ot.QuerySettleAddr)
 	return ot
 }
@@ -574,19 +601,7 @@ func (ot *OrderBook) SettleOrders(ctx *context.WriteContext) error {
 
 	// Execution price: maker's price (earlier block height).
 	// Same block height: use the lower price (favorable to buyer).
-	var expectedPrice uint64
-	if myOrder.BlockHeight < matchOrder.BlockHeight {
-		expectedPrice = myOrder.Price.Uint64()
-	} else if matchOrder.BlockHeight < myOrder.BlockHeight {
-		expectedPrice = matchOrder.Price.Uint64()
-	} else {
-		p, q := myOrder.Price.Uint64(), matchOrder.Price.Uint64()
-		if p < q {
-			expectedPrice = p
-		} else {
-			expectedPrice = q
-		}
-	}
+	expectedPrice := executionPrice(myOrder, matchOrder)
 
 	// Validate the larger leg fields.
 	if largerLeg.MyMatchCommitment == "" || largerLeg.OtherMatchCommitment == "" || largerLeg.ChangeCommitment == "" {
@@ -739,26 +754,38 @@ func buildSettleLargerPublicSignals(leg *SettleTokenLeg, ord *Order, acc *accoun
 	return signals, nil
 }
 
-// lockedInputHashesPadded fetches each locked input cash for `ord`, asserts
-// it's the expected token, and returns N decimal-string commitments (pad with
-// account.PoseidonZeroCommitment when ord has fewer than N inputs).
-func lockedInputHashesPadded(ord *Order, acc *account.Account, n int, expectedToken account.TokenID) ([]string, error) {
+// lockedInputHexesPadded fetches each locked input cash for `ord`, asserts
+// it's the expected token, and returns N 64-char hex commitments (pad with
+// account.PoseidonZeroCommitmentHex when ord has fewer than N inputs).
+func lockedInputHexesPadded(ord *Order, acc *account.Account, n int, expectedToken account.TokenID) ([]string, error) {
 	out := make([]string, 0, n)
 	for i := 0; i < n; i++ {
-		var hex string
-		if i < len(ord.InputCashIDs) {
-			cash, err := acc.GetCash(ord.InputCashIDs[i])
-			if err != nil {
-				return nil, fmt.Errorf("locked cash %s not found: %w", ord.InputCashIDs[i], err)
-			}
-			if cash.Token != expectedToken {
-				return nil, fmt.Errorf("locked cash %s token %s != expected %s", cash.ID, cash.Token, expectedToken)
-			}
-			hex = string(cash.Amount)
-		} else {
-			hex = account.PoseidonZeroCommitmentHex
+		if i >= len(ord.InputCashIDs) {
+			out = append(out, account.PoseidonZeroCommitmentHex)
+			continue
 		}
-		dec, err := account.HexToDecimal(hex)
+		cash, err := acc.GetCash(ord.InputCashIDs[i])
+		if err != nil {
+			return nil, fmt.Errorf("locked cash %s not found: %w", ord.InputCashIDs[i], err)
+		}
+		if cash.Token != expectedToken {
+			return nil, fmt.Errorf("locked cash %s token %s != expected %s", cash.ID, cash.Token, expectedToken)
+		}
+		out = append(out, string(cash.Amount))
+	}
+	return out, nil
+}
+
+// lockedInputHashesPadded is lockedInputHexesPadded rendered as the
+// decimal-string commitments snarkjs verifiers consume.
+func lockedInputHashesPadded(ord *Order, acc *account.Account, n int, expectedToken account.TokenID) ([]string, error) {
+	hexes, err := lockedInputHexesPadded(ord, acc, n, expectedToken)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(hexes))
+	for i, h := range hexes {
+		dec, err := account.HexToDecimal(h)
 		if err != nil {
 			return nil, fmt.Errorf("input commitment hex at slot %d: %w", i, err)
 		}
