@@ -1,8 +1,6 @@
 package core
 
 import (
-	"crypto/ed25519"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,7 +75,7 @@ type CashChangeOutput struct {
 
 // SendOrderRequest is the JSON payload accepted by SendOrder. The client
 // pre-computes the order ID (SHA-256 over input cash IDs), signs it with their
-// ed25519 key, and lists the input Cash they want to lock or split.
+// owner key, and lists the input Cash they want to lock or split.
 //
 // `ZkProof` is required only in split mode (when `Change != nil`): it proves
 // `sum(input_commitments) == sum(output_commitments)` where outputs are
@@ -89,8 +87,8 @@ type SendOrderRequest struct {
 	Subject      TradePair         `json:"subject"`
 	Price        *big.Int          `json:"price,omitempty"`
 	Amount       CipherText        `json:"amount"         validate:"required"`
-	Pubkey       string            `json:"pubkey"         validate:"required"` // sender's ed25519 pubkey (64-char hex)
-	Signature    string            `json:"signature"      validate:"required"` // ed25519 sig over order ID bytes (128-char hex)
+	Pubkey       string            `json:"pubkey"         validate:"required"` // sender's compressed secp256k1 pubkey (66-char hex)
+	Signature    string            `json:"signature"      validate:"required"` // compact secp256k1 sig over order ID bytes (128-char hex)
 	InputCashIDs []string          `json:"input_cash_ids" validate:"required,min=1,max=2"`
 	HandlingFee  []string          `json:"handling_fee"   validate:"required,min=1"` // must be plaintext.
 	Change       *CashChangeOutput `json:"change,omitempty"`
@@ -119,17 +117,10 @@ func (ot *OrderBook) SendOrder(ctx *context.WriteContext) error {
 		return fmt.Errorf("order ID mismatch: got %s, expected %s", req.ID, expectedID)
 	}
 
-	// Verify the sender's ed25519 signature over the order ID bytes.
-	pubkeyBytes, err := hex.DecodeString(req.Pubkey)
-	if err != nil || len(pubkeyBytes) != ed25519.PublicKeySize {
-		return fmt.Errorf("invalid pubkey: must be %d-byte ed25519 key as 64-char hex", ed25519.PublicKeySize)
-	}
-	sigBytes, err := hex.DecodeString(req.Signature)
-	if err != nil || len(sigBytes) != ed25519.SignatureSize {
-		return fmt.Errorf("invalid signature: must be %d-byte ed25519 sig as 128-char hex", ed25519.SignatureSize)
-	}
-	if !ed25519.Verify(pubkeyBytes, []byte(req.ID), sigBytes) {
-		return fmt.Errorf("signature verification failed for order %s", req.ID)
+	// Verify the sender's signature over the order ID bytes, on whichever of
+	// the two accepted curves their key is on.
+	if err := VerifyOwnerSignature(req.Pubkey, string(req.ID), req.Signature); err != nil {
+		return fmt.Errorf("order %s: %w", req.ID, err)
 	}
 
 	// Determine expected token for the input Cash:
@@ -308,7 +299,7 @@ type SettleTokenLeg struct {
 
 	// Required for both sides:
 	RecvCommitment string `json:"recv_commitment" validate:"required,len=64"`
-	RecvPubkey     string `json:"recv_pubkey"     validate:"required,len=64"`
+	RecvPubkey     string `json:"recv_pubkey"     validate:"required"`
 	ZkProof        string `json:"zk_proof"        validate:"required"`
 }
 

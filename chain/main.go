@@ -52,9 +52,14 @@ func main() {
 	// The payment book is shared: the HTTP endpoint writes declarations into it
 	// and the consensus loop takes them out at the matching height.
 	paymentBook := consensus.NewPaymentBook()
-	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, vrfPrivKey, l1Submitter, paymentBook)
+
 	accountTri := core.NewAccount(&coreCfg.Account)
 	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook)
+
+	// Block rewards are an account mutation driven by an orderbook fact, so
+	// consensus reaches both through one adapter rather than either directly.
+	rewarder := core.NewRewardAdapter(orderBookTri, accountTri)
+	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, vrfPrivKey, l1Submitter, paymentBook, rewarder)
 
 	// The payment endpoint confirms each declaration against L1 before it
 	// reaches the book, so it needs the same verifier and miner identity the

@@ -3,6 +3,8 @@ package core
 import (
 	"crypto/sha256"
 	"fmt"
+
+	"github.com/yu-org/yu/common"
 )
 
 // ────────────────────── Cash Status ──────────────────────
@@ -38,7 +40,7 @@ func (s CashStatus) String() string {
 // verify successfully before this Cash can be consumed.
 type Cash struct {
 	ID      string     `json:"id"`
-	Pubkey  string     `json:"pubkey"` // owner's raw ed25519 public key (64-char hex)
+	Pubkey  string     `json:"pubkey"` // owner's compressed secp256k1 pubkey (66-char hex)
 	Token   TokenID    `json:"token"`
 	Amount  CipherText `json:"amount"`   // encrypted amount
 	ZkProof string     `json:"zk_proof"` // proof committed at creation
@@ -74,6 +76,18 @@ func computeCashID(pubkey string, token TokenID, amount CipherText) string {
 	h.Write([]byte(pubkey))
 	h.Write([]byte(token))
 	h.Write([]byte(amount))
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// computeRewardCashID derives a coinbase Cash ID from its contents plus the
+// block that paid it. The block hash is what keeps two identical rewards to
+// the same account from colliding into one record.
+func computeRewardCashID(pubkey string, token TokenID, amount CipherText, blockHash common.Hash) string {
+	h := sha256.New()
+	h.Write([]byte(pubkey))
+	h.Write([]byte(token))
+	h.Write([]byte(amount))
+	h.Write(blockHash.Bytes())
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 

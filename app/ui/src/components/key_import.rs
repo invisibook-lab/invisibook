@@ -31,8 +31,8 @@ pub fn KeyImport(
             return;
         }
 
-        // Parse, validate, and derive ed25519 seed at m/44'/60'/0'/0'/0'
-        let seed = match invisibook_lib::hd::mnemonic_to_ed25519_key(&mnemonic_text, 60, 0) {
+        // Parse, validate, and derive the secp256k1 key at m/44'/60'/0'/0/0
+        let seed = match invisibook_lib::hd::mnemonic_to_key(&mnemonic_text, 60, 0) {
             Ok(s) => s,
             Err(e) => {
                 message.set(Some((format!("✗ Invalid mnemonic: {}", e), true)));

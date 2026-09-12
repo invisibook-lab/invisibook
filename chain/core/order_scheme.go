@@ -9,6 +9,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/yu-org/yu/common"
+
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -24,7 +26,7 @@ type OrderScheme struct {
 	Token2       string `gorm:"column:token2;index:idx_pair_type"`
 	Price        string `gorm:"column:price"`
 	Amount       string `gorm:"column:amount"`
-	Pubkey       string `gorm:"column:pubkey;index"`   // owner's ed25519 pubkey (64-char hex)
+	Pubkey       string `gorm:"column:pubkey;index"`   // owner's compressed secp256k1 pubkey (66-char hex)
 	InputCashIDs string `gorm:"column:input_cash_ids"` // JSON array of cash IDs
 	HandlingFee  string `gorm:"column:handling_fee"`   // JSON array of fee strings
 	BlockHeight  uint32 `gorm:"column:block_height"`
@@ -150,6 +152,26 @@ func (ot *OrderBook) FindPendingCounterOrders(pair TradePair, counterType TradeT
 		return nil, err
 	}
 	return schemesToOrders(rows), nil
+}
+
+// HandlingFeesAtHeight sums the handling fees of every order that entered the
+// chain at `height`. These are the fees the block's producer earns on top of
+// the coinbase.
+func (ot *OrderBook) HandlingFeesAtHeight(height common.BlockNum) (*big.Int, error) {
+	var rows []OrderScheme
+	if err := ot.db.Where("block_height = ?", uint32(height)).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	total := new(big.Int)
+	for _, row := range rows {
+		var fees []string
+		if row.HandlingFee != "" {
+			_ = json.Unmarshal([]byte(row.HandlingFee), &fees)
+		}
+		total.Add(total, new(big.Int).SetUint64(totalFee(fees)))
+	}
+	return total, nil
 }
 
 // FindAllOrders returns every order in the database.

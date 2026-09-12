@@ -37,6 +37,9 @@ type ProofOfBuy struct {
 	// blockCh receives blocks broadcast by other miners via P2P.
 	blockCh chan *types.Block
 
+	// rewarder pays out block rewards; nil disables the incentive layer.
+	rewarder BlockRewarder
+
 	// l1Submitter submits block headers to L1 and polls for confirmation.
 	l1Submitter L1HeaderSubmitter
 	// pendingFinalizations is a buffered channel for blocks awaiting L1 finalization.
@@ -47,8 +50,10 @@ type ProofOfBuy struct {
 // L1 verifier, VRF private key, L1 header submitter, and payment book.
 // `cfg` must not be nil; `pubkey`/`privkey` must be a secp256k1 keypair and
 // `vrfPrivKey` must be the same key in ecdsa form (see SecpPrivKeyToECDSA);
-// `paymentBook` must be the same instance the HTTP endpoint writes into.
-func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1HeaderSubmitter, paymentBook *PaymentBook) *ProofOfBuy {
+// `paymentBook` must be the same instance the HTTP endpoint writes into;
+// `rewarder` pays block rewards and may be nil to run without an incentive
+// layer.
+func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1HeaderSubmitter, paymentBook *PaymentBook, rewarder BlockRewarder) *ProofOfBuy {
 	tri := tripod.NewTripod()
 	p := &ProofOfBuy{
 		Tripod:               tri,
@@ -58,6 +63,7 @@ func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, 
 		l1Verifier:           l1Verifier,
 		vrfPrivKey:           vrfPrivKey,
 		paymentBook:          paymentBook,
+		rewarder:             rewarder,
 		blockCh:              make(chan *types.Block, 16),
 		l1Submitter:          l1Submitter,
 		pendingFinalizations: make(chan *pendingFinalization, 100),
@@ -266,7 +272,7 @@ func (p *ProofOfBuy) resolvePayment(height common.BlockNum) *L1Payment {
 
 	logrus.Infof("PoB: using declared payment height=%d amount=%s tx_hash=%s",
 		height, declared.Amount, declared.TxHash)
-	return NewL1Payment(declared.TxHash, declared.Amount, declared.Random, p.myPubkeyHex())
+	return NewL1Payment(declared.TxHash, declared.Amount, declared.Random, p.myPubkeyHex(), declared.BudgetProof)
 }
 
 // minPayment builds the fallback bid used in development mode, when this node
@@ -410,6 +416,10 @@ func (p *ProofOfBuy) EndBlock(block *types.Block) {
 		logrus.Errorf("PoB: resetting txpool after height=%d: %v", block.Height, err)
 	}
 
+	// Pay the producer now that the block is on the chain. Every node runs
+	// this for every block, so the payout is part of the agreed state.
+	p.payBlockReward(block)
+
 	// Finalize state changes for this block
 	p.State.FinalizeBlock(block)
 }
@@ -449,12 +459,22 @@ func (p *ProofOfBuy) finalityWorker() {
 	for {
 		select {
 		case pf := <-p.pendingFinalizations:
+			// L1 picks the winning fork by max(goal), so the score travels
+			// with the header.
+			cdata, err := DecodeConsensusData(pf.block.Extra)
+			if err != nil {
+				logrus.Errorf("PoB: decoding consensus data before L1 submission at height=%d: %v",
+					pf.block.Height, err)
+				continue
+			}
+
 			// Submit block header to L1.
 			header := &BlockHeaderSubmission{
 				L2BlockHeight: pf.block.Height,
 				L2BlockHash:   pf.block.Hash,
 				TxnRoot:       pf.block.TxnRoot,
 				MinerPubkey:   hex.EncodeToString(pf.block.MinerPubkey),
+				Goal:          cdata.BlockScore,
 			}
 			l1TxHash, err := p.l1Submitter.SubmitBlockHeader(context.Background(), header)
 			if err != nil {

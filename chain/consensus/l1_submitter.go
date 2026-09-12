@@ -21,6 +21,10 @@ type BlockHeaderSubmission struct {
 	TxnRoot common.Hash `json:"txn_root"`
 	// MinerPubkey is the hex-encoded public key of the block miner.
 	MinerPubkey string `json:"miner_pubkey"`
+	// Goal is the block's competition score as a decimal string. L1 arbitrates
+	// between forks by taking max(goal), so a submission without it cannot be
+	// judged.
+	Goal string `json:"goal"`
 }
 
 // L1HeaderSubmitter abstracts the submission of L2 block headers to L1

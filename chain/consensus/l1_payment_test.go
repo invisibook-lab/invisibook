@@ -206,7 +206,7 @@ func TestConfirmPayment(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("accepts an opening that matches the commitment", func(t *testing.T) {
-		payment := NewL1Payment("0xprepay", big.NewInt(500), randA, "minerA")
+		payment := NewL1Payment("0xprepay", big.NewInt(500), randA, "minerA", "")
 		if err := ConfirmPayment(ctx, verifier, payment, "minerA", height); err != nil {
 			t.Fatalf("expected the payment to be confirmed, got %v", err)
 		}
@@ -214,7 +214,7 @@ func TestConfirmPayment(t *testing.T) {
 
 	t.Run("rejects an inflated amount", func(t *testing.T) {
 		// The miner committed to 500 on L1 but now claims 50000 to win the height.
-		payment := NewL1Payment("0xprepay", big.NewInt(50000), randA, "minerA")
+		payment := NewL1Payment("0xprepay", big.NewInt(50000), randA, "minerA", "")
 		err := ConfirmPayment(ctx, verifier, payment, "minerA", height)
 		if !errors.Is(err, ErrCommitmentMismatch) {
 			t.Fatalf("expected ErrCommitmentMismatch, got %v", err)
@@ -222,7 +222,7 @@ func TestConfirmPayment(t *testing.T) {
 	})
 
 	t.Run("rejects a substituted random", func(t *testing.T) {
-		payment := NewL1Payment("0xprepay", big.NewInt(500), randB, "minerA")
+		payment := NewL1Payment("0xprepay", big.NewInt(500), randB, "minerA", "")
 		if err := ConfirmPayment(ctx, verifier, payment, "minerA", height); !errors.Is(err, ErrCommitmentMismatch) {
 			t.Fatalf("expected ErrCommitmentMismatch, got %v", err)
 		}
@@ -230,7 +230,7 @@ func TestConfirmPayment(t *testing.T) {
 
 	t.Run("rejects a payment claimed by another miner", func(t *testing.T) {
 		// minerB replays minerA's allocation inside its own block.
-		payment := NewL1Payment("0xprepay", big.NewInt(500), randA, "minerA")
+		payment := NewL1Payment("0xprepay", big.NewInt(500), randA, "minerA", "")
 		err := ConfirmPayment(ctx, verifier, payment, "minerB", height)
 		if err == nil {
 			t.Fatal("a payment bound to another miner must be rejected")
@@ -241,7 +241,7 @@ func TestConfirmPayment(t *testing.T) {
 	})
 
 	t.Run("rejects a height with no allocation on L1", func(t *testing.T) {
-		payment := NewL1Payment("0xprepay", big.NewInt(500), randA, "minerA")
+		payment := NewL1Payment("0xprepay", big.NewInt(500), randA, "minerA", "")
 		if err := ConfirmPayment(ctx, verifier, payment, "minerA", height+1); !errors.Is(err, ErrPaymentNotFound) {
 			t.Fatalf("expected ErrPaymentNotFound, got %v", err)
 		}

@@ -5,6 +5,9 @@ type Config struct {
 	// MinPayment is the minimum L1 payment amount (decimal string), used as
 	// the fallback bid when RequireDeclaredPayment is off.
 	MinPayment string `toml:"min_payment"`
+	// CoinbaseReward is the fixed native-token reward a block pays its
+	// producer, on top of the handling fees it collected (decimal string).
+	CoinbaseReward string `toml:"coinbase_reward"`
 	// RequireDeclaredPayment makes a height with no confirmed declaration a
 	// round this node sits out, which is the protocol behaviour. Turn it off
 	// only for development against a mock L1, where no declaration can ever be
@@ -29,6 +32,7 @@ func DefaultConsensusConfig() Config {
 	return Config{
 		MinPayment:             "100",
 		RequireDeclaredPayment: true,
+		CoinbaseReward:         "0",
 		FinalityPeriod:         10,
 		BlockInterval:          3000,
 		PackNum:                30000,

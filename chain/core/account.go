@@ -114,7 +114,7 @@ func (a *Account) GetAccount(ctx *context.ReadContext) {
 // attest. `OutputCommitment` is the Poseidon commitment of the new Cash's
 // amount and becomes its on-chain `Cash.Amount` field.
 type DepositRequest struct {
-	Pubkey           string  `json:"pubkey"            validate:"required"` // depositor's ed25519 pubkey (64-char hex)
+	Pubkey           string  `json:"pubkey"            validate:"required"` // depositor's compressed secp256k1 pubkey (66-char hex)
 	Token            TokenID `json:"token"             validate:"required"`
 	BridgeCommitment string  `json:"bridge_commitment" validate:"required,len=64"` // Poseidon(deposit_amount, r_bridge) hex
 	OutputCommitment string  `json:"output_commitment" validate:"required,len=64"` // Poseidon(output_amount, r_output) hex

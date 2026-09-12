@@ -146,28 +146,28 @@ impl ClientConfig {
         self.data_dir.join("cash.json")
     }
 
-    /// Derives a 32-byte ed25519 seed from the mnemonic at index 0, path m/44'/60'/0'/0'/0'.
+    /// Derives a 32-byte private key from the mnemonic at index 0, path m/44'/60'/0'/0/0.
     pub fn seed(&self) -> Result<[u8; 32], Box<dyn std::error::Error>> {
         self.seed_at_index(0)
     }
 
-    /// Derives a 32-byte ed25519 seed from the mnemonic at the given address index.
-    /// Path: m/44'/60'/0'/0'/index' (all hardened, coin_type=60).
+    /// Derives a 32-byte private key from the mnemonic at the given address index.
+    /// Path: m/44'/60'/0'/0/index (BIP-32, coin_type=60).
     pub fn seed_at_index(&self, index: u32) -> Result<[u8; 32], Box<dyn std::error::Error>> {
         let m = bip39::Mnemonic::parse(&self.keypair.mnemonic)?;
         let bip39_seed = m.to_seed("");
-        Ok(crate::hd::derive_ed25519_key(&bip39_seed, 60, index))
+        Ok(crate::hd::derive_key(&bip39_seed, 60, index)?)
     }
 
     /// Parses the mnemonic and returns a yu-sdk KeyPair for address index 0.
     pub fn keypair(&self) -> Result<KeyPair, Box<dyn std::error::Error>> {
         let seed = self.seed()?;
-        Ok(KeyPair::from_ed25519_bytes(&seed))
+        Ok(KeyPair::from_secp256k1_bytes(&seed)?)
     }
 
     /// Build a KeyPair directly from a 32-byte seed (for key import use).
     pub fn keypair_from_seed(seed: &[u8; 32]) -> Result<KeyPair, Box<dyn std::error::Error>> {
-        Ok(KeyPair::from_ed25519_bytes(seed))
+        Ok(KeyPair::from_secp256k1_bytes(seed)?)
     }
 
     // ── internal ──

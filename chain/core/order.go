@@ -20,7 +20,7 @@ type Order struct {
 	Subject      TradePair  `json:"subject"`
 	Price        *big.Int   `json:"price,omitempty"`
 	Amount       CipherText `json:"amount"  validate:"required"`
-	Pubkey       string     `json:"pubkey"  validate:"required"` // owner's ed25519 pubkey (64-char hex)
+	Pubkey       string     `json:"pubkey"  validate:"required"` // owner's compressed secp256k1 pubkey (66-char hex)
 	InputCashIDs []string   `json:"input_cash_ids" validate:"required,min=1"`
 	HandlingFee  []string   `json:"handling_fee,omitempty"`
 	BlockHeight  uint32     `json:"block_height"`
