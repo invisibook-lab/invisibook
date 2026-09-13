@@ -2,14 +2,12 @@ package consensus
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/sirupsen/logrus"
 
 	"github.com/yu-org/yu/common"
-	"github.com/yu-org/yu/common/yerror"
 )
 
 // CanonicalL2Block is L1's ruling for one L2 height: of all the blocks miners
@@ -194,10 +192,6 @@ func (p *ProofOfBuy) dropOrphanedBlocks(height common.BlockNum, canonical common
 	// first one L1 has not settled, so by the time it sees an orphan every
 	// height below has been finalized already.
 	err := p.Chain.Prune()
-	if errors.Is(err, yerror.ErrBlockNotFound) {
-		// Nothing finalized yet, so there is no boundary to prune above.
-		err = p.Chain.PruneAll()
-	}
 	if err != nil {
 		// The orphans are still on disk and the tip still points into them.
 		// Stop producing rather than pile more blocks onto a chain that is
