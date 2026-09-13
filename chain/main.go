@@ -50,6 +50,9 @@ func main() {
 
 	l1Verifier := &consensus.MockL1PaymentVerifier{}
 	l1Submitter := consensus.NewMockL1HeaderSubmitter(coreCfg.Consensus.MockL1ConfirmDelay)
+	// Sole miner in mock mode: every submission is taken to have won its
+	// height, so the follower agrees with the local chain.
+	l1Verdict := consensus.NewMockL1Verdict(true)
 
 	// The payment book is shared: the HTTP endpoint writes declarations into it
 	// and the consensus loop takes them out at the matching height.
@@ -57,7 +60,7 @@ func main() {
 
 	accountTri := account.NewAccount(&coreCfg.Account)
 	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook)
-	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, vrfPrivKey, l1Submitter, paymentBook)
+	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, vrfPrivKey, l1Submitter, l1Verdict, paymentBook)
 
 	// The payment endpoint confirms each declaration against L1 before it
 	// reaches the book, so it needs the same verifier and miner identity the

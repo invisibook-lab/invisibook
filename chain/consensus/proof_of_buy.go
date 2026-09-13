@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -45,6 +46,17 @@ type ProofOfBuy struct {
 
 	// l1Submitter submits block headers to L1 and polls for confirmation.
 	l1Submitter L1HeaderSubmitter
+	// l1Verdict reads back which blocks L1 settled on; nil disables following.
+	l1Verdict L1Verdict
+
+	// canonicalAt records, per height, the block L1 settled on after this node
+	// was overruled there — the only block it will accept when it rebuilds
+	// that height. `halted` is set when orphans could not be pruned and the
+	// node must stop rather than build on a chain it failed to clean up.
+	// Written by the finality worker, read by block production, hence the mutex.
+	divergedMu  sync.Mutex
+	canonicalAt map[common.BlockNum]common.Hash
+	halted      bool
 	// pendingFinalizations is a buffered channel for blocks awaiting L1 finalization.
 	pendingFinalizations chan *pendingFinalization
 }
@@ -53,8 +65,9 @@ type ProofOfBuy struct {
 // L1 verifier, VRF private key, L1 header submitter, and payment book.
 // `cfg` must not be nil; `pubkey`/`privkey` must be a secp256k1 keypair and
 // `vrfPrivKey` must be the same key in ecdsa form (see SecpPrivKeyToECDSA);
-// `paymentBook` must be the same instance the HTTP endpoint writes into.
-func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1HeaderSubmitter, paymentBook *PaymentBook) *ProofOfBuy {
+// `paymentBook` must be the same instance the HTTP endpoint writes into;
+// `l1Verdict` reads back L1's fork ruling and may be nil to run without it.
+func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1HeaderSubmitter, l1Verdict L1Verdict, paymentBook *PaymentBook) *ProofOfBuy {
 	tri := tripod.NewTripod()
 	p := &ProofOfBuy{
 		Tripod:               tri,
@@ -64,8 +77,10 @@ func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, 
 		l1Verifier:           l1Verifier,
 		vrfPrivKey:           vrfPrivKey,
 		paymentBook:          paymentBook,
+		canonicalAt:          make(map[common.BlockNum]common.Hash),
 		blockCh:              make(chan *types.Block, 16),
 		l1Submitter:          l1Submitter,
+		l1Verdict:            l1Verdict,
 		pendingFinalizations: make(chan *pendingFinalization, 100),
 	}
 	return p
@@ -126,6 +141,24 @@ func (p *ProofOfBuy) myPubkeyHex() string {
 // what EndBlock and FinalizeBlock rely on.
 func (p *ProofOfBuy) StartBlock(block *types.Block) {
 	deadline := time.Now().Add(time.Duration(p.cfg.BlockInterval) * time.Millisecond)
+
+	if p.halting() {
+		// Orphaned blocks could not be pruned, so the local chain is known bad
+		// and cannot be repaired here. Take nothing from any peer either.
+		logrus.Errorf("PoB: halted after a failed prune, not producing height=%d", block.Height)
+		select {}
+	}
+
+	if canonical, ruled := p.expectedBlock(block.Height); ruled {
+		// L1 has already settled this height. Competing for it again would
+		// only produce a second orphan, so wait for the block L1 named.
+		logrus.Infof("PoB: height=%d was settled by L1 on %s, waiting for that block",
+			block.Height, canonical.String())
+		p.awaitRivalBlock(block, block.PrevHash.Bytes())
+		p.forgetExpectedBlock(block.Height)
+		p.paymentBook.Settle(block.Height)
+		return
+	}
 
 	logrus.Infof("PoB: start block height=%d", block.Height)
 
@@ -220,6 +253,13 @@ func (p *ProofOfBuy) awaitRivalBlock(block *types.Block, vrfInput []byte) {
 // applied to its own. `vrfInput` must be the VRF input for the candidate's
 // height. Returns false when the candidate must be discarded.
 func (p *ProofOfBuy) verifyCandidate(candidate *types.Block, vrfInput []byte) (*big.Int, bool) {
+	// A height L1 has already ruled on accepts exactly one block.
+	if canonical, ruled := p.expectedBlock(candidate.Height); ruled && candidate.Hash != canonical {
+		logrus.Warnf("PoB: candidate %s is not the block L1 settled height=%d on, skipping",
+			candidate.Hash.String(), candidate.Height)
+		return nil, false
+	}
+
 	cdata, err := DecodeConsensusData(candidate.Extra)
 	if err != nil {
 		logrus.Warnf("PoB: decode candidate consensus data failed: %v", err)
@@ -420,8 +460,10 @@ func (p *ProofOfBuy) EndBlock(block *types.Block) {
 	// this for every block, so the payout is part of the agreed state.
 	p.payBlockReward(block)
 
-	// Finalize state changes for this block
-	p.State.FinalizeBlock(block)
+	// Nothing is finalized here. A block is only executed and appended at this
+	// point; whether it belongs on the canonical chain is L1's call, and that
+	// answer arrives later. The finality worker calls Chain.Finalize and
+	// State.FinalizeBlock once — and only once — L1 has ruled for this block.
 }
 
 // FinalizeBlock enqueues the block for asynchronous L1-driven finalization.
@@ -446,8 +488,15 @@ func (p *ProofOfBuy) FinalizeBlock(block *types.Block) {
 }
 
 // finalityWorker runs as a background goroutine. It receives blocks from
-// pendingFinalizations, submits their headers to L1, then polls for
-// confirmation. Blocks are finalized strictly in height order.
+// pendingFinalizations, submits their headers to L1, polls for confirmation,
+// and then asks L1 which block it actually settled on. Blocks are finalized
+// strictly in height order.
+//
+// It owns finality outright: nothing else in this tripod calls Chain.Finalize
+// or State.FinalizeBlock. A locally produced block is executed and appended
+// immediately, but stays unfinalized until L1 has ruled for it — until then
+// the node cannot know whether a rival outbid it, and finalizing early would
+// mean finalizing a block that has to be discarded.
 func (p *ProofOfBuy) finalityWorker() {
 	pollInterval := time.Duration(p.cfg.L1PollInterval) * time.Millisecond
 	// pending holds blocks that have been submitted to L1 but not yet confirmed.
@@ -506,10 +555,29 @@ func (p *ProofOfBuy) finalityWorker() {
 				if !ok {
 					break
 				}
-				// L1 confirmed — finalize the block locally.
+				// Confirmed only means the submission landed. Ask L1 which
+				// block it actually settled on before treating ours as final.
+				outcome, canonical := p.followVerdict(pf)
+				if outcome == Unsettled {
+					break
+				}
+				if outcome == Orphaned {
+					// Dropped rather than finalized; everything above it is
+					// off the canonical chain too, so stop draining here.
+					p.dropOrphanedBlocks(pf.block.Height, canonical)
+					confirmed++
+					break
+				}
+
+				// L1 settled on our block — finalize it, chain and state
+				// together. This is the only place either is finalized.
 				if err := p.Chain.Finalize(pf.block); err != nil {
 					logrus.Errorf("PoB: finalize block failed height=%d: %v", pf.block.Height, err)
 				} else {
+					// State follows the chain: if persisting the finalized
+					// marker failed, the finalized read view must not move
+					// ahead of it.
+					p.State.FinalizeBlock(pf.block)
 					logrus.Infof("PoB: L1-confirmed finalization height=%d, l1_tx=%s", pf.block.Height, pf.l1TxHash)
 				}
 				confirmed++
