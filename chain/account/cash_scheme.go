@@ -2,13 +2,8 @@ package account
 
 import (
 	"fmt"
-	"log"
-	"os"
-	"time"
 
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
 // ────────────────────── SQL Model ──────────────────────
@@ -29,24 +24,12 @@ func (CashScheme) TableName() string { return "cash" }
 
 // ────────────────────── DB Initialization ──────────────────────
 
-// InitAccountDB opens a SQLite database and auto-migrates the cash table.
-// `logLevel` controls GORM SQL logging verbosity.
-func InitAccountDB(dsn string, logLevel logger.LogLevel) *gorm.DB {
-	gormLogger := logger.New(
-		log.New(os.Stdout, "\n", log.LstdFlags),
-		logger.Config{
-			SlowThreshold: 200 * time.Millisecond,
-			LogLevel:      logLevel,
-		},
-	)
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: gormLogger})
-	if err != nil {
-		panic(fmt.Sprintf("failed to open accounts database: %v", err))
-	}
+// MigrateCashTable creates the cash table on the shared chain database.
+func MigrateCashTable(db *gorm.DB) error {
 	if err := db.AutoMigrate(&CashScheme{}); err != nil {
-		panic(fmt.Sprintf("failed to migrate cash table: %v", err))
+		return fmt.Errorf("migrating cash table: %w", err)
 	}
-	return db
+	return nil
 }
 
 // ────────────────────── CRUD Operations ──────────────────────

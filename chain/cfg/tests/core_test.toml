@@ -1,6 +1,11 @@
 # Core Tripod Configuration — test mode (no ZK verification)
 # VK paths are left empty so VerifyGroth16 is skipped.
 
+# One SQLite database for all tripods: orders and cash are the same
+# block's state, so they share a file and a transaction.
+db_path      = "data/chain.db"
+db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
+
 [consensus]
 # The mock L1 holds no allocations, so no payment declaration can ever be
 # confirmed. Without this the node would sit out every height and never
@@ -8,10 +13,8 @@
 require_declared_payment = false
 
 [orderbook]
-db_path = "data/orders.db"
 
 [account]
-db_path = "data/accounts.db"
 
 # Genesis cash — same as core.toml
 # alice pubkey: 038318535b54105d4a7aae60c08fc45f9687181b4fdfc625bd1a753fa7397fed75

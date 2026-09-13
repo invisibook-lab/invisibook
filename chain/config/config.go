@@ -17,18 +17,25 @@ import (
 )
 
 // Config holds all configurable parameters for the chain's tripods.
+//
+// `DBPath` is the one SQLite database every tripod writes through: orders and
+// cash are the same block's state, so they share a file and a transaction.
 type Config struct {
-	Consensus consensus.Config     `toml:"consensus"`
-	OrderBook core.OrderBookConfig `toml:"orderbook"`
-	Account   account.Config       `toml:"account"`
+	DBPath     string               `toml:"db_path"`
+	DBLogLevel string               `toml:"db_log_level"`
+	Consensus  consensus.Config     `toml:"consensus"`
+	OrderBook  core.OrderBookConfig `toml:"orderbook"`
+	Account    account.Config       `toml:"account"`
 }
 
 // Default returns a Config with every section at its own default.
 func Default() *Config {
 	return &Config{
-		Consensus: consensus.DefaultConsensusConfig(),
-		OrderBook: core.DefaultOrderBookConfig(),
-		Account:   account.DefaultConfig(),
+		DBPath:     "data/chain.db",
+		DBLogLevel: "warn",
+		Consensus:  consensus.DefaultConsensusConfig(),
+		OrderBook:  core.DefaultOrderBookConfig(),
+		Account:    account.DefaultConfig(),
 	}
 }
 

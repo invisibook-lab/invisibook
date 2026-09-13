@@ -16,18 +16,15 @@ package core
 // fail-open contract). Leave false for test/dev configs that intentionally
 // run without circuit artifacts; set true in production so a misconfigured
 // node refuses to boot rather than accept unverified settlements.
-// `DBLogLevel` controls GORM SQL logging: "silent", "error", "warn", "info".
 type OrderBookConfig struct {
-	DBPath             string `toml:"db_path"`
 	SplitVKPath        string `toml:"split_vk_path"`
 	SettleLargerVKPath string `toml:"settle_larger_vk_path"`
 	SettleCoZkVKPath   string `toml:"settle_cozk_vk_path"`
 	SettleCoZk2pVKPath string `toml:"settle_cozk2p_vk_path"`
 	RequireProofs      bool   `toml:"require_proofs"`
-	DBLogLevel         string `toml:"db_log_level"`
 }
 
 // DefaultOrderBookConfig returns an orderbook Config with sensible defaults.
 func DefaultOrderBookConfig() OrderBookConfig {
-	return OrderBookConfig{DBPath: "orders.db", DBLogLevel: "warn"}
+	return OrderBookConfig{}
 }

@@ -6,13 +6,7 @@ import (
 	"github.com/invisibook-lab/invisibook/account"
 	"math/big"
 
-	"log"
-	"os"
-	"time"
-
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
 // ────────────────────── SQL Model ──────────────────────
@@ -91,24 +85,14 @@ func (SettleAddrScheme) TableName() string {
 
 // ────────────────────── DB Initialization ──────────────────────
 
-// InitOrderDB opens a SQLite database and auto-migrates the orders and
-// settle_submissions tables. `logLevel` controls GORM SQL logging verbosity.
-func InitOrderDB(dsn string, logLevel logger.LogLevel) *gorm.DB {
-	gormLogger := logger.New(
-		log.New(os.Stdout, "\n", log.LstdFlags),
-		logger.Config{
-			SlowThreshold: 200 * time.Millisecond,
-			LogLevel:      logLevel,
-		},
-	)
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: gormLogger})
+// MigrateOrderTables creates the orderbook's tables on the shared chain
+// database.
+func MigrateOrderTables(db *gorm.DB) error {
+	err := db.AutoMigrate(&OrderScheme{}, &CompareSubmissionScheme{}, &SettleSubmissionScheme{}, &SettleAddrScheme{})
 	if err != nil {
-		panic(fmt.Sprintf("failed to open orders database: %v", err))
+		return fmt.Errorf("migrating orderbook tables: %w", err)
 	}
-	if err := db.AutoMigrate(&OrderScheme{}, &CompareSubmissionScheme{}, &SettleSubmissionScheme{}, &SettleAddrScheme{}); err != nil {
-		panic(fmt.Sprintf("failed to migrate orders table: %v", err))
-	}
-	return db
+	return nil
 }
 
 // ────────────────────── CRUD Operations ──────────────────────

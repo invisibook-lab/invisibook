@@ -12,6 +12,7 @@ import (
 	"github.com/invisibook-lab/invisibook/config"
 	"github.com/invisibook-lab/invisibook/consensus"
 	"github.com/invisibook-lab/invisibook/core"
+	"github.com/invisibook-lab/invisibook/store"
 )
 
 // main boots the Invisibook chain node: it loads kernel and core configs,
@@ -58,8 +59,20 @@ func main() {
 	// and the consensus loop takes them out at the matching height.
 	paymentBook := consensus.NewPaymentBook()
 
-	accountTri := account.NewAccount(&coreCfg.Account)
-	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook)
+	// One database, one handle: orders and cash are the same block's state.
+	db, err := store.Open(coreCfg.DBPath, store.ParseGormLogLevel(coreCfg.DBLogLevel))
+	if err != nil {
+		logrus.Fatal("opening chain database: ", err)
+	}
+	if err := account.MigrateCashTable(db); err != nil {
+		logrus.Fatal("migrating account tables: ", err)
+	}
+	if err := core.MigrateOrderTables(db); err != nil {
+		logrus.Fatal("migrating orderbook tables: ", err)
+	}
+
+	accountTri := account.NewAccount(&coreCfg.Account, db)
+	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook, db)
 	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, vrfPrivKey, l1Submitter, l1Verdict, paymentBook)
 
 	// The payment endpoint confirms each declaration against L1 before it

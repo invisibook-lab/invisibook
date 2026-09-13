@@ -1,5 +1,10 @@
 # Core Tripod Configuration
 
+# One SQLite database for all tripods: orders and cash are the same
+# block's state, so they share a file and a transaction.
+db_path      = "data/chain.db"
+db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
+
 [consensus]
 min_payment     = "100"
 # Protocol behaviour is to sit out any height with no L1-confirmed declaration.
@@ -19,8 +24,6 @@ l1_poll_interval      = 1000   # ms, finality worker polls L1 confirmation
 mock_l1_confirm_delay = 2000   # ms, mock L1 confirmation delay
 
 [orderbook]
-db_path      = "data/orders.db"
-db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
 # Verification keys for the OrderBook tripod's circuits. Split is for
 # SendOrder's split branch; settle_larger is the settle circuit for the
 # larger side (change + cross-leg ratio check). The smaller party confirms
@@ -35,8 +38,6 @@ settle_cozk_vk_path   = "vk/settle_cozk_vk.json"
 settle_cozk2p_vk_path = "vk/settle_cozk2p_vk.bin"
 
 [account]
-db_path      = "data/accounts.db"
-db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
 # Deposit / Withdraw verification keys — produced by `snarkjs zkey export verificationkey`
 # (or by re-running the corresponding `dev_setup_snarkjs` test). Paths are
 # relative to wherever you launch the chain from.

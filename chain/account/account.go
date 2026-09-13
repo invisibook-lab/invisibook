@@ -28,7 +28,7 @@ type Account struct {
 // `cfg` must carry a valid SQLite DSN and readable `DepositVKPath` /
 // `WithdrawVKPath`. DB init and VK loading panic on failure — the chain will
 // not start without all wallet circuits' verifying keys in memory.
-func NewAccount(cfg *Config) *Account {
+func NewAccount(cfg *Config, db *gorm.DB) *Account {
 	tri := tripod.NewTripodWithName("account")
 	depositVK, err := LoadVK("deposit", cfg.DepositVKPath)
 	if err != nil {
@@ -40,7 +40,7 @@ func NewAccount(cfg *Config) *Account {
 	}
 	a := &Account{
 		Tripod:     tri,
-		db:         InitAccountDB(cfg.DBPath, ParseGormLogLevel(cfg.DBLogLevel)),
+		db:         db,
 		cfg:        cfg,
 		depositVK:  depositVK,
 		withdrawVK: withdrawVK,

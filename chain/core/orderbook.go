@@ -55,7 +55,7 @@ type OrderBook struct {
 // and `SettleLargerVKPath`. DB init and VK loading panic on failure.
 // Only the larger party submits a ZK proof; the smaller party confirms
 // settlement without proof, so no settle_smaller VK is needed.
-func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
+func NewOrderBook(cfg *OrderBookConfig, db *gorm.DB) *OrderBook {
 	tri := tripod.NewTripodWithName(OrderBookTripodName)
 	splitVK, err := account.LoadVK("split", cfg.SplitVKPath)
 	if err != nil {
@@ -90,7 +90,7 @@ func NewOrderBook(cfg *OrderBookConfig) *OrderBook {
 	}
 	ot := &OrderBook{
 		Tripod:         tri,
-		db:             InitOrderDB(cfg.DBPath, account.ParseGormLogLevel(cfg.DBLogLevel)),
+		db:             db,
 		splitVK:        splitVK,
 		settleLargerVK: settleLargerVK,
 		settleCoZkVK:   settleCoZkVK,
