@@ -51,9 +51,9 @@ func main() {
 
 	l1Verifier := &consensus.MockL1PaymentVerifier{}
 	l1Submitter := consensus.NewMockL1HeaderSubmitter(coreCfg.Consensus.MockL1ConfirmDelay)
-	// Sole miner in mock mode: every submission is taken to have won its
-	// height, so the follower agrees with the local chain.
-	l1Verdict := consensus.NewMockL1Verdict(true)
+	// The mock submitter doubles as the verdict source: with no rivals, every
+	// submission stands as the ruling for its height.
+	l1Verdict := l1Submitter
 
 	// The payment book is shared: the HTTP endpoint writes declarations into it
 	// and the consensus loop takes them out at the matching height.
@@ -71,9 +71,18 @@ func main() {
 		logrus.Fatal("migrating orderbook tables: ", err)
 	}
 
-	accountTri := account.NewAccount(&coreCfg.Account, db)
-	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook, db)
-	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, vrfPrivKey, l1Submitter, l1Verdict, paymentBook)
+	// Writes are staged per block and only promoted once L1 settles the height,
+	// so a block L1 rules against can be undone by dropping its staged rows.
+	if err := store.MigrateStagedTable(db); err != nil {
+		logrus.Fatal("migrating staging table: ", err)
+	}
+	pending := store.NewPending(db)
+	pending.Register(account.CashApplier{})
+	pending.Register(core.Appliers()...)
+
+	accountTri := account.NewAccount(&coreCfg.Account, db, pending)
+	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook, db, pending)
+	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, vrfPrivKey, l1Submitter, l1Verdict, paymentBook, pending)
 
 	// The payment endpoint confirms each declaration against L1 before it
 	// reaches the book, so it needs the same verifier and miner identity the

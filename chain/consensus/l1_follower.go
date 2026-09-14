@@ -201,6 +201,14 @@ func (p *ProofOfBuy) dropOrphanedBlocks(height common.BlockNum, canonical common
 		return
 	}
 
+	// Their writes go with them. Nothing in the main tables came from an
+	// unsettled block, so only the staging layer has anything to undo.
+	if err := p.pending.DropFrom(height); err != nil {
+		logrus.Errorf("PoB: dropping staged writes from height=%d: %v — halting production", height, err)
+		p.halt()
+		return
+	}
+
 	logrus.Warnf("PoB: dropped local blocks from height=%d, rebuilding on L1's block %s",
 		height, canonical.String())
 }

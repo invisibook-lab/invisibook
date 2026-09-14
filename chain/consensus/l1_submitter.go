@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"sync"
 	"time"
 
@@ -51,7 +52,8 @@ type MockL1HeaderSubmitter struct {
 	confirmDelay time.Duration
 
 	mu          sync.Mutex
-	submissions map[string]time.Time // l1TxHash → submission time
+	submissions map[string]time.Time              // l1TxHash → submission time
+	headers     map[string]*BlockHeaderSubmission // l1TxHash → what was submitted
 }
 
 // NewMockL1HeaderSubmitter creates a MockL1HeaderSubmitter with the given confirm delay.
@@ -60,20 +62,41 @@ func NewMockL1HeaderSubmitter(confirmDelayMs int) *MockL1HeaderSubmitter {
 	return &MockL1HeaderSubmitter{
 		confirmDelay: time.Duration(confirmDelayMs) * time.Millisecond,
 		submissions:  make(map[string]time.Time),
+		headers:      make(map[string]*BlockHeaderSubmission),
 	}
 }
 
 // SubmitBlockHeader returns a random hex hash and records the submission time.
-func (m *MockL1HeaderSubmitter) SubmitBlockHeader(_ context.Context, _ *BlockHeaderSubmission) (string, error) {
+func (m *MockL1HeaderSubmitter) SubmitBlockHeader(_ context.Context, header *BlockHeaderSubmission) (string, error) {
 	hashBytes := make([]byte, 32)
 	_, _ = rand.Read(hashBytes)
 	txHash := hex.EncodeToString(hashBytes)
 
 	m.mu.Lock()
 	m.submissions[txHash] = time.Now()
+	m.headers[txHash] = header
 	m.mu.Unlock()
 
 	return txHash, nil
+}
+
+// FetchVerdict rules for whatever was submitted, which is what a sole miner
+// would see on a real L1: no rival bid against it, so its own block stands.
+// A node with rivals needs a real L1 client, or MockL1Verdict to dictate the
+// ruling.
+func (m *MockL1HeaderSubmitter) FetchVerdict(_ context.Context, l1TxHash string) ([]CanonicalL2Block, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	header, ok := m.headers[l1TxHash]
+	if !ok {
+		return nil, fmt.Errorf("no submission recorded for l1_tx=%s", l1TxHash)
+	}
+	return []CanonicalL2Block{{
+		Height: header.L2BlockHeight,
+		Hash:   header.L2BlockHash,
+		Goal:   header.Goal,
+	}}, nil
 }
 
 // IsConfirmed returns true if confirmDelay has elapsed since the submission.

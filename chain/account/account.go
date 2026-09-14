@@ -6,6 +6,8 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/invisibook-lab/invisibook/store"
+
 	"github.com/yu-org/yu/core/context"
 	"github.com/yu-org/yu/core/tripod"
 	"github.com/yu-org/yu/core/types"
@@ -18,7 +20,9 @@ import (
 // amounts are encrypted ciphertext and cannot be summed on-chain.
 type Account struct {
 	*tripod.Tripod
-	db         *gorm.DB
+	db *gorm.DB
+	// pending stages this block's writes until L1 settles the height.
+	pending    *store.Pending
 	cfg        *Config
 	depositVK  *CircuitVK
 	withdrawVK *CircuitVK
@@ -28,7 +32,7 @@ type Account struct {
 // `cfg` must carry a valid SQLite DSN and readable `DepositVKPath` /
 // `WithdrawVKPath`. DB init and VK loading panic on failure — the chain will
 // not start without all wallet circuits' verifying keys in memory.
-func NewAccount(cfg *Config, db *gorm.DB) *Account {
+func NewAccount(cfg *Config, db *gorm.DB, pending *store.Pending) *Account {
 	tri := tripod.NewTripodWithName("account")
 	depositVK, err := LoadVK("deposit", cfg.DepositVKPath)
 	if err != nil {
@@ -41,6 +45,7 @@ func NewAccount(cfg *Config, db *gorm.DB) *Account {
 	a := &Account{
 		Tripod:     tri,
 		db:         db,
+		pending:    pending,
 		cfg:        cfg,
 		depositVK:  depositVK,
 		withdrawVK: withdrawVK,
@@ -66,7 +71,7 @@ func (a *Account) InitChain(block *types.Block) {
 			ZkProof: "genesis",
 			Status:  Active,
 		}
-		if err := a.CreateCash(cash); err != nil {
+		if err := a.createCashDirect(cash); err != nil {
 			panic(fmt.Sprintf("failed to seed genesis cash %s: %v", gc.ID, err))
 		}
 		fmt.Printf("genesis: id=%s pubkey=%s token=%s\n", gc.ID, gc.Pubkey, gc.Token)
@@ -167,7 +172,7 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 		ZkProof: req.ZkProof,
 		Status:  Active,
 	}
-	if err := a.CreateCash(cash); err != nil {
+	if err := a.createCashDirect(cash); err != nil {
 		return fmt.Errorf("failed to create cash: %w", err)
 	}
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/invisibook-lab/invisibook/account"
+	"github.com/invisibook-lab/invisibook/store"
 	"math/big"
 	"net/http"
 
@@ -42,8 +43,10 @@ type OrderEvent struct {
 // account.Account tripod (injected via the `tripod` struct tag) for account.Cash state changes.
 type OrderBook struct {
 	*tripod.Tripod
-	Account        *account.Account `tripod:"account"`
-	db             *gorm.DB
+	Account *account.Account `tripod:"account"`
+	db      *gorm.DB
+	// pending stages this block's writes until L1 settles the height.
+	pending        *store.Pending
 	splitVK        *account.CircuitVK
 	settleLargerVK *account.CircuitVK
 	settleCoZkVK   *account.CircuitVK
@@ -55,7 +58,7 @@ type OrderBook struct {
 // and `SettleLargerVKPath`. DB init and VK loading panic on failure.
 // Only the larger party submits a ZK proof; the smaller party confirms
 // settlement without proof, so no settle_smaller VK is needed.
-func NewOrderBook(cfg *OrderBookConfig, db *gorm.DB) *OrderBook {
+func NewOrderBook(cfg *OrderBookConfig, db *gorm.DB, pending *store.Pending) *OrderBook {
 	tri := tripod.NewTripodWithName(OrderBookTripodName)
 	splitVK, err := account.LoadVK("split", cfg.SplitVKPath)
 	if err != nil {
@@ -91,6 +94,7 @@ func NewOrderBook(cfg *OrderBookConfig, db *gorm.DB) *OrderBook {
 	ot := &OrderBook{
 		Tripod:         tri,
 		db:             db,
+		pending:        pending,
 		splitVK:        splitVK,
 		settleLargerVK: settleLargerVK,
 		settleCoZkVK:   settleCoZkVK,

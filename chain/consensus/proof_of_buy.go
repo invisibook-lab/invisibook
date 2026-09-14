@@ -18,6 +18,7 @@ import (
 	"github.com/yu-org/yu/core/types"
 
 	"github.com/invisibook-lab/invisibook/account"
+	"github.com/invisibook-lab/invisibook/store"
 )
 
 // ProofOfBuy implements the Proof-of-Buy consensus as a yu tripod.
@@ -48,6 +49,8 @@ type ProofOfBuy struct {
 	l1Submitter L1HeaderSubmitter
 	// l1Verdict reads back which blocks L1 settled on; nil disables following.
 	l1Verdict L1Verdict
+	// pending stages each block's writes until L1 settles that height.
+	pending *store.Pending
 
 	// canonicalAt records, per height, the block L1 settled on after this node
 	// was overruled there — the only block it will accept when it rebuilds
@@ -67,7 +70,7 @@ type ProofOfBuy struct {
 // `vrfPrivKey` must be the same key in ecdsa form (see SecpPrivKeyToECDSA);
 // `paymentBook` must be the same instance the HTTP endpoint writes into;
 // `l1Verdict` reads back L1's fork ruling and may be nil to run without it.
-func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1HeaderSubmitter, l1Verdict L1Verdict, paymentBook *PaymentBook) *ProofOfBuy {
+func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1HeaderSubmitter, l1Verdict L1Verdict, paymentBook *PaymentBook, pending *store.Pending) *ProofOfBuy {
 	tri := tripod.NewTripod()
 	p := &ProofOfBuy{
 		Tripod:               tri,
@@ -81,15 +84,86 @@ func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, 
 		blockCh:              make(chan *types.Block, 16),
 		l1Submitter:          l1Submitter,
 		l1Verdict:            l1Verdict,
+		pending:              pending,
 		pendingFinalizations: make(chan *pendingFinalization, 100),
 	}
 	return p
 }
 
-// InitChain starts the block listener and finality worker goroutines.
+// InitChain reconciles the stores after a restart, then starts the block
+// listener and finality worker goroutines.
 func (p *ProofOfBuy) InitChain(_ *types.Block) {
+	p.reconcile()
 	go p.blockListener()
 	go p.finalityWorker()
+}
+
+// reconcile brings the chain and the staged writes back into agreement after a
+// restart, which is the only time they can disagree.
+//
+// The promoted height is the boundary, not yu's finalized marker: it is
+// written with the state it describes, so it is exactly how far the tables
+// got. Everything at or below it was settled by L1 and is already in the
+// tables; everything above it was never promised to anyone and goes.
+//
+// Three things can be out of place, and all three are idempotent to fix:
+//
+//   - A block whose state was promoted but whose finalized marker was not
+//     written — the crash window between the two. Marking it finalized costs
+//     nothing: L1 had already ruled for it before the promotion ran.
+//   - Staged rows of blocks above the boundary. The finality worker's queue
+//     lives in memory, so after a restart nothing would ever rule on them; left
+//     alone they would overlay every read forever.
+//   - The blocks themselves, above the boundary, still on the chain.
+func (p *ProofOfBuy) reconcile() {
+	applied, err := p.pending.AppliedHeight()
+	if err != nil {
+		logrus.Errorf("PoB: reading the promoted height: %v — skipping reconciliation", err)
+		return
+	}
+
+	p.finalizeThrough(applied)
+
+	if err := p.pending.DropFrom(applied + 1); err != nil {
+		logrus.Errorf("PoB: dropping staged writes above height=%d: %v", applied, err)
+		return
+	}
+	// Pruning by the promoted height rather than by Prune()'s own boundary:
+	// yu's marker may still lag it, and pruning to a lagging boundary would
+	// delete blocks whose state is already in the tables.
+	if err := p.Chain.PruneAfter(applied + 1); err != nil {
+		logrus.Errorf("PoB: pruning blocks above height=%d: %v", applied, err)
+		return
+	}
+
+	logrus.Infof("PoB: reconciled to height=%d", applied)
+}
+
+// finalizeThrough marks every block up to `height` finalized, catching up the
+// chain when a crash landed between promoting a block's state and recording
+// that it was final.
+func (p *ProofOfBuy) finalizeThrough(height common.BlockNum) {
+	for h := common.BlockNum(1); h <= height; h++ {
+		// Asked per height rather than from LastFinalized: that reads an
+		// in-memory pointer the kernel has not populated this early, so on a
+		// fresh process it reports nothing finalized and every height would be
+		// marked again.
+		if done, err := p.Chain.GetFinalizedCompactBlockByHeight(h); err == nil && done != nil {
+			continue
+		}
+
+		block, err := p.Chain.GetBlockByHeight(h)
+		if err != nil {
+			logrus.Errorf("PoB: reading block %d to finalize it: %v", h, err)
+			return
+		}
+		if err := p.Chain.Finalize(block); err != nil {
+			logrus.Errorf("PoB: finalizing block %d: %v", h, err)
+			return
+		}
+		p.State.FinalizeBlock(block)
+		logrus.Infof("PoB: marked height=%d finalized, its state was already promoted", h)
+	}
 }
 
 // blockListener subscribes to the P2P block topic and forwards
@@ -437,6 +511,10 @@ func (p *ProofOfBuy) EndBlock(block *types.Block) {
 		return
 	}
 
+	// Everything the block writes is staged under its height, so a block L1
+	// later rules against can be undone by dropping that height.
+	p.pending.SetBlock(block.Height, block.Hash.String())
+
 	// Execute all transactions in the block
 	logrus.Infof("PoB: executing block %d", block.Height)
 	if err = p.Execute(block); err != nil {
@@ -569,14 +647,18 @@ func (p *ProofOfBuy) finalityWorker() {
 					break
 				}
 
-				// L1 settled on our block — finalize it, chain and state
-				// together. This is the only place either is finalized.
+				// L1 settled on our block. The state goes in first: it is the
+				// part that matters, it records how far it got, and a block L1
+				// has already ruled for can never be ruled against, so a crash
+				// before the markers below costs nothing that startup cannot
+				// rebuild from that record.
+				if err := p.pending.ApplyThrough(pf.block.Height); err != nil {
+					logrus.Errorf("PoB: promoting staged writes at height=%d: %v", pf.block.Height, err)
+					break
+				}
 				if err := p.Chain.Finalize(pf.block); err != nil {
 					logrus.Errorf("PoB: finalize block failed height=%d: %v", pf.block.Height, err)
 				} else {
-					// State follows the chain: if persisting the finalized
-					// marker failed, the finalized read view must not move
-					// ahead of it.
 					p.State.FinalizeBlock(pf.block)
 					logrus.Infof("PoB: L1-confirmed finalization height=%d, l1_tx=%s", pf.block.Height, pf.l1TxHash)
 				}
