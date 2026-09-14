@@ -1,4 +1,4 @@
-package core
+package account
 
 import "math/big"
 

@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"github.com/invisibook-lab/invisibook/account"
 	"os"
 	"strconv"
 	"testing"
@@ -11,22 +12,22 @@ import (
 // The proof inside was generated COLLABORATIVELY by three in-process REP3
 // nodes, so these tests cover exactly what production settlement submits.
 type cozkFixture struct {
-	Price                    uint64          `json:"price"`
-	AIsSeller                bool            `json:"a_is_seller"`
-	Cmp                      int             `json:"cmp"`
-	OrderACommitmentHex      string          `json:"order_a_commitment_hex"`
-	OrderBCommitmentHex      string          `json:"order_b_commitment_hex"`
-	LockedAHashesHex         []string        `json:"locked_a_hashes_hex"`
-	LockedBHashesHex         []string        `json:"locked_b_hashes_hex"`
-	NewOrderACommitmentHex   string          `json:"new_order_a_commitment_hex"`
-	NewOrderBCommitmentHex   string          `json:"new_order_b_commitment_hex"`
-	NewLockedACommitmentHex  string          `json:"new_locked_a_commitment_hex"`
-	NewLockedBCommitmentHex  string          `json:"new_locked_b_commitment_hex"`
-	RecvACommitmentHex       string          `json:"recv_a_commitment_hex"`
-	RecvBCommitmentHex       string          `json:"recv_b_commitment_hex"`
-	ProofJSON                json.RawMessage `json:"proof_json"`
-	PublicJSON               []string        `json:"public_json"`
-	VKPath                   string          `json:"vk_path"`
+	Price                   uint64          `json:"price"`
+	AIsSeller               bool            `json:"a_is_seller"`
+	Cmp                     int             `json:"cmp"`
+	OrderACommitmentHex     string          `json:"order_a_commitment_hex"`
+	OrderBCommitmentHex     string          `json:"order_b_commitment_hex"`
+	LockedAHashesHex        []string        `json:"locked_a_hashes_hex"`
+	LockedBHashesHex        []string        `json:"locked_b_hashes_hex"`
+	NewOrderACommitmentHex  string          `json:"new_order_a_commitment_hex"`
+	NewOrderBCommitmentHex  string          `json:"new_order_b_commitment_hex"`
+	NewLockedACommitmentHex string          `json:"new_locked_a_commitment_hex"`
+	NewLockedBCommitmentHex string          `json:"new_locked_b_commitment_hex"`
+	RecvACommitmentHex      string          `json:"recv_a_commitment_hex"`
+	RecvBCommitmentHex      string          `json:"recv_b_commitment_hex"`
+	ProofJSON               json.RawMessage `json:"proof_json"`
+	PublicJSON              []string        `json:"public_json"`
+	VKPath                  string          `json:"vk_path"`
 }
 
 func loadCoZkFixture(t *testing.T) cozkFixture {
@@ -52,9 +53,9 @@ func rebuildCoZkSignals(t *testing.T, fx cozkFixture) []string {
 		t.Fatalf("cmpToFrDecimal: %v", err)
 	}
 	toDec := func(hex string) string {
-		dec, err := HexToDecimal(hex)
+		dec, err := account.HexToDecimal(hex)
 		if err != nil {
-			t.Fatalf("HexToDecimal(%s): %v", hex, err)
+			t.Fatalf("account.HexToDecimal(%s): %v", hex, err)
 		}
 		return dec
 	}
@@ -101,18 +102,18 @@ func TestSettleCoZkPublicSignalLayoutMatchesCircuit(t *testing.T) {
 
 func TestVerifyGroth16AcceptsCollaborativeSettleCoZkProof(t *testing.T) {
 	fx := loadCoZkFixture(t)
-	vk, err := LoadVK("settle_cozk", fx.VKPath)
+	vk, err := account.LoadVK("settle_cozk", fx.VKPath)
 	if err != nil {
 		t.Fatalf("loading VK: %v", err)
 	}
-	if err := VerifyGroth16(vk, string(fx.ProofJSON), rebuildCoZkSignals(t, fx)); err != nil {
+	if err := account.VerifyGroth16(vk, string(fx.ProofJSON), rebuildCoZkSignals(t, fx)); err != nil {
 		t.Fatalf("verify on a valid collaborative settle_cozk proof must succeed, got: %v", err)
 	}
 }
 
 func TestVerifyGroth16RejectsTamperedSettleCoZkCmp(t *testing.T) {
 	fx := loadCoZkFixture(t)
-	vk, err := LoadVK("settle_cozk", fx.VKPath)
+	vk, err := account.LoadVK("settle_cozk", fx.VKPath)
 	if err != nil {
 		t.Fatalf("loading VK: %v", err)
 	}
@@ -124,21 +125,21 @@ func TestVerifyGroth16RejectsTamperedSettleCoZkCmp(t *testing.T) {
 		t.Fatalf("cmpToFrDecimal: %v", err)
 	}
 	tampered[0] = flipped
-	if err := VerifyGroth16(vk, string(fx.ProofJSON), tampered); err == nil {
+	if err := account.VerifyGroth16(vk, string(fx.ProofJSON), tampered); err == nil {
 		t.Fatalf("verify must reject when the cmp public signal is altered")
 	}
 }
 
 func TestVerifyGroth16RejectsTamperedSettleCoZkRemainder(t *testing.T) {
 	fx := loadCoZkFixture(t)
-	vk, err := LoadVK("settle_cozk", fx.VKPath)
+	vk, err := account.LoadVK("settle_cozk", fx.VKPath)
 	if err != nil {
 		t.Fatalf("loading VK: %v", err)
 	}
 	tampered := rebuildCoZkSignals(t, fx)
 	// public[1] is new_order_a_commitment — the surviving order's remainder.
 	tampered[1] = bumpLastDigit(tampered[1])
-	if err := VerifyGroth16(vk, string(fx.ProofJSON), tampered); err == nil {
+	if err := account.VerifyGroth16(vk, string(fx.ProofJSON), tampered); err == nil {
 		t.Fatalf("verify must reject when the remainder commitment is altered")
 	}
 }

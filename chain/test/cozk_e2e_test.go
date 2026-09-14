@@ -1,7 +1,6 @@
 package test
 
 import (
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -93,7 +92,7 @@ func runCoZkSettleLifecycle(
 		"price":          3500,
 		"amount":         hexCommit(0xAA),
 		"pubkey":         alicePubkey,
-		"signature":      signOrderID(alicePriv, string(sellOrderID)),
+		"signature":      signOrderID(t, alicePriv, string(sellOrderID)),
 		"input_cash_ids": []string{aliceETHCashID},
 		"handling_fee":   []string{"0"},
 	}); err != nil {
@@ -109,7 +108,7 @@ func runCoZkSettleLifecycle(
 		"price":          3500,
 		"amount":         hexCommit(0xBB),
 		"pubkey":         bobPubkey,
-		"signature":      signOrderID(bobPriv, string(buyOrderID)),
+		"signature":      signOrderID(t, bobPriv, string(buyOrderID)),
 		"input_cash_ids": []string{bobUSDTCashID},
 		"handling_fee":   []string{"0"},
 	}); err != nil {
@@ -140,12 +139,12 @@ func runCoZkSettleLifecycle(
 		ZkProof:              "test-proof-skip",
 	}
 	msg := signMsg(req)
-	req.SigA = hex.EncodeToString(ed25519.Sign(alicePriv, msg))
-	req.SigB = hex.EncodeToString(ed25519.Sign(bobPriv, msg))
+	req.SigA = signBytes(t, alicePriv, msg)
+	req.SigB = signBytes(t, bobPriv, msg)
 
 	// --- Negative case: a tampered signature must not change any state ---
 	badReq := *req
-	badReq.SigB = hex.EncodeToString(ed25519.Sign(alicePriv, msg)) // signed by the wrong key
+	badReq.SigB = signBytes(t, alicePriv, msg) // signed by the wrong key
 	if err := wrCall("orderbook", writing, &badReq); err != nil {
 		t.Fatalf("submitting bad-signature settle failed at HTTP level: %v", err)
 	}
@@ -159,8 +158,8 @@ func runCoZkSettleLifecycle(
 	// other ---
 	crossReq := *req
 	wrongMsg := crossMsg(req)
-	crossReq.SigA = hex.EncodeToString(ed25519.Sign(alicePriv, wrongMsg))
-	crossReq.SigB = hex.EncodeToString(ed25519.Sign(bobPriv, wrongMsg))
+	crossReq.SigA = signBytes(t, alicePriv, wrongMsg)
+	crossReq.SigB = signBytes(t, bobPriv, wrongMsg)
 	if err := wrCall("orderbook", writing, &crossReq); err != nil {
 		t.Fatalf("submitting cross-domain settle failed at HTTP level: %v", err)
 	}

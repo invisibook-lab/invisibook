@@ -67,7 +67,7 @@ impl fmt::Display for TradePair {
 
 #[derive(Debug, Clone)]
 pub struct CashOutput {
-    pub pubkey: String, // recipient's ed25519 pubkey (64-char hex)
+    pub pubkey: String, // recipient's compressed secp256k1 pubkey (66-char hex)
     pub token: TokenID,
     pub amount: CipherText,
 }
@@ -82,7 +82,7 @@ pub const CASH_SPENT: u8 = 2;
 #[derive(Debug, Clone)]
 pub struct CashItem {
     pub id: String,
-    pub pubkey: String, // owner's raw ed25519 pubkey (64-char hex)
+    pub pubkey: String, // owner's compressed secp256k1 pubkey (66-char hex)
     pub token: TokenID,
     pub amount: CipherText,
     pub zk_proof: String,
@@ -92,14 +92,14 @@ pub struct CashItem {
 
 #[derive(Debug, Clone)]
 pub struct AccountRecord {
-    pub pubkey: String, // owner's raw ed25519 pubkey (64-char hex)
+    pub pubkey: String, // owner's compressed secp256k1 pubkey (66-char hex)
     pub token: TokenID,
     pub cash: Vec<CashItem>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ChangeOutput {
-    pub pubkey: String, // recipient's ed25519 pubkey (64-char hex)
+    pub pubkey: String, // recipient's compressed secp256k1 pubkey (66-char hex)
     pub amount: CipherText,
 }
 
@@ -132,7 +132,7 @@ pub struct Order {
     pub subject: TradePair,
     pub price: Option<u64>,
     pub amount: CipherText,
-    pub pubkey: String, // owner's ed25519 pubkey (64-char hex)
+    pub pubkey: String, // owner's compressed secp256k1 pubkey (66-char hex)
     pub input_cash_ids: Vec<String>,
     pub handling_fee: Vec<String>,
     pub block_height: u32,
