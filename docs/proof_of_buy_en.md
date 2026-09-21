@@ -204,11 +204,15 @@ what selfish mining requires; see 9.3.
 
 ### 8.1 Anchoring and Fork Choice
 
-Every L2 block header and its `goal` go to L1, but **not in the clear — as a
-commitment** `commit(header, goal, random)`. Once the commitment is in an L1 block,
-the submitter broadcasts the opening over the L2 network; full nodes verify that
-`open(header, goal, random)` equals the commitment on chain, and only then does the
-content become public.
+Every L2 block goes to L1, but **not in the clear — as a commitment**
+`SHA256(block_hash || random)`. Once the commitment is in an L1 block, the
+submitter broadcasts the opening over the L2 network; full nodes hash
+`(block_hash, random)` to check it reproduces the commitment on chain, and only
+then does the content become public.
+
+The block hash is all that needs committing to: it already determines the whole
+block — height, `goal`, VRF output, parent link, every transaction — so binding
+any of those in alongside it would commit to the same facts twice.
 
 **Two-phase submission exists to stop L1 miners from censoring L2 blocks.** An L2
 block's commitment has to be packed by an L1 block producer to reach the chain. Were
@@ -245,15 +249,23 @@ Finality comes from depth on L1: the prefix of the canonical chain whose **commi
 are buried N L1 blocks deep** counts as finalized, and any reorg deeper than that is
 refused, however high a cumulative score the challenger claims.
 
+L1 produces blocks more slowly than L2, so one L1 block takes in the
+commitments of whatever L2 blocks were produced in that time. Each is submitted
+on its own and merely happens to land in the same L1 block, which is why they
+also reach the finality depth at the same moment:
+
 ```
-  L1:  |———— block N ————|———— block N+1 ————|———— block N+2 ————|
-                          ▲                    ▲
-                          │                    │
-  L2:  |h |h+1|h+2|h+3|h+4|h+5|h+6|h+7|h+8|h+9|h+10|
-        └─ commitments for these blocks land in N+1 ─┘
-                          │
-                          └─ N+1 buried deep enough → this prefix finalizes
+  L1:  |— B —|— B+1 —|— B+2 —|— B+3 —| ... |— B+24 —|— B+25 —|
+                ▲                              ▲
+                │                              │
+        the L2 blocks produced            B+1 now has 24 L1
+        in this span commit here          blocks stacked on it
+                                               │
+                                               ▼
+                                   they all finalize at once
 ```
+
+(`B` numbers the L1 blocks here; it is not the finality depth N = 24.)
 
 ### 8.2 Division of Labour
 
@@ -400,13 +412,13 @@ submission works against it before it can drop that one selectively. Remove the
 precondition and the attack collapses:
 
 ```
-  Commit    The miner sends commit(header, goal, random) to L1
+  Commit    The miner sends SHA256(block_hash || random) to L1
               │        The L1 producer sees a structureless hash, nothing more
               ▼
   Include   The L1 block packs the commitments it received
               │
               ▼
-  Reveal    The miner broadcasts (header, goal, random) on the L2 network
+  Reveal    The miner broadcasts (block_hash, random) on the L2 network
               │        Full nodes check open(...) == the on-chain commitment
               ▼
   Choose    Among included and revealed blocks, take the heaviest
@@ -524,7 +536,7 @@ propagation complexity are high. PoB's fork choice is a comparison of numbers.
                    transactions and persist
          │
          ▼
-  [ANCHORED]       The commitment to (header, goal) goes to L1; its content
+  [ANCHORED]       The commitment to the block hash goes to L1; its content
                    is invisible to the L1 producer
          │
          ▼
