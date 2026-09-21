@@ -541,8 +541,7 @@ func (p *ProofOfBuy) FinalizeBlock(block *types.Block) {
 //
 // Finality in PoB comes from fork choice — the heaviest continuous fork by
 // cumulative goal — with L1 holding a tamper-proof record of when each
-// commitment appeared, which is what exposes a fork bought after the fact. No
-// depth threshold enters into it.
+// commitment appeared, which is what exposes a fork bought after the fact.
 func (p *ProofOfBuy) finalityWorker() {
 	pollInterval := time.Duration(p.cfg.L1PollInterval) * time.Millisecond
 	// pending holds blocks whose commitment has been sent but not yet seen on

@@ -244,10 +244,9 @@ The VRF output inside `goal` is hard to forge, and every block is backed by a re
 payment, which makes `goal` an objectively verifiable number. Anyone can compare scores
 to determine which fork to follow, with no voting and no extra communication rounds.
 
-**That rule is the finality rule; there is no second gate.** No threshold says how
-many blocks deep something has to be before it counts — as in Nakamoto consensus,
-irreversibility grows with the gap in cumulative score: to overturn a chain you have
-to buy the gap back, and the wider it is the less affordable that becomes.
+As in Nakamoto consensus, irreversibility grows with the gap in cumulative score: to
+overturn a chain you have to buy the gap back, and the wider it is the less affordable
+that becomes.
 
 What L1's backup shuts down is the other route. By score alone, a chain that existed
 at the time and a chain bought afterwards look identical; but every block of the

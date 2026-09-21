@@ -39,9 +39,7 @@ type L1CommitmentSubmitter interface {
 	//
 	// A submission that is not on chain never landed, or was taken back by an
 	// L1 reorg; either way it has to be sent again, which is the only decision
-	// this answer drives. How deep it sits once it is there is deliberately
-	// not reported: nothing in PoB turns on a depth threshold — finality comes
-	// from fork choice on L2, not from waiting out L1 blocks.
+	// this answer drives.
 	CommitmentOnChain(ctx context.Context, l1TxHash string) (bool, error)
 }
 
