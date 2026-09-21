@@ -16,12 +16,14 @@ require_declared_payment = false
 # paid to the producer's own miner key. Set to "0" to run without an
 # incentive layer.
 coinbase_reward = "1000"
-finality_period = 10
 block_interval  = 3000   # milliseconds between blocks
 pack_num        = 30000  # max transactions per block
 payment_listen        = ":8081"
-l1_poll_interval      = 1000   # ms, finality worker polls L1 confirmation
-mock_l1_confirm_delay = 2000   # ms, mock L1 confirmation delay
+l1_poll_interval      = 1000   # ms, finality worker polls L1 depth
+# A block is finalized once its commitment is buried this many L1 blocks deep.
+# Promotion cannot be undone, so this is the margin against an L1 reorg.
+l1_finality_depth     = 24
+mock_l1_block_time    = 200    # ms, simulated L1 block interval for the mock
 
 [orderbook]
 # Verification keys for the OrderBook tripod's circuits. Split is for

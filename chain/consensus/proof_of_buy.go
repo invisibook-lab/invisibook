@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -45,32 +44,28 @@ type ProofOfBuy struct {
 	// rewards are minted as cash on it.
 	Account *account.Account `tripod:"account"`
 
-	// l1Submitter submits block headers to L1 and polls for confirmation.
-	l1Submitter L1HeaderSubmitter
-	// l1Verdict reads back which blocks L1 settled on; nil disables following.
-	l1Verdict L1Verdict
-	// pending stages each block's writes until L1 settles that height.
+	// l1Submitter posts block commitments to L1 and reports their depth.
+	l1Submitter L1CommitmentSubmitter
+	// bids holds the opening of every commitment this node posted. L1 carries
+	// only the commitment, so losing an opening forfeits that bid outright.
+	bids *store.Bids
+	// pending stages each block's writes until its commitment is deep enough
+	// on L1 to be treated as irreversible.
 	pending *store.Pending
 
-	// canonicalAt records, per height, the block L1 settled on after this node
-	// was overruled there — the only block it will accept when it rebuilds
-	// that height. `halted` is set when orphans could not be pruned and the
-	// node must stop rather than build on a chain it failed to clean up.
-	// Written by the finality worker, read by block production, hence the mutex.
-	divergedMu  sync.Mutex
-	canonicalAt map[common.BlockNum]common.Hash
-	halted      bool
-	// pendingFinalizations is a buffered channel for blocks awaiting L1 finalization.
+	// pendingFinalizations is a buffered channel for blocks awaiting L1 depth.
 	pendingFinalizations chan *pendingFinalization
 }
 
 // NewProofOfBuy constructs a ProofOfBuy tripod with the given config, keypair,
-// L1 verifier, VRF private key, L1 header submitter, and payment book.
+// L1 verifier, VRF private key, L1 commitment submitter, bid store and payment
+// book.
 // `cfg` must not be nil; `pubkey`/`privkey` must be a secp256k1 keypair and
 // `vrfPrivKey` must be the same key in ecdsa form (see SecpPrivKeyToECDSA);
 // `paymentBook` must be the same instance the HTTP endpoint writes into;
-// `l1Verdict` reads back L1's fork ruling and may be nil to run without it.
-func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1HeaderSubmitter, l1Verdict L1Verdict, paymentBook *PaymentBook, pending *store.Pending) *ProofOfBuy {
+// `bids` must be backed by the chain database, since an opening that is lost
+// cannot be reconstructed.
+func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1CommitmentSubmitter, bids *store.Bids, paymentBook *PaymentBook, pending *store.Pending) *ProofOfBuy {
 	tri := tripod.NewTripod()
 	p := &ProofOfBuy{
 		Tripod:               tri,
@@ -80,10 +75,9 @@ func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, 
 		l1Verifier:           l1Verifier,
 		vrfPrivKey:           vrfPrivKey,
 		paymentBook:          paymentBook,
-		canonicalAt:          make(map[common.BlockNum]common.Hash),
 		blockCh:              make(chan *types.Block, 16),
 		l1Submitter:          l1Submitter,
-		l1Verdict:            l1Verdict,
+		bids:                 bids,
 		pending:              pending,
 		pendingFinalizations: make(chan *pendingFinalization, 100),
 	}
@@ -216,24 +210,6 @@ func (p *ProofOfBuy) myPubkeyHex() string {
 func (p *ProofOfBuy) StartBlock(block *types.Block) {
 	deadline := time.Now().Add(time.Duration(p.cfg.BlockInterval) * time.Millisecond)
 
-	if p.halting() {
-		// Orphaned blocks could not be pruned, so the local chain is known bad
-		// and cannot be repaired here. Take nothing from any peer either.
-		logrus.Errorf("PoB: halted after a failed prune, not producing height=%d", block.Height)
-		select {}
-	}
-
-	if canonical, ruled := p.expectedBlock(block.Height); ruled {
-		// L1 has already settled this height. Competing for it again would
-		// only produce a second orphan, so wait for the block L1 named.
-		logrus.Infof("PoB: height=%d was settled by L1 on %s, waiting for that block",
-			block.Height, canonical.String())
-		p.awaitRivalBlock(block, block.PrevHash.Bytes())
-		p.forgetExpectedBlock(block.Height)
-		p.paymentBook.Settle(block.Height)
-		return
-	}
-
 	logrus.Infof("PoB: start block height=%d", block.Height)
 
 	vrfInput := block.PrevHash.Bytes()
@@ -327,13 +303,6 @@ func (p *ProofOfBuy) awaitRivalBlock(block *types.Block, vrfInput []byte) {
 // applied to its own. `vrfInput` must be the VRF input for the candidate's
 // height. Returns false when the candidate must be discarded.
 func (p *ProofOfBuy) verifyCandidate(candidate *types.Block, vrfInput []byte) (*big.Int, bool) {
-	// A height L1 has already ruled on accepts exactly one block.
-	if canonical, ruled := p.expectedBlock(candidate.Height); ruled && candidate.Hash != canonical {
-		logrus.Warnf("PoB: candidate %s is not the block L1 settled height=%d on, skipping",
-			candidate.Hash.String(), candidate.Height)
-		return nil, false
-	}
-
 	cdata, err := DecodeConsensusData(candidate.Extra)
 	if err != nil {
 		logrus.Warnf("PoB: decode candidate consensus data failed: %v", err)
@@ -545,10 +514,10 @@ func (p *ProofOfBuy) EndBlock(block *types.Block) {
 }
 
 // FinalizeBlock enqueues the block for asynchronous L1-driven finalization.
-// The actual finalization happens in the finalityWorker goroutine after
-// the block header is submitted to and confirmed on L1.
+// The actual finalization happens in the finalityWorker goroutine, once the
+// block's commitment has been buried deep enough on L1.
 //
-// A block EndBlock failed to append must not be submitted to L1, so the chain
+// A block EndBlock failed to append must not be committed to L1, so the chain
 // tip is consulted rather than assumed.
 func (p *ProofOfBuy) FinalizeBlock(block *types.Block) {
 	tip, err := p.Chain.GetEndCompactBlock()
@@ -566,18 +535,18 @@ func (p *ProofOfBuy) FinalizeBlock(block *types.Block) {
 }
 
 // finalityWorker runs as a background goroutine. It receives blocks from
-// pendingFinalizations, submits their headers to L1, polls for confirmation,
-// and then asks L1 which block it actually settled on. Blocks are finalized
-// strictly in height order.
+// pendingFinalizations, posts each block's commitment to L1, and finalizes the
+// block once that commitment is buried L1FinalityDepth blocks deep. Blocks are
+// finalized strictly in height order.
 //
 // It owns finality outright: nothing else in this tripod calls Chain.Finalize
 // or State.FinalizeBlock. A locally produced block is executed and appended
-// immediately, but stays unfinalized until L1 has ruled for it — until then
-// the node cannot know whether a rival outbid it, and finalizing early would
-// mean finalizing a block that has to be discarded.
+// immediately, but stays unfinalized until its commitment has the depth behind
+// it — promotion cannot be undone, and an L1 reorg that took the commitment
+// back off chain after promotion would leave state nothing on L1 stands behind.
 func (p *ProofOfBuy) finalityWorker() {
 	pollInterval := time.Duration(p.cfg.L1PollInterval) * time.Millisecond
-	// pending holds blocks that have been submitted to L1 but not yet confirmed.
+	// pending holds blocks whose commitment is on L1 but not yet deep enough.
 	var pending []*pendingFinalization
 
 	ticker := time.NewTicker(pollInterval)
@@ -586,32 +555,12 @@ func (p *ProofOfBuy) finalityWorker() {
 	for {
 		select {
 		case pf := <-p.pendingFinalizations:
-			// L1 picks the winning fork by max(goal), so the score travels
-			// with the header.
-			cdata, err := DecodeConsensusData(pf.block.Extra)
-			if err != nil {
-				logrus.Errorf("PoB: decoding consensus data before L1 submission at height=%d: %v",
-					pf.block.Height, err)
+			if err := p.submitCommitment(pf); err != nil {
+				logrus.Errorf("PoB: committing block height=%d to L1: %v", pf.block.Height, err)
 				continue
 			}
-
-			// Submit block header to L1.
-			header := &BlockHeaderSubmission{
-				L2BlockHeight: pf.block.Height,
-				L2BlockHash:   pf.block.Hash,
-				TxnRoot:       pf.block.TxnRoot,
-				MinerPubkey:   hex.EncodeToString(pf.block.MinerPubkey),
-				Goal:          cdata.BlockScore,
-			}
-			l1TxHash, err := p.l1Submitter.SubmitBlockHeader(context.Background(), header)
-			if err != nil {
-				logrus.Errorf("PoB: failed to submit block header to L1 height=%d: %v", pf.block.Height, err)
-				continue
-			}
-			pf.l1TxHash = l1TxHash
-			pf.submittedAt = time.Now()
 			pending = append(pending, pf)
-			logrus.Infof("PoB: submitted block header to L1 height=%d, l1_tx=%s", pf.block.Height, l1TxHash)
+			logrus.Infof("PoB: committed block to L1 height=%d, l1_tx=%s", pf.block.Height, pf.l1TxHash)
 
 		case <-ticker.C:
 			if len(pending) == 0 {
@@ -621,37 +570,35 @@ func (p *ProofOfBuy) finalityWorker() {
 			sort.Slice(pending, func(i, j int) bool {
 				return pending[i].block.Height < pending[j].block.Height
 			})
-			// Finalize confirmed blocks in height order. Stop at the first
-			// unconfirmed block to preserve strict ordering.
+			// Finalize deep-enough blocks in height order. Stop at the first
+			// one that is not ready to preserve strict ordering.
 			confirmed := 0
 			for _, pf := range pending {
-				ok, err := p.l1Submitter.IsConfirmed(context.Background(), pf.l1TxHash)
+				depth, found, err := p.l1Submitter.ConfirmedDepth(context.Background(), pf.l1TxHash)
 				if err != nil {
-					logrus.Errorf("PoB: L1 confirmation check failed height=%d: %v", pf.block.Height, err)
+					logrus.Errorf("PoB: reading L1 depth for height=%d: %v", pf.block.Height, err)
 					break
 				}
-				if !ok {
+				if !found {
+					// The submission is not on chain at all — dropped from the
+					// mempool, or lost with an L1 reorg. Waiting cannot fix
+					// that, so send the same commitment again.
+					logrus.Warnf("PoB: commitment for height=%d is not on L1 (l1_tx=%s), resubmitting",
+						pf.block.Height, pf.l1TxHash)
+					if err := p.resubmitCommitment(pf); err != nil {
+						logrus.Errorf("PoB: resubmitting the commitment for height=%d: %v",
+							pf.block.Height, err)
+					}
 					break
 				}
-				// Confirmed only means the submission landed. Ask L1 which
-				// block it actually settled on before treating ours as final.
-				outcome, canonical := p.followVerdict(pf)
-				if outcome == Unsettled {
-					break
-				}
-				if outcome == Orphaned {
-					// Dropped rather than finalized; everything above it is
-					// off the canonical chain too, so stop draining here.
-					p.dropOrphanedBlocks(pf.block.Height, canonical)
-					confirmed++
+				if depth < p.cfg.L1FinalityDepth {
 					break
 				}
 
-				// L1 settled on our block. The state goes in first: it is the
-				// part that matters, it records how far it got, and a block L1
-				// has already ruled for can never be ruled against, so a crash
-				// before the markers below costs nothing that startup cannot
-				// rebuild from that record.
+				// Deep enough to treat as irreversible. The state goes in
+				// first: it is the part that matters and it records how far it
+				// got, so a crash before the markers below costs nothing that
+				// startup cannot rebuild from that record.
 				if err := p.pending.ApplyThrough(pf.block.Height); err != nil {
 					logrus.Errorf("PoB: promoting staged writes at height=%d: %v", pf.block.Height, err)
 					break
@@ -660,7 +607,8 @@ func (p *ProofOfBuy) finalityWorker() {
 					logrus.Errorf("PoB: finalize block failed height=%d: %v", pf.block.Height, err)
 				} else {
 					p.State.FinalizeBlock(pf.block)
-					logrus.Infof("PoB: L1-confirmed finalization height=%d, l1_tx=%s", pf.block.Height, pf.l1TxHash)
+					logrus.Infof("PoB: finalized height=%d at L1 depth=%d, l1_tx=%s",
+						pf.block.Height, depth, pf.l1TxHash)
 				}
 				confirmed++
 			}
@@ -670,4 +618,91 @@ func (p *ProofOfBuy) finalityWorker() {
 			}
 		}
 	}
+}
+
+// submitCommitment draws a blinding factor, records the opening, and posts the
+// commitment for `pf`'s block to L1.
+//
+// The opening is written to disk *before* the submission goes out. Only the
+// commitment reaches L1, so an opening lost to a crash would leave a
+// commitment that nobody — this node included — can ever open: the L1 tokens
+// spent on it would buy nothing. Writing first costs one row; getting the
+// order wrong costs the bid.
+func (p *ProofOfBuy) submitCommitment(pf *pendingFinalization) error {
+	// The score is recorded alongside the opening for diagnostics; the block
+	// hash already commits to it, so it takes no part in the commitment.
+	cdata, err := DecodeConsensusData(pf.block.Extra)
+	if err != nil {
+		return fmt.Errorf("decoding consensus data: %w", err)
+	}
+
+	random, err := NewRandomHex()
+	if err != nil {
+		return err
+	}
+	commitment, err := CommitBlockHash(pf.block.Hash, random)
+	if err != nil {
+		return fmt.Errorf("committing to the block hash: %w", err)
+	}
+
+	blockHash := pf.block.Hash.String()
+	if err := p.bids.Save(&store.BlockBid{
+		BlockHash:  blockHash,
+		Height:     pf.block.Height,
+		Goal:       cdata.BlockScore,
+		Random:     random,
+		Commitment: commitment,
+	}); err != nil {
+		return err
+	}
+
+	l1TxHash, err := p.l1Submitter.SubmitCommitment(context.Background(), &BlockCommitment{
+		L2BlockHeight: pf.block.Height,
+		Commitment:    commitment,
+	})
+	if err != nil {
+		return fmt.Errorf("submitting the commitment: %w", err)
+	}
+
+	// The opening is already safe; failing to note which transaction carried
+	// it only costs the ability to look the submission up later.
+	if err := p.bids.RecordSubmission(blockHash, l1TxHash); err != nil {
+		logrus.Errorf("PoB: recording the L1 submission of height=%d: %v", pf.block.Height, err)
+	}
+
+	pf.l1TxHash = l1TxHash
+	pf.submittedAt = time.Now()
+	return nil
+}
+
+// resubmitCommitment posts the recorded commitment for `pf`'s block again,
+// after an earlier submission failed to stay on chain.
+//
+// It deliberately reuses the stored opening rather than drawing a fresh one: a
+// new blinding factor would produce a different commitment, and the opening
+// already on disk would then match nothing.
+func (p *ProofOfBuy) resubmitCommitment(pf *pendingFinalization) error {
+	blockHash := pf.block.Hash.String()
+	bid, err := p.bids.Get(blockHash)
+	if err != nil {
+		return err
+	}
+	if bid == nil {
+		return fmt.Errorf("no opening recorded for block %s", blockHash)
+	}
+
+	l1TxHash, err := p.l1Submitter.SubmitCommitment(context.Background(), &BlockCommitment{
+		L2BlockHeight: bid.Height,
+		Commitment:    bid.Commitment,
+	})
+	if err != nil {
+		return fmt.Errorf("submitting the commitment: %w", err)
+	}
+	if err := p.bids.RecordSubmission(blockHash, l1TxHash); err != nil {
+		logrus.Errorf("PoB: recording the L1 resubmission of height=%d: %v", pf.block.Height, err)
+	}
+
+	pf.l1TxHash = l1TxHash
+	pf.submittedAt = time.Now()
+	return nil
 }

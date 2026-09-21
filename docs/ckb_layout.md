@@ -115,11 +115,21 @@ data
 lock    矿工可支配的 secp256k1 key（随时可自行回收容量）
 type    commit_type_script
 data
-    commitment   [32]byte    Poseidon(l2_height, l2_block_hash, goal, random)
+    commitment   [32]byte    SHA256(l2_block_hash || random)
 ```
 
-`l2_block_hash` 是 32 字节，`goal` 是 u128，都超出 BN254 的标量域，各拆成两个域
-元素参与 Poseidon。拆法与 L2 侧 `consensus` 包必须一致，否则两边算出的承诺不同。
+**承诺的内容只有 L2 区块哈希。** 哈希已经唯一确定了整个区块——高度、`goal`、VRF
+输出、父链接、每一笔交易都在里面——再把其中几项单独塞进承诺，等于把同一件事承诺
+两遍。揭示时给出 `(l2_block_hash, random)` 就够：拿到区块的人先核对开启值与链上
+承诺相符，再核对区块与哈希相符。
+
+**用 SHA256 而不是 Poseidon。** 这个承诺不进任何电路：链上只记录、不验证，揭示由
+L2 节点把两个字节串拼起来哈希一次就能核对。Poseidon 的 zk 友好在这里没人用得上，
+代价却要照付——它的输入是 BN254 域元素，32 字节的哈希塞不进去，就得拆成两半，两边
+还要约定拆法一致、参数化一致。换成字节串哈希，这两个问题都不存在。
+
+预算 cell 里的支付承诺是另一回事，仍然用 Poseidon（第 3 节）：那些开启值确实要进
+预算上限证明的电路。
 
 ### 验证规则
 
@@ -161,7 +171,7 @@ L1 交出来的只是"哪些承诺在第几号区块上"。把它变成"这个�
 承诺入块之后，矿工在 L2 的 p2p 网络里广播开启值：
 
 ```
-l2_height, l2_block_hash, goal, random      打开 L1 上的出价承诺
+l2_block_hash, random                       打开 L1 上的区块承诺
 amount, payment_random                       打开预算 cell 里的支付承诺
 vrf_output, vrf_proof, miner_pubkey, block_sig, prev_hash
 ```
@@ -173,8 +183,8 @@ vrf_output, vrf_proof, miner_pubkey, block_sig, prev_hash
 
 收到一组开启值，节点依次检查：
 
-**V1 承诺存在且已入块。** `Poseidon(l2_height, l2_block_hash, goal, random)` 必须
-等于 L1 上某个提交 cell 的 data。记下它所在的 L1 区块号。
+**V1 承诺存在且已入块。** 重算 `SHA256(l2_block_hash || random)`，必须等于 L1 上
+某个提交 cell 的 data。记下它所在的 L1 区块号。
 
 **V2 分支连续。** 这个区块必须挂在一条从分叉点起逐高度相接、中间没有缺口的链上。
 缺一个高度，整条分支就失去参选资格——不能把各个高度上得分最高的区块挑出来拼成
@@ -246,7 +256,8 @@ vrf_output, vrf_proof, miner_pubkey, block_sig, prev_hash
 
 ## 6. L2 侧接口映射
 
-`chain/consensus/` 中三个接口与本布局的对应关系。三个都需要改。
+`chain/consensus/` 中三个接口与本布局的对应关系。提交与终局两处已按本布局改完，
+支付读取一处仍待改。
 
 ### L1PaymentVerifier
 
@@ -262,30 +273,34 @@ FetchAllocation(ctx, txHash, minerPubkey, height) (commitment string, err error)
 > `txHash` 随之取消；`FetchAllocation` 还要返回**写入该条目的 L1 区块号**，V4 要
 > 用它判断支付承诺是否写得够早，现有签名表达不了。
 
-### L1HeaderSubmitter
+### L1CommitmentSubmitter（已改）
 
 ```go
-SubmitBlockHeader(ctx, header) (l1TxHash string, err error)
+SubmitCommitment(ctx, commitment *BlockCommitment) (l1TxHash string, err error)
 ```
 
-构造并发送提交交易：抽一个 32 字节随机数，算
-`Poseidon(l2_height, l2_block_hash, goal, random)`，创建提交 cell。交易里不带任何
-与出价有关的其他数据——带了就等于没做这层防御。
+构造并发送提交交易：抽一个 32 字节随机数，用 `consensus.CommitBlockHash` 算
+`SHA256(l2_block_hash || random)`，创建提交 cell。`BlockCommitment` 里只有这串承诺
+会上链，高度字段仅供本地记账。交易里不带任何与出价有关的其他数据——带了就等于没做
+这层防御。
 
 `random` 必须落盘保存：它是开启承诺的唯一钥匙，丢了这一笔出价就作废，付出去的 L1
-代币也换不回对应的出块权。
+代币也换不回对应的出块权。实现落在 `store.Bids`，且**先写盘再提交**：反过来的话，
+一次崩溃就会在 L1 上留下一个谁也打不开的承诺。重发走 `resubmitCommitment`，复用已
+存的那份开启值——换一个随机数就等于把旧承诺彻底作废。
 
 承诺入块后，矿工还要在 L2 网络广播第 5 节那组开启值。这是 p2p 层的动作，不属于这个
 接口，但必须与提交严格配对：**提交了不揭示等于没出价，揭示了对不上承诺会被全网拒绝。**
 
 ```go
-IsConfirmed(ctx, l1TxHash) (bool, error)
+ConfirmedDepth(ctx, l1TxHash) (depth uint64, found bool, err error)
 ```
 
-`get_transaction` 取状态与所在区块，`get_tip_block_number` 取链头，要求
+`get_transaction` 取状态与所在区块，`get_tip_block_number` 取链头，算出承诺被埋了
+多深，终局条件是
 
 ```
-tip - 该区块承诺所在的 L1 区块 >= N
+depth >= N
 ```
 
 基准是这个区块自己的承诺。主链上满足该条件的最长前缀即为 finalized，此后不再接受
@@ -294,31 +309,29 @@ tip - 该区块承诺所在的 L1 区块 >= N
 **提升是不可逆的**（L2 侧一旦提升，暂存写入即落盘且无法撤销），因此这里必须要求
 足够深度，而不是"进块即可"。
 
-同时应区分"未确认"与"交易不存在"：后者意味着提交从未上链，需要重新提交，而现有
-的 bool 返回值表达不了这个差别。
+`found` 把"还不够深"与"根本不在链上"分开：前者等着就行，后者意味着提交从未落地或
+随 L1 重组消失，只能重发。一个 bool 表达不了这个差别，所以返回值里单列一项。
 
-### L1Verdict
+### L1Verdict（已删除）
 
-这个接口的名字与语义都不再成立：L1 不出裁定。它实际要做的是**读出一个高度的承诺
-集合**，裁定由本地算：
+这个接口的名字与语义都不再成立——L1 不出裁定——所以它连同 `FetchVerdict`、
+`CompareVerdict`、`followVerdict` 与"钉住 L1 指定区块"的那套状态一起删掉了。终局
+改由上面的深度条件给出。
+
+接替它的是一个读取接口，等分叉选择落地时再加：
 
 ```go
-// 现在
-FetchVerdict(ctx, l1TxHash) ([]CanonicalL2Block, error)
-
-// 应改为，名字也该跟着换（L1CommitmentReader 之类）
 FetchCommitments(ctx, height) ([]AnchoredCommitment, error)
 // AnchoredCommitment{ Commitment [32]byte; L1Block uint64 }
 ```
 
 用 indexer 按 `commit_type_script` 扫出该高度的全部提交 cell，连同各自所在的 L1
 区块号返回。没有窗口可以先行过滤——一个区块算不算数，取决于它所在的分叉能否在累计
-得分上胜出，与它来得早晚无关。注意要覆盖**已被矿工回收的**提交 cell：它们不在 live cell 集合里，得从
-创建它们的交易里读。
+得分上胜出，与它来得早晚无关。注意要覆盖**已被矿工回收的**提交 cell：它们不在 live
+cell 集合里，得从创建它们的交易里读。
 
 之后与 p2p 收到的开启值配对，走第 5 节的 V1~V8，再取累计得分最大的连续分叉。这段
-逻辑与
-`verifyCandidate` / `ConfirmPayment` 高度重合，实现时应复用而非重写。
+逻辑与 `verifyCandidate` / `ConfirmPayment` 高度重合，实现时应复用而非重写。
 
 ## 7. 已定与待确认
 
@@ -327,10 +340,15 @@ FetchCommitments(ctx, height) ([]AnchoredCommitment, error)
 **L1 只存不验。** 链上没有 VRF 验证，没有 zk 验证，没有 Poseidon 计算，没有裁定。
 理由见第 0 节与第 4 节。
 
-**因此 `ckb/vrf` 不再是合约的一部分。** 它与 `ckb/bench`、`ckb/bench-std` 当初是为
-在链上验 VRF 做的，那条路已经不走了。实测 7,618,328 cycles 的结论仍然有效，只是不再
-构成约束。这份实现别删：它是 L2 侧 prover 的独立交叉验证，Go 与 Rust 两套实现对同
-一组向量得出同一个 `beta`，这个价值与它跑在哪儿无关。
+**为链上验 VRF 准备的东西已全部删除。** Rust 的 ECVRF 验证（`ckb/vrf`）与配套的
+cycle 度量程序（`ckb/bench`、`ckb/bench-std`）都是为"把 VRF 放上链"准备的。实测一次
+验证约 7.6M cycles，相对主网 35 亿的区块上限不到 0.25%——这个数字曾是那个方案的可行性
+依据，如今链上什么都不验，它不再约束任何设计决策。
+
+一度想把 `ckb/vrf` 留作 L2 侧 Go prover 的对照实现，但那个理由站不住：交叉验证的价值
+在于两个独立实现必须互操作，而链上不验之后没有谁需要与 Go 侧互操作，所有 L2 节点跑的
+是同一份代码。它检验的东西不是任何人依赖的东西，所以一并删了。L2 出块自己要用的 VRF
+在 `chain/consensus/vrf.go`，与链上无关。
 
 **容量占用是 O(1)。** 预算 cell 按 R3.1/R3.2 清理，提交 cell 由矿工自行回收，链上
 没有任何随高度累积的长期状态。

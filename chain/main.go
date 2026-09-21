@@ -50,10 +50,7 @@ func main() {
 	}
 
 	l1Verifier := &consensus.MockL1PaymentVerifier{}
-	l1Submitter := consensus.NewMockL1HeaderSubmitter(coreCfg.Consensus.MockL1ConfirmDelay)
-	// The mock submitter doubles as the verdict source: with no rivals, every
-	// submission stands as the ruling for its height.
-	l1Verdict := l1Submitter
+	l1Submitter := consensus.NewMockL1CommitmentSubmitter(coreCfg.Consensus.MockL1BlockTime)
 
 	// The payment book is shared: the HTTP endpoint writes declarations into it
 	// and the consensus loop takes them out at the matching height.
@@ -76,13 +73,19 @@ func main() {
 	if err := store.MigrateStagedTable(db); err != nil {
 		logrus.Fatal("migrating staging table: ", err)
 	}
+	// Only the commitment goes to L1; its opening lives here. A lost opening
+	// forfeits the bid, so it is persisted rather than kept in memory.
+	if err := store.MigrateBidTable(db); err != nil {
+		logrus.Fatal("migrating bid table: ", err)
+	}
+	bids := store.NewBids(db)
 	pending := store.NewPending(db)
 	pending.Register(account.CashApplier{})
 	pending.Register(core.Appliers()...)
 
 	accountTri := account.NewAccount(&coreCfg.Account, db, pending)
 	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook, db, pending)
-	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, vrfPrivKey, l1Submitter, l1Verdict, paymentBook, pending)
+	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, vrfPrivKey, l1Submitter, bids, paymentBook, pending)
 
 	// The payment endpoint confirms each declaration against L1 before it
 	// reaches the book, so it needs the same verifier and miner identity the

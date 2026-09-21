@@ -35,12 +35,10 @@ const ERR_UNIMPLEMENTED: i8 = 1;
 
 /// Entry point.
 ///
-/// TODO: split this crate in two. The commit script only enforces R3.1. The
-/// reveal script consumes the commit cell, reads the opening from the witness,
-/// loads the budget cell and the anchor through `cell_deps` and the commit
-/// cell's block through `header_deps`, then enforces R4.1 through R4.7.
-/// `ckb_vrf::verify` supplies the VRF half of R4.3 and is already cross-checked
-/// against the L2 prover.
+/// TODO: enforce R4.1 — the created cell's data is exactly 32 bytes — and
+/// nothing else. Spending is left to the lock (R4.2), so there is no branch
+/// for it here. The budget cell's own rules (R3.1~R3.4) belong to a separate
+/// `budget_type_script` that does not exist yet.
 pub fn program_entry() -> i8 {
     ERR_UNIMPLEMENTED
 }

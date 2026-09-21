@@ -187,9 +187,20 @@ only once that submission confirms.
   therefore reject.
 - [`commitment.go`](../chain/consensus/commitment.go) — `PoseidonCommit`, the
   Go side of the commitment shape the wallet circuits use (circom-parameterized
-  Poseidon(2) over BN254, rendered as 64-char hex).
+  Poseidon(2) over BN254, rendered as 64-char hex); `CommitBlockHash`, the
+  commitment a block is posted under (`SHA256(block_hash || random)` — the
+  block hash alone, since it already determines height, goal, VRF output and
+  every transaction; a plain byte-string hash because nothing opens this
+  commitment inside a circuit, unlike the payment commitments above); and
+  `NewRandomHex` for the blinding factor.
 - [`l1_submitter.go`](../chain/consensus/l1_submitter.go) — the
-  `L1HeaderSubmitter` interface plus its mock.
+  `L1CommitmentSubmitter` interface plus its mock. Only a commitment reaches
+  L1: submitting the header and score in the clear would hand the L1 block
+  producer exactly what it needs to censor selectively.
+- [`bid.go`](../chain/store/bid.go) — the openings of those commitments,
+  written to disk *before* each submission goes out. L1 carries only the
+  commitment, so an opening lost to a crash would leave a commitment nobody can
+  ever open and tokens spent for nothing.
 
 **One key, three roles.** The miner keypair is **secp256k1** everywhere
 (`keypair.Secp256k1` in `main.go`), because that is the curve of CKB's
@@ -197,7 +208,8 @@ default lock, `secp256k1_blake160_sighash_all`. The same key therefore
 
 1. signs L2 blocks (yu / tendermint ECDSA over SHA-256),
 2. evaluates the VRF (ECVRF on the same curve — so `VRFVerify` takes
-   `block.MinerPubkey` and there is no separate, grindable VRF key), and
+   `block.MinerPubkey` and there is no separate, grindable VRF key; this is
+   checked by L2 nodes only, never on chain), and
 3. owns the CKB address that pays on L1 — `lock.args` is
    `blake160(block.MinerPubkey)`, the compressed 33-byte encoding, so
    binding an L1 payment to a block producer is a byte comparison rather
@@ -208,10 +220,16 @@ The three hash domains never overlap (CKB blake2b with the
 `0xFE`), which keeps the shared key safe across the three protocols.
 
 *Still mocked / not yet implemented*: real CKB payment verification
-(`MockL1PaymentVerifier` accepts everything), real header submission
-(`MockL1HeaderSubmitter`), the payment commit-reveal timing, prepayment
-allocation proofs, miner rewards, fork choice by cumulative score, and
-block-signature verification on received candidates.
+(`MockL1PaymentVerifier` accepts everything), real commitment submission
+(`MockL1CommitmentSubmitter` — depth grows on a timer rather than with an
+actual L1 chain), broadcasting the opening over the L2 network once a
+commitment is on chain, prepayment allocation proofs (`VerifyAllocationBudget`
+waves a missing proof through, and no circuit exists), fork choice by
+cumulative score, and block-signature verification on received candidates.
+
+Finality no longer waits for a ruling from L1: a block is finalized once its
+commitment is buried `l1_finality_depth` L1 blocks deep. The interfaces that
+read a verdict back from L1 are gone.
 
 ## 3. Business-Scenario Walkthroughs
 
