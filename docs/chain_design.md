@@ -227,9 +227,12 @@ commitment is on chain, prepayment allocation proofs (`VerifyAllocationBudget`
 waves a missing proof through, and no circuit exists), fork choice by
 cumulative score, and block-signature verification on received candidates.
 
-Finality no longer waits for a ruling from L1: a block is finalized once its
-commitment is buried `l1_finality_depth` L1 blocks deep. The interfaces that
-read a verdict back from L1 are gone.
+Finality no longer waits for a ruling from L1, and no depth threshold declares
+a block final either: which fork is canonical follows from cumulative goal,
+irreversibility grows with the score gap, and L1's record of when each
+commitment appeared is what exposes a fork bought after the fact. The
+interfaces that read a verdict back from L1 are gone; staged writes are
+promoted once the commitment is on chain, pending fork choice.
 
 ## 3. Business-Scenario Walkthroughs
 

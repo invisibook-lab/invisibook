@@ -535,18 +535,18 @@ func (p *ProofOfBuy) FinalizeBlock(block *types.Block) {
 }
 
 // finalityWorker runs as a background goroutine. It receives blocks from
-// pendingFinalizations, posts each block's commitment to L1, and finalizes the
-// block once that commitment is buried L1FinalityDepth blocks deep. Blocks are
-// finalized strictly in height order.
+// pendingFinalizations, posts each block's commitment to L1, and promotes the
+// block's staged writes once that commitment is on chain. Blocks are promoted
+// strictly in height order.
 //
-// It owns finality outright: nothing else in this tripod calls Chain.Finalize
-// or State.FinalizeBlock. A locally produced block is executed and appended
-// immediately, but stays unfinalized until its commitment has the depth behind
-// it — promotion cannot be undone, and an L1 reorg that took the commitment
-// back off chain after promotion would leave state nothing on L1 stands behind.
+// Finality in PoB comes from fork choice — the heaviest continuous fork by
+// cumulative goal — with L1 holding a tamper-proof record of when each
+// commitment appeared, which is what exposes a fork bought after the fact. No
+// depth threshold enters into it.
 func (p *ProofOfBuy) finalityWorker() {
 	pollInterval := time.Duration(p.cfg.L1PollInterval) * time.Millisecond
-	// pending holds blocks whose commitment is on L1 but not yet deep enough.
+	// pending holds blocks whose commitment has been sent but not yet seen on
+	// chain.
 	var pending []*pendingFinalization
 
 	ticker := time.NewTicker(pollInterval)
@@ -570,16 +570,16 @@ func (p *ProofOfBuy) finalityWorker() {
 			sort.Slice(pending, func(i, j int) bool {
 				return pending[i].block.Height < pending[j].block.Height
 			})
-			// Finalize deep-enough blocks in height order. Stop at the first
-			// one that is not ready to preserve strict ordering.
+			// Promote blocks in height order. Stop at the first one that is
+			// not ready, to preserve strict ordering.
 			confirmed := 0
 			for _, pf := range pending {
-				depth, found, err := p.l1Submitter.ConfirmedDepth(context.Background(), pf.l1TxHash)
+				onChain, err := p.l1Submitter.CommitmentOnChain(context.Background(), pf.l1TxHash)
 				if err != nil {
-					logrus.Errorf("PoB: reading L1 depth for height=%d: %v", pf.block.Height, err)
+					logrus.Errorf("PoB: checking L1 for height=%d: %v", pf.block.Height, err)
 					break
 				}
-				if !found {
+				if !onChain {
 					// The submission is not on chain at all — dropped from the
 					// mempool, or lost with an L1 reorg. Waiting cannot fix
 					// that, so send the same commitment again.
@@ -591,14 +591,16 @@ func (p *ProofOfBuy) finalityWorker() {
 					}
 					break
 				}
-				if depth < p.cfg.L1FinalityDepth {
-					break
-				}
-
-				// Deep enough to treat as irreversible. The state goes in
-				// first: it is the part that matters and it records how far it
-				// got, so a crash before the markers below costs nothing that
-				// startup cannot rebuild from that record.
+				// TODO: promote on the cumulative-score gap instead. The right
+				// moment for a write that cannot be undone is when the gap
+				// behind the canonical chain is past buying back — that is
+				// what finality means here. Fork choice is not implemented
+				// yet, so this promotes as soon as the commitment is on L1,
+				// which holds only while this node has no rivals.
+				//
+				// The state goes in first: it is the part that matters and it
+				// records how far it got, so a crash before the markers below
+				// costs nothing that startup cannot rebuild from that record.
 				if err := p.pending.ApplyThrough(pf.block.Height); err != nil {
 					logrus.Errorf("PoB: promoting staged writes at height=%d: %v", pf.block.Height, err)
 					break
@@ -607,8 +609,8 @@ func (p *ProofOfBuy) finalityWorker() {
 					logrus.Errorf("PoB: finalize block failed height=%d: %v", pf.block.Height, err)
 				} else {
 					p.State.FinalizeBlock(pf.block)
-					logrus.Infof("PoB: finalized height=%d at L1 depth=%d, l1_tx=%s",
-						pf.block.Height, depth, pf.l1TxHash)
+					logrus.Infof("PoB: promoted height=%d, commitment on L1 in l1_tx=%s",
+						pf.block.Height, pf.l1TxHash)
 				}
 				confirmed++
 			}

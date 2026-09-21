@@ -244,28 +244,17 @@ The VRF output inside `goal` is hard to forge, and every block is backed by a re
 payment, which makes `goal` an objectively verifiable number. Anyone can compare scores
 to determine which fork to follow, with no voting and no extra communication rounds.
 
-Cumulative score answers "which chain to follow right now", not yet "irreversible".
-Finality comes from depth on L1: the prefix of the canonical chain whose **commitments
-are buried N L1 blocks deep** counts as finalized, and any reorg deeper than that is
-refused, however high a cumulative score the challenger claims.
+**That rule is the finality rule; there is no second gate.** No threshold says how
+many blocks deep something has to be before it counts — as in Nakamoto consensus,
+irreversibility grows with the gap in cumulative score: to overturn a chain you have
+to buy the gap back, and the wider it is the less affordable that becomes.
 
-L1 produces blocks more slowly than L2, so one L1 block takes in the
-commitments of whatever L2 blocks were produced in that time. Each is submitted
-on its own and merely happens to land in the same L1 block, which is why they
-also reach the finality depth at the same moment:
+What L1's backup shuts down is the other route. By score alone, a chain that existed
+at the time and a chain bought afterwards look identical; but every block of the
+original had its commitment written into L1 as it happened, while a fabricated fork
+can only carry commitments that appeared recently. Comparing against L1's record is
+what tells them apart — see 8.2.
 
-```
-  L1:  |— B —|— B+1 —|— B+2 —|— B+3 —| ... |— B+24 —|— B+25 —|
-                ▲                              ▲
-                │                              │
-        the L2 blocks produced            B+1 now has 24 L1
-        in this span commit here          blocks stacked on it
-                                               │
-                                               ▼
-                                   they all finalize at once
-```
-
-(`B` numbers the L1 blocks here; it is not the finality depth N = 24.)
 
 ### 8.2 Division of Labour
 
@@ -292,8 +281,8 @@ What makes this division work is that deciding, although it happens on L2, carri
 subjective element: each block's score is uniquely determined by its payment on L1 and
 its VRF, a branch's cumulative score is one summation, and continuity is plain to see.
 Honest nodes looking at the same blocks necessarily arrive at the same canonical chain
-— objectivity comes from scores being verifiable, finality from the depth of that
-backup on L1, and neither asks L1 to compute anything.
+— objectivity comes from scores being verifiable, resistance to after-the-fact
+reversal from that backup on L1, and neither asks L1 to compute anything.
 
 For the concrete shape this takes on CKB, see [ckb_layout.md](ckb_layout.md).
 
@@ -324,8 +313,8 @@ constraint that miners can read the canonical chain from directly; layering BFT 
 is redundant, and buys nothing but higher network and engineering complexity.
 
 Where a particular deployment needs shorter confirmation times, a more aggressive
-finality rule can be agreed instead — marking a chain finalized once its cumulative
-lead reaches some margin, without waiting for depth on L1 — still with no voting.
+finality rule can be agreed instead — treating a chain as irreversible once its
+cumulative lead reaches some margin — still with no voting.
 
 ## 9. Attack Surface and Defences
 
@@ -544,8 +533,8 @@ propagation complexity are high. PoB's fork choice is a comparison of numbers.
                    full nodes check open(...) == the on-chain commitment
          │
          ▼
-  [FINALIZED]      The commitment is buried N L1 blocks deep; this prefix
-                   accepts no further reorg
+  [FINALIZED]      The score gap is past buying back, and L1's record
+                   attests the chain was there at the time
          │
          ▼
   [FOLLOWED]       Nodes reconcile the local chain against L1's record of

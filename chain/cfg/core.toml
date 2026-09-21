@@ -19,11 +19,7 @@ coinbase_reward = "1000"
 block_interval  = 3000   # milliseconds between blocks
 pack_num        = 30000  # max transactions per block
 payment_listen        = ":8081"
-l1_poll_interval      = 1000   # ms, finality worker polls L1 depth
-# A block is finalized once its commitment is buried this many L1 blocks deep.
-# Promotion cannot be undone, so this is the margin against an L1 reorg.
-l1_finality_depth     = 24
-mock_l1_block_time    = 200    # ms, simulated L1 block interval for the mock
+l1_poll_interval      = 1000   # ms, how often to ask L1 whether a commitment landed
 
 [orderbook]
 # Verification keys for the OrderBook tripod's circuits. Split is for

@@ -29,23 +29,23 @@ type BlockCommitment struct {
 	Commitment string `json:"commitment"`
 }
 
-// L1CommitmentSubmitter posts block commitments to L1 and reports how deeply
-// each submission has been buried.
+// L1CommitmentSubmitter posts block commitments to L1 and reports whether they
+// are on chain.
 type L1CommitmentSubmitter interface {
 	// SubmitCommitment posts one commitment to L1 and returns the L1 tx hash.
 	SubmitCommitment(ctx context.Context, commitment *BlockCommitment) (l1TxHash string, err error)
 
-	// ConfirmedDepth reports how many L1 blocks have been mined on top of the
-	// one carrying `l1TxHash`, counting that block itself as depth 1.
+	// CommitmentOnChain reports whether `l1TxHash` is in an L1 block.
 	//
-	// `found` separates "not yet deep enough" from "not on chain at all": the
-	// first is a matter of waiting, the second means the submission never
-	// landed and has to be sent again. A single bool could not tell a caller
-	// which of the two it was looking at.
-	ConfirmedDepth(ctx context.Context, l1TxHash string) (depth uint64, found bool, err error)
+	// A submission that is not on chain never landed, or was taken back by an
+	// L1 reorg; either way it has to be sent again, which is the only decision
+	// this answer drives. How deep it sits once it is there is deliberately
+	// not reported: nothing in PoB turns on a depth threshold — finality comes
+	// from fork choice on L2, not from waiting out L1 blocks.
+	CommitmentOnChain(ctx context.Context, l1TxHash string) (bool, error)
 }
 
-// pendingFinalization tracks a block awaiting enough depth on L1.
+// pendingFinalization tracks a block whose commitment has been sent to L1.
 type pendingFinalization struct {
 	block       *types.Block
 	l1TxHash    string
@@ -53,56 +53,37 @@ type pendingFinalization struct {
 }
 
 // MockL1CommitmentSubmitter is a mock implementation of L1CommitmentSubmitter.
-// SubmitCommitment returns a random hex hash; ConfirmedDepth grows by one for
-// every blockTime that has elapsed since the submission, simulating an L1 that
-// keeps producing blocks on top of it.
+// SubmitCommitment returns a random hex hash, and every hash it handed out is
+// reported as on chain — enough for a single node with no rivals.
 type MockL1CommitmentSubmitter struct {
-	// blockTime is the simulated L1 block interval.
-	blockTime time.Duration
-
 	mu          sync.Mutex
-	submissions map[string]time.Time        // l1TxHash → submission time
 	commitments map[string]*BlockCommitment // l1TxHash → what was submitted
 }
 
 // NewMockL1CommitmentSubmitter creates a mock submitter.
-// `blockTimeMs` is the simulated L1 block interval in milliseconds and must be
-// positive; a non-positive value would make every submission look infinitely
-// deep the moment it was sent.
-func NewMockL1CommitmentSubmitter(blockTimeMs int) *MockL1CommitmentSubmitter {
-	if blockTimeMs <= 0 {
-		blockTimeMs = 1
-	}
+func NewMockL1CommitmentSubmitter() *MockL1CommitmentSubmitter {
 	return &MockL1CommitmentSubmitter{
-		blockTime:   time.Duration(blockTimeMs) * time.Millisecond,
-		submissions: make(map[string]time.Time),
 		commitments: make(map[string]*BlockCommitment),
 	}
 }
 
-// SubmitCommitment returns a random hex hash and records the submission time.
+// SubmitCommitment returns a random hex hash and records what was submitted.
 func (m *MockL1CommitmentSubmitter) SubmitCommitment(_ context.Context, commitment *BlockCommitment) (string, error) {
 	hashBytes := make([]byte, 32)
 	_, _ = rand.Read(hashBytes)
 	txHash := hex.EncodeToString(hashBytes)
 
 	m.mu.Lock()
-	m.submissions[txHash] = time.Now()
 	m.commitments[txHash] = commitment
 	m.mu.Unlock()
 
 	return txHash, nil
 }
 
-// ConfirmedDepth reports one block of depth per elapsed blockTime, and
-// found=false for a hash this mock never handed out.
-func (m *MockL1CommitmentSubmitter) ConfirmedDepth(_ context.Context, l1TxHash string) (uint64, bool, error) {
+// CommitmentOnChain reports true for any hash this mock handed out.
+func (m *MockL1CommitmentSubmitter) CommitmentOnChain(_ context.Context, l1TxHash string) (bool, error) {
 	m.mu.Lock()
-	submittedAt, ok := m.submissions[l1TxHash]
-	m.mu.Unlock()
-
-	if !ok {
-		return 0, false, nil
-	}
-	return uint64(time.Since(submittedAt)/m.blockTime) + 1, true, nil
+	defer m.mu.Unlock()
+	_, ok := m.commitments[l1TxHash]
+	return ok, nil
 }

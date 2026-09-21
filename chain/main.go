@@ -50,7 +50,7 @@ func main() {
 	}
 
 	l1Verifier := &consensus.MockL1PaymentVerifier{}
-	l1Submitter := consensus.NewMockL1CommitmentSubmitter(coreCfg.Consensus.MockL1BlockTime)
+	l1Submitter := consensus.NewMockL1CommitmentSubmitter()
 
 	// The payment book is shared: the HTTP endpoint writes declarations into it
 	// and the consensus loop takes them out at the matching height.
