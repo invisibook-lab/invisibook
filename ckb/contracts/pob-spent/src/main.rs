@@ -13,7 +13,7 @@
 //! * **R4.2** — no cell carrying this script may be locked to the mining addr.
 //!
 //! R4.3 (marked tokens cannot fund a prepayment) is enforced on the budget
-//! cell's side by R3.5: that script already walks its own inputs, so checking
+//! cell's side by R3.4: that script already walks its own inputs, so checking
 //! there is far cheaper than tracing capacity backwards from here.
 //!
 //! The mining addr is passed in as the script's `args` — a 32-byte lock hash —

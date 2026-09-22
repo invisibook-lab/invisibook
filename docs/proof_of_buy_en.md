@@ -158,14 +158,17 @@ PoB uses prepayment plus a zero-knowledge allocation proof:
 
 ```
   Cycle start    The miner pays L1 tokens to the mining addr; the total A
-                 is publicly visible
+                 is publicly visible. In the same move it writes down, once
+                 and for all, how that money is split across heights, with a
+                 zero-knowledge proof that a_0 + a_1 + ... + a_n == A
                                │
-  Each block     Declare the amount a_h this block draws (nothing is really
-                 paid on L2 — the money is already on L1), together with a
-                 zero-knowledge proof that a_0 + a_1 + ... + a_h ≤ A
+  L1 check       The proof is verified against the public A and the per-height
+                 commitments; failing it, the table cannot be written at all,
+                 so any table on chain is a balanced one
                                │
-  Verification   Anyone verifies that proof against the on-chain A as public
-                 input, then feeds (vrf_output, a_h) into goal
+  Each block     Declare which row of the table this block draws on (nothing
+                 is really paid on L2 — the money is already on L1); the
+                 network feeds (vrf_output, a_h) into goal
 ```
 
 **The total is public; each height's amount must be hidden.** The total `A` is a real
@@ -175,8 +178,14 @@ must be hidden is `a_h`: if competitors can see in advance what you bid for a he
 they can adjust accordingly and the timing protection of §7.3 comes to nothing.
 
 The zero-knowledge proof therefore takes the public `A` as input, convincing the
-network that "the declared amounts sum to no more than what was actually paid" while
-revealing no individual `a_h`.
+network that "this table splits A exactly" while revealing no individual `a_h`.
+
+**Equality rather than "no more than".** The money is already spent; whatever goes
+unallocated is not refunded either, so demanding the table balance asks nothing extra
+of the miner — and it makes the circuit far cheaper, since an inequality has to
+simulate a size comparison by decomposing into bits while an equality is one linear
+constraint. The price is that a miner plans a whole cycle at once; topping up means
+opening another cycle and balancing another table.
 
 ### 7.3 Payment Must Come First
 
