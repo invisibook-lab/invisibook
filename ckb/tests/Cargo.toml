@@ -1,0 +1,14 @@
+[package]
+name = "pob-contract-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Kept apart from the contract crate on purpose. A contract is a no_std,
+# no_main RISC-V binary that cannot be linked for the host at all, while these
+# tests need std and run on the host — one package cannot be both. The tests
+# read the compiled script from disk and run it inside a transaction, so they
+# never link against the contract crate.
+
+[dev-dependencies]
+ckb-testtool = "1.1.1"
