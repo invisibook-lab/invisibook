@@ -199,23 +199,33 @@ func TestPoseidonCommitRejectsBadInput(t *testing.T) {
 
 func TestConfirmPayment(t *testing.T) {
 	const height common.BlockNum = 42
+	// The L1 block the allocation was written in. V4 will subtract from it,
+	// so it has to survive the trip back out of ConfirmPayment intact.
+	const allocationL1Block uint64 = 1000
 	verifier := &MockL1PaymentVerifier{}
-	if err := verifier.Allocate("0xprepay", "minerA", height, big.NewInt(500), randA); err != nil {
+	if err := verifier.Allocate("0xprepay", "minerA", height, big.NewInt(500), randA, allocationL1Block); err != nil {
 		t.Fatalf("seeding the mock allocation: %v", err)
 	}
 	ctx := context.Background()
 
 	t.Run("accepts an opening that matches the commitment", func(t *testing.T) {
 		payment := NewL1Payment("0xprepay", big.NewInt(500), randA, "minerA", "")
-		if err := ConfirmPayment(ctx, verifier, payment, "minerA", height); err != nil {
+		alloc, err := ConfirmPayment(ctx, verifier, payment, "minerA", height)
+		if err != nil {
 			t.Fatalf("expected the payment to be confirmed, got %v", err)
+		}
+		// V4 measures the gap from this block to the one holding the L2
+		// block's own commitment. Dropping it here would silently disable
+		// that check rather than fail loudly, so it is asserted.
+		if alloc.L1BlockNumber != allocationL1Block {
+			t.Fatalf("allocation L1 block = %d, want %d", alloc.L1BlockNumber, allocationL1Block)
 		}
 	})
 
 	t.Run("rejects an inflated amount", func(t *testing.T) {
 		// The miner committed to 500 on L1 but now claims 50000 to win the height.
 		payment := NewL1Payment("0xprepay", big.NewInt(50000), randA, "minerA", "")
-		err := ConfirmPayment(ctx, verifier, payment, "minerA", height)
+		_, err := ConfirmPayment(ctx, verifier, payment, "minerA", height)
 		if !errors.Is(err, ErrCommitmentMismatch) {
 			t.Fatalf("expected ErrCommitmentMismatch, got %v", err)
 		}
@@ -223,7 +233,7 @@ func TestConfirmPayment(t *testing.T) {
 
 	t.Run("rejects a substituted random", func(t *testing.T) {
 		payment := NewL1Payment("0xprepay", big.NewInt(500), randB, "minerA", "")
-		if err := ConfirmPayment(ctx, verifier, payment, "minerA", height); !errors.Is(err, ErrCommitmentMismatch) {
+		if _, err := ConfirmPayment(ctx, verifier, payment, "minerA", height); !errors.Is(err, ErrCommitmentMismatch) {
 			t.Fatalf("expected ErrCommitmentMismatch, got %v", err)
 		}
 	})
@@ -231,7 +241,7 @@ func TestConfirmPayment(t *testing.T) {
 	t.Run("rejects a payment claimed by another miner", func(t *testing.T) {
 		// minerB replays minerA's allocation inside its own block.
 		payment := NewL1Payment("0xprepay", big.NewInt(500), randA, "minerA", "")
-		err := ConfirmPayment(ctx, verifier, payment, "minerB", height)
+		_, err := ConfirmPayment(ctx, verifier, payment, "minerB", height)
 		if err == nil {
 			t.Fatal("a payment bound to another miner must be rejected")
 		}
@@ -242,23 +252,71 @@ func TestConfirmPayment(t *testing.T) {
 
 	t.Run("rejects a height with no allocation on L1", func(t *testing.T) {
 		payment := NewL1Payment("0xprepay", big.NewInt(500), randA, "minerA", "")
-		if err := ConfirmPayment(ctx, verifier, payment, "minerA", height+1); !errors.Is(err, ErrPaymentNotFound) {
+		if _, err := ConfirmPayment(ctx, verifier, payment, "minerA", height+1); !errors.Is(err, ErrPaymentNotFound) {
 			t.Fatalf("expected ErrPaymentNotFound, got %v", err)
 		}
 	})
 
 	t.Run("rejects a block carrying no payment at all", func(t *testing.T) {
-		if err := ConfirmPayment(ctx, verifier, nil, "minerA", height); err == nil {
+		if _, err := ConfirmPayment(ctx, verifier, nil, "minerA", height); err == nil {
 			t.Fatal("a nil payment must be rejected")
 		}
 	})
 
 	t.Run("rejects a payment with no amount", func(t *testing.T) {
 		payment := &L1Payment{TxHash: "0xprepay", Random: randA, MinerPubkey: "minerA"}
-		if err := ConfirmPayment(ctx, verifier, payment, "minerA", height); err == nil {
+		if _, err := ConfirmPayment(ctx, verifier, payment, "minerA", height); err == nil {
 			t.Fatal("a payment without an amount must be rejected")
 		}
 	})
+}
+
+// A seeded prepayment must win over the fallback.
+//
+// Tests for the budget ceiling will rest on this: they need a total small
+// enough for an allocation to overrun it, and the fallback — deliberately
+// huge, so that a test caring only about allocations need not seed both —
+// can never express that.
+func TestMockPrepaymentSeedOverridesTheFallback(t *testing.T) {
+	const height common.BlockNum = 7
+	ctx := context.Background()
+	verifier := &MockL1PaymentVerifier{}
+	if err := verifier.Allocate("0xprepay", "minerA", height, big.NewInt(500), randA, 0); err != nil {
+		t.Fatalf("seeding the allocation: %v", err)
+	}
+
+	got, err := verifier.FetchPrepayment(ctx, "0xprepay", "minerA")
+	if err != nil {
+		t.Fatalf("FetchPrepayment with nothing seeded: %v", err)
+	}
+	if got.Cmp(mockDefaultPrepaid) != 0 {
+		t.Fatalf("unseeded total = %s, want the fallback %s", got, mockDefaultPrepaid)
+	}
+
+	if err := verifier.Prepay("0xprepay", "minerA", big.NewInt(900)); err != nil {
+		t.Fatalf("Prepay: %v", err)
+	}
+	got, err = verifier.FetchPrepayment(ctx, "0xprepay", "minerA")
+	if err != nil {
+		t.Fatalf("FetchPrepayment after seeding: %v", err)
+	}
+	if got.Cmp(big.NewInt(900)) != 0 {
+		t.Fatalf("seeded total = %s, want 900", got)
+	}
+}
+
+func TestMockPrepayRejectsAMissingTotal(t *testing.T) {
+	if err := (&MockL1PaymentVerifier{}).Prepay("0xprepay", "minerA", nil); err == nil {
+		t.Fatal("a nil prepaid total must be rejected")
+	}
+}
+
+// A miner with no allocations at all has no prepayment to fall back on.
+func TestMockFetchPrepaymentReportsAnUnknownMiner(t *testing.T) {
+	_, err := (&MockL1PaymentVerifier{}).FetchPrepayment(context.Background(), "0xprepay", "nobody")
+	if !errors.Is(err, ErrPaymentNotFound) {
+		t.Fatalf("expected ErrPaymentNotFound, got %v", err)
+	}
 }
 
 // ───────────────────────── POST /pay_l1_token ──────────────────────────
@@ -288,8 +346,8 @@ func declJSON(height common.BlockNum, amount, random, txHash string) string {
 func TestPayL1TokenStoresConfirmedPayments(t *testing.T) {
 	book := NewPaymentBook()
 	verifier := &MockL1PaymentVerifier{}
-	verifier.Allocate("0xprepay", "minerpub", 10, big.NewInt(500), randA)
-	verifier.Allocate("0xprepay", "minerpub", 11, big.NewInt(600), randB)
+	verifier.Allocate("0xprepay", "minerpub", 10, big.NewInt(500), randA, 0)
+	verifier.Allocate("0xprepay", "minerpub", 11, big.NewInt(600), randB, 0)
 	ps := NewPaymentServer(book, verifier, "minerpub")
 
 	code, resp := postDeclarations(t, ps, `{"payments":[`+
@@ -310,7 +368,7 @@ func TestPayL1TokenStoresConfirmedPayments(t *testing.T) {
 func TestPayL1TokenRejectsPaymentMissingOnL1(t *testing.T) {
 	book := NewPaymentBook()
 	verifier := &MockL1PaymentVerifier{}
-	verifier.Allocate("0xprepay", "minerpub", 10, big.NewInt(500), randA)
+	verifier.Allocate("0xprepay", "minerpub", 10, big.NewInt(500), randA, 0)
 	ps := NewPaymentServer(book, verifier, "minerpub")
 
 	// Height 11 was never allocated on L1.
@@ -336,7 +394,7 @@ func TestPayL1TokenRejectsPaymentMissingOnL1(t *testing.T) {
 func TestPayL1TokenRejectsAmountNotMatchingCommitment(t *testing.T) {
 	book := NewPaymentBook()
 	verifier := &MockL1PaymentVerifier{}
-	verifier.Allocate("0xprepay", "minerpub", 10, big.NewInt(500), randA)
+	verifier.Allocate("0xprepay", "minerpub", 10, big.NewInt(500), randA, 0)
 	ps := NewPaymentServer(book, verifier, "minerpub")
 
 	// The miner committed to 500 on L1 but declares 50000 locally.

@@ -3,6 +3,7 @@ package consensus
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"sync"
 	"time"
@@ -35,12 +36,29 @@ type L1CommitmentSubmitter interface {
 	// SubmitCommitment posts one commitment to L1 and returns the L1 tx hash.
 	SubmitCommitment(ctx context.Context, commitment *BlockCommitment) (l1TxHash string, err error)
 
-	// CommitmentOnChain reports whether `l1TxHash` is in an L1 block.
+	// CommitmentOnChain reports where `l1TxHash` landed, or nil when it is not
+	// on an L1 block at all.
 	//
 	// A submission that is not on chain never landed, or was taken back by an
-	// L1 reorg; either way it has to be sent again, which is the only decision
-	// this answer drives.
-	CommitmentOnChain(ctx context.Context, l1TxHash string) (bool, error)
+	// L1 reorg; either way it has to be sent again.
+	//
+	// The location is not a convenience. Whoever later verifies the opening
+	// has to find this commitment on L1, and without a position that means
+	// scanning the chain; the block hash also dates the anchoring, which is
+	// what distinguishes a fork that existed at the time from one bought
+	// afterwards (whitepaper §8.2).
+	CommitmentOnChain(ctx context.Context, l1TxHash string) (*L1Location, error)
+}
+
+// L1Location pins a submission to one spot on L1.
+//
+// The block is named by hash rather than height so that a reorg is visible:
+// a hash that is no longer on the canonical chain took the commitment with it.
+type L1Location struct {
+	// BlockHash is the L1 block carrying the submission.
+	BlockHash string `json:"l1_block_hash"`
+	// TxIdx is the transaction's index inside that block.
+	TxIdx uint32 `json:"tx_idx"`
 }
 
 // pendingFinalization tracks a block whose commitment has been sent to L1.
@@ -78,10 +96,17 @@ func (m *MockL1CommitmentSubmitter) SubmitCommitment(_ context.Context, commitme
 	return txHash, nil
 }
 
-// CommitmentOnChain reports true for any hash this mock handed out.
-func (m *MockL1CommitmentSubmitter) CommitmentOnChain(_ context.Context, l1TxHash string) (bool, error) {
+// CommitmentOnChain reports a made-up but stable location for any hash this
+// mock handed out, and nil for anything else.
+func (m *MockL1CommitmentSubmitter) CommitmentOnChain(_ context.Context, l1TxHash string) (*L1Location, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, ok := m.commitments[l1TxHash]
-	return ok, nil
+	if _, ok := m.commitments[l1TxHash]; !ok {
+		return nil, nil
+	}
+
+	// Derived from the submission so that two of them never look like they
+	// landed in the same place, which a fixed stand-in would.
+	sum := sha256.Sum256([]byte("mock-l1-block:" + l1TxHash))
+	return &L1Location{BlockHash: hex.EncodeToString(sum[:]), TxIdx: 0}, nil
 }

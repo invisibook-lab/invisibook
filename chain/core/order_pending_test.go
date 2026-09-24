@@ -57,8 +57,8 @@ func TestOrderDropFromUndoesAStatusChange(t *testing.T) {
 	if err := ot.InsertOrder(testOrder("o1", Pending)); err != nil {
 		t.Fatalf("InsertOrder: %v", err)
 	}
-	if err := pending.ApplyThrough(10); err != nil {
-		t.Fatalf("ApplyThrough: %v", err)
+	if err := pending.ApplyBlocks([]store.Block{{Height: 10, Hash: "0xh10"}}); err != nil {
+		t.Fatalf("ApplyBlocks: %v", err)
 	}
 
 	pending.SetBlock(11, "0xh11")
@@ -92,8 +92,8 @@ func TestTombstoneHidesThenRestoresARow(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SaveCompareSubmission: %v", err)
 	}
-	if err := pending.ApplyThrough(10); err != nil {
-		t.Fatalf("ApplyThrough: %v", err)
+	if err := pending.ApplyBlocks([]store.Block{{Height: 10, Hash: "0xh10"}}); err != nil {
+		t.Fatalf("ApplyBlocks: %v", err)
 	}
 
 	// Height 11 consumes both shares and removes the row.
@@ -120,12 +120,12 @@ func TestTombstoneAppliesAsARealDelete(t *testing.T) {
 
 	pending.SetBlock(10, "0xh10")
 	ot.SaveCompareSubmission(&CompareSubmissionScheme{OrderID: "o1", MpcShareJSON: "{}"})
-	pending.ApplyThrough(10)
+	pending.ApplyBlocks([]store.Block{{Height: 10, Hash: "0xh10"}})
 
 	pending.SetBlock(11, "0xh11")
 	ot.DeleteCompareSubmission("o1")
-	if err := pending.ApplyThrough(11); err != nil {
-		t.Fatalf("ApplyThrough: %v", err)
+	if err := pending.ApplyBlocks([]store.Block{{Height: 11, Hash: "0xh11"}}); err != nil {
+		t.Fatalf("ApplyBlocks: %v", err)
 	}
 
 	var n int64

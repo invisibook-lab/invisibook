@@ -50,6 +50,9 @@ func main() {
 	}
 
 	l1Verifier := &consensus.MockL1PaymentVerifier{}
+	// Reads back what was written to L1 — anchored commitments and budget
+	// cell ownership. A mock until a real CKB client exists.
+	l1Reader := &consensus.MockL1Reader{}
 	l1Submitter := consensus.NewMockL1CommitmentSubmitter()
 
 	// The payment book is shared: the HTTP endpoint writes declarations into it
@@ -79,13 +82,19 @@ func main() {
 		logrus.Fatal("migrating bid table: ", err)
 	}
 	bids := store.NewBids(db)
+	// Openings collected from the whole network. Fork choice reads them, so
+	// they are consensus input rather than bookkeeping.
+	if err := store.MigrateRevealTable(db); err != nil {
+		logrus.Fatal("migrating reveal table: ", err)
+	}
+	reveals := store.NewReveals(db)
 	pending := store.NewPending(db)
 	pending.Register(account.CashApplier{})
 	pending.Register(core.Appliers()...)
 
 	accountTri := account.NewAccount(&coreCfg.Account, db, pending)
 	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook, db, pending)
-	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, vrfPrivKey, l1Submitter, bids, paymentBook, pending)
+	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, l1Reader, vrfPrivKey, l1Submitter, bids, reveals, paymentBook, pending)
 
 	// The payment endpoint confirms each declaration against L1 before it
 	// reaches the book, so it needs the same verifier and miner identity the

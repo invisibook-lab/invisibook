@@ -66,18 +66,38 @@ func (p *Pending) Current() Block {
 	return p.current
 }
 
-// ApplyThrough promotes every table's staged rows at or below `height`.
+// ApplyBlocks promotes the staged rows belonging to `blocks`.
 //
-// Called once L1 has settled that height, which is also the point those writes
+// Called once those blocks are settled, which is also the point their writes
 // become durable: they are written to the main tables and committed there.
 // All tables are promoted in one transaction and in sequence order, so a block
 // that settles an order and spends its cash lands as one change or not at all,
 // and a row touched twice ends in the state the later change left it.
-func (p *Pending) ApplyThrough(height common.BlockNum) error {
+//
+// Promotion goes by block, never by height. Two blocks can share a height —
+// one this node produced or adopted, one the synchronizer fetched — and both
+// leave staged rows behind. Selecting by height would carry a rival fork's
+// writes into the tables alongside the canonical ones, and that step has no
+// inverse: the main tables are changed and the staged rows are gone.
+func (p *Pending) ApplyBlocks(blocks []Block) error {
+	if len(blocks) == 0 {
+		return nil
+	}
+	hashes := make([]string, len(blocks))
+	// The applied marker records the furthest point reached, which is what
+	// startup reads back to learn how much of the chain's state is durable.
+	var highest common.BlockNum
+	for i, block := range blocks {
+		hashes[i] = block.Hash
+		if block.Height > highest {
+			highest = block.Height
+		}
+	}
+
 	return p.db.Transaction(func(tx *gorm.DB) error {
 		var writes []StagedWrite
-		if err := tx.Where("block_number <= ?", height).Order("seq ASC").Find(&writes).Error; err != nil {
-			return fmt.Errorf("reading staged writes through height %d: %w", height, err)
+		if err := tx.Where("block_hash IN ?", hashes).Order("seq ASC").Find(&writes).Error; err != nil {
+			return fmt.Errorf("reading staged writes for %d block(s): %w", len(blocks), err)
 		}
 
 		for _, write := range writes {
@@ -96,13 +116,13 @@ func (p *Pending) ApplyThrough(height common.BlockNum) error {
 			}
 		}
 
-		if err := tx.Where("block_number <= ?", height).Delete(&StagedWrite{}).Error; err != nil {
+		if err := tx.Where("block_hash IN ?", hashes).Delete(&StagedWrite{}).Error; err != nil {
 			return err
 		}
 
 		// Recorded with the promotion it describes: after a crash this is what
 		// says how much of the chain's state actually reached the tables.
-		return tx.Save(&AppliedHeight{ID: 1, Height: height}).Error
+		return tx.Save(&AppliedHeight{ID: 1, Height: highest}).Error
 	})
 }
 

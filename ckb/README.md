@@ -5,6 +5,7 @@ Proof of Buy 在 CKB 上的合约。链上布局与验证规则见
 
 ```
 contracts/
+  pob-budget/        预算 cell 的 type script（R3.1、R3.3~R3.5，已实现；R3.2 待 zk）
   pob-submission/    提交 cell 的 type script（R5.1，已实现）
   pob-vault/         mining addr 的 type script（R4.0，已实现）
   pob-spent/         已用代币的标记 type script（R4.1~R4.2，已实现）
@@ -22,7 +23,7 @@ tests/               合约的规则测试，独立 crate
 
 | 脚本 | 职责 | 规则 | 现状 |
 | --- | --- | --- | --- |
-| `budget_type_script` | 预算 cell：一次写定配平的分配表，含 zk 验证 | R3.1~R3.4 | 未实现 |
+| `budget_type_script` | 预算 cell：一次写定的分配表，含预付总额 | R3.1、R3.3~R3.5 | **已实现**（`contracts/pob-budget`） |
 | `mining_addr_type_script` | mining addr：钱流出时强制打标记 | R4.0 | **已实现**（`contracts/pob-vault`） |
 | `spent_type_script` | 已用代币 cell：标记只增不减，且回不去 mining addr | R4.1~R4.2 | **已实现**（`contracts/pob-spent`） |
 | `commit_type_script` | 提交 cell：只检查 data 是 32 字节 | R5.1~R5.2 | **已实现**（`contracts/pob-submission`） |
@@ -57,7 +58,7 @@ export AR_riscv64imac_unknown_none_elf=riscv64-elf-ar
 ## 编译与测试
 
 ```
-for c in pob-submission pob-vault pob-spent; do
+for c in pob-budget pob-submission pob-vault pob-spent; do
     cargo build --manifest-path contracts/$c/Cargo.toml \
         --target riscv64imac-unknown-none-elf --release
 done

@@ -223,6 +223,27 @@ The block hash is all that needs committing to: it already determines the whole
 block — height, `goal`, VRF output, parent link, every transaction — so binding
 any of those in alongside it would commit to the same facts twice.
 
+**Submitting a commitment takes no identity: anyone may submit one for any L2
+block.** This does not conflict with the identity binding of 6.2. That constraint
+governs *who bought the height* — payer, producer and signer must be one key, judged
+by L2 nodes from the block's own contents. Submitting a commitment only stamps a hash
+with which L1 block it sits in, and who applies the stamp does not change what is
+under it.
+
+Nor does a submitter have room to cheat. All it can put on L1 is
+`SHA256(block_hash || random)`, and `block_hash` already pins the entire block: it
+cannot alter any part of it, and a different block is a wholly different commitment.
+It can neither pass someone else's block off as its own — the producer is named in the
+block, bound there by the payment and the VRF — nor conjure a block from nothing,
+since producing a commitment is easy but producing a valid block that opens it is not.
+So the chain need not check a submitter's identity: there is nothing to check, and
+nothing to be gained by lying.
+
+The same block may therefore be submitted by several parties, each with its own
+`random`, appearing on L1 as several distinct commitments. They do not conflict: each
+is a legitimate anchor for that block, and whichever lands first is simply the earlier
+timestamp for it.
+
 **Two-phase submission exists to stop L1 miners from censoring L2 blocks.** An L2
 block's commitment has to be packed by an L1 block producer to reach the chain. Were
 it submitted in the clear, the L1 miner producing that block could see which L2 blocks
@@ -440,6 +461,11 @@ kind:
 - It has to succeed in every consecutive L1 block until the censored party gives up.
   Miss one block and the commitment is in, and resending costs nothing and can go on
   indefinitely.
+- And the resender need not be the original. Submitting a commitment takes no identity
+  (8.1), so anyone may submit on any block's behalf — the censored miner can resend
+  from a fresh address, and so can any other miner, or any bystanding full node. What
+  the censor must block is therefore not a set of addresses but every party on the
+  network willing to relay. The route of dropping by identity is closed here too.
 - It is plainly visible on chain — one height with a single submission included, while
   every other miner holds a signed commitment that never landed. Selective dropping can
   pass for a network hiccup; a blanket blockade cannot.

@@ -25,21 +25,23 @@ var ErrBudgetExceeded = errors.New("allocations exceed the prepaid total")
 // to every height and bid with money it never spent.
 type AllocationBudgetProof = string
 
-// VerifyAllocationBudget checks `proof` against the prepayment commitment `A`
-// and the allocation being claimed.
+// VerifyAllocationBudget checks `proof` against the prepaid total `A` and the
+// allocation being claimed.
 //
-// `prepayCommitment` is the Poseidon commitment to the prepaid total as
-// recorded on L1; `payment` carries the allocation this block is bidding with.
+// `prepaid` is the plaintext total the miner transferred to the mining addr,
+// as recorded on L1 — a capacity transfer is public, so it is not committed
+// (ckb_layout.md §3). `payment` carries the allocation this block is bidding
+// with.
 //
 // TODO: verify the Groth16 proof that the miner's allocations out of this
-// prepayment sum to no more than the committed total. The circuit does not
-// exist yet — `lib/zk/templates/` has deposit, withdraw, split and the two
-// settle circuits, but nothing for allocation budgets — so generating the
-// proof on the wallet side is blocked on the same work. Until then every
-// allocation is accepted, which means the budget ceiling is NOT enforced.
-func VerifyAllocationBudget(prepayCommitment string, proof AllocationBudgetProof, payment *L1Payment) error {
-	if prepayCommitment == "" {
-		return errors.New("prepayment commitment is missing")
+// prepayment sum to exactly `prepaid`. The circuit does not exist yet —
+// `lib/zk/templates/` has deposit, withdraw, split and the two settle
+// circuits, but nothing for allocation budgets — so generating the proof on
+// the wallet side is blocked on the same work. Until then every allocation is
+// accepted, which means the budget ceiling is NOT enforced.
+func VerifyAllocationBudget(prepaid *big.Int, proof AllocationBudgetProof, payment *L1Payment) error {
+	if prepaid == nil || prepaid.Sign() <= 0 {
+		return errors.New("prepaid total is missing")
 	}
 	if payment == nil || payment.Amount == nil {
 		return errors.New("allocation is missing")
@@ -48,12 +50,12 @@ func VerifyAllocationBudget(prepayCommitment string, proof AllocationBudgetProof
 	if proof == "" {
 		// Loud on purpose: this is the one check standing between the chain
 		// and a miner spending the same prepayment at every height.
-		logrus.Warnf("PoB: allocation at %s carries no budget proof, accepting it unchecked (TODO)",
-			shortHex(prepayCommitment))
+		logrus.Warnf("PoB: allocation against a prepaid total of %s carries no "+
+			"budget proof, accepting it unchecked (TODO)", prepaid)
 		return nil
 	}
 
-	_ = proof // TODO: Groth16 verification against `prepayCommitment`
+	_ = proof // TODO: Groth16 verification against `prepaid`
 	return nil
 }
 

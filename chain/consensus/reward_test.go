@@ -52,10 +52,14 @@ func TestCheckBudgetCeiling(t *testing.T) {
 func TestVerifyAllocationBudgetRejectsMissingInputs(t *testing.T) {
 	payment := NewL1Payment("0xprepay", big.NewInt(500), strings.Repeat("a1", 32), "minerA", "")
 
-	if err := VerifyAllocationBudget("", "", payment); err == nil {
-		t.Fatal("a missing prepayment commitment must be rejected")
+	if err := VerifyAllocationBudget(nil, "", payment); err == nil {
+		t.Fatal("a missing prepaid total must be rejected")
 	}
-	if err := VerifyAllocationBudget("deadbeef", "", nil); err == nil {
+	// Zero funds nothing, so it is refused rather than read as "no ceiling".
+	if err := VerifyAllocationBudget(big.NewInt(0), "", payment); err == nil {
+		t.Fatal("a prepaid total of zero must be rejected")
+	}
+	if err := VerifyAllocationBudget(big.NewInt(1000), "", nil); err == nil {
 		t.Fatal("a missing allocation must be rejected")
 	}
 }

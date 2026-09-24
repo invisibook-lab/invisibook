@@ -324,7 +324,7 @@ func (ps *PaymentServer) confirmOnL1(ctx context.Context, inputs []*L1PaymentInp
 	var rejected []RejectedDeclaration
 	for _, input := range inputs {
 		payment := NewL1Payment(input.TxHash, input.Amount, input.Random, ps.minerPubkey, input.BudgetProof)
-		if err := ConfirmPayment(ctx, ps.verifier, payment, ps.minerPubkey, input.BlockHeight); err != nil {
+		if _, err := ConfirmPayment(ctx, ps.verifier, payment, ps.minerPubkey, input.BlockHeight); err != nil {
 			rejected = append(rejected, RejectedDeclaration{
 				BlockHeight: input.BlockHeight,
 				Error:       err.Error(),
@@ -391,20 +391,44 @@ func NewL1Payment(txHash string, amount *big.Int, random, minerPubkey string, bu
 	}
 }
 
+// Allocation is one entry of a miner's budget table as recorded on L1.
+//
+// It is a struct rather than a pair of return values because the checks that
+// read it are still being added: V4 needs the L1 block number today, and
+// growing the tuple would churn every implementation and call site each time
+// another field is needed.
+type Allocation struct {
+	// Commitment is the Poseidon commitment to (amount, random) the miner
+	// posted for this height, as a 64-char hex string.
+	Commitment string
+	// L1BlockNumber is the L1 block the entry was written in.
+	//
+	// V4 compares it: an allocation must be at least 24 L1 blocks older than
+	// the L1 block holding the commitment of the L2 block that spends it.
+	// Without that gap a miner could post the allocation on an L1 fork that
+	// has not converged yet, and L1's uncertainty would spread to L2. R3.1 on
+	// chain only makes the table immutable once written — that it was written
+	// early enough can only be checked here.
+	L1BlockNumber uint64
+}
+
 // L1PaymentVerifier resolves allocations recorded on L1.
 // Implement this interface for each supported L1 (e.g. CKB).
 type L1PaymentVerifier interface {
-	// FetchAllocation returns the Poseidon commitment the miner posted on L1
-	// allocating part of prepayment `txHash` to L2 block `height`, as a
-	// 64-char hex string. It returns an error wrapping ErrPaymentNotFound when
-	// no such allocation exists.
-	FetchAllocation(ctx context.Context, txHash, minerPubkey string, height common.BlockNum) (string, error)
+	// FetchAllocation returns the allocation the miner posted on L1 drawing
+	// part of prepayment `txHash` for L2 block `height`. It returns an error
+	// wrapping ErrPaymentNotFound when no such allocation exists.
+	FetchAllocation(ctx context.Context, txHash, minerPubkey string, height common.BlockNum) (*Allocation, error)
 
-	// FetchPrepayment returns the Poseidon commitment to the total the miner
-	// prepaid in `txHash`, the ceiling every allocation drawn from it must
+	// FetchPrepayment returns the plaintext total the miner paid to the mining
+	// addr in `txHash`, the ceiling every allocation drawn from it must
 	// respect. It returns an error wrapping ErrPaymentNotFound when the
 	// transaction holds no prepayment by this miner.
-	FetchPrepayment(ctx context.Context, txHash, minerPubkey string) (string, error)
+	//
+	// Plaintext, not a commitment: a capacity transfer is public on CKB, so
+	// the total cannot be hidden and there is no reason to try. Only the
+	// per-height amounts are committed (ckb_layout.md §3).
+	FetchPrepayment(ctx context.Context, txHash, minerPubkey string) (*big.Int, error)
 }
 
 // ConfirmPayment checks a claimed L1 payment against L1: that the claim is
@@ -425,35 +449,39 @@ type L1PaymentVerifier interface {
 //   - POST /pay_l1_token, before a declaration enters the payment book
 //   - StartBlock, for each candidate block received from another miner
 //
+// It returns the allocation as recorded on L1. Callers that go on to check V4
+// need its L1 block number, and handing it back here spares them a second
+// round-trip to fetch what this call already read.
+//
 // `verifier` must not be nil; `minerPubkey` is the hex-encoded compressed
 // public key of the block producer the payment has to belong to; `height` is
 // the L2 height the payment is meant to buy.
-func ConfirmPayment(ctx context.Context, verifier L1PaymentVerifier, payment *L1Payment, minerPubkey string, height common.BlockNum) error {
+func ConfirmPayment(ctx context.Context, verifier L1PaymentVerifier, payment *L1Payment, minerPubkey string, height common.BlockNum) (*Allocation, error) {
 	if payment == nil {
-		return errors.New("payment is missing")
+		return nil, errors.New("payment is missing")
 	}
 	if payment.Amount == nil {
-		return errors.New("payment amount is missing")
+		return nil, errors.New("payment amount is missing")
 	}
 	// A payment made by some other identity proves nothing about this block
 	// producer, so a miner cannot claim someone else's transaction.
 	if payment.MinerPubkey != minerPubkey {
-		return fmt.Errorf("payment is bound to %s, not to the block producer %s",
+		return nil, fmt.Errorf("payment is bound to %s, not to the block producer %s",
 			payment.MinerPubkey, minerPubkey)
 	}
 
-	committed, err := verifier.FetchAllocation(ctx, payment.TxHash, minerPubkey, height)
+	alloc, err := verifier.FetchAllocation(ctx, payment.TxHash, minerPubkey, height)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	opening, err := PoseidonCommit(payment.Amount, payment.Random)
 	if err != nil {
-		return fmt.Errorf("recomputing the allocation commitment: %w", err)
+		return nil, fmt.Errorf("recomputing the allocation commitment: %w", err)
 	}
-	if opening != committed {
-		return fmt.Errorf("%w: height %d commits to %s, but the declared amount opens to %s",
-			ErrCommitmentMismatch, height, committed, opening)
+	if opening != alloc.Commitment {
+		return nil, fmt.Errorf("%w: height %d commits to %s, but the declared amount opens to %s",
+			ErrCommitmentMismatch, height, alloc.Commitment, opening)
 	}
 
 	// An allocation that opens correctly can still be money the miner does not
@@ -461,12 +489,12 @@ func ConfirmPayment(ctx context.Context, verifier L1PaymentVerifier, payment *L1
 	// from. That is what the budget proof is for.
 	prepaid, err := verifier.FetchPrepayment(ctx, payment.TxHash, minerPubkey)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := VerifyAllocationBudget(prepaid, payment.BudgetProof, payment); err != nil {
-		return fmt.Errorf("allocation budget: %w", err)
+		return nil, fmt.Errorf("allocation budget: %w", err)
 	}
-	return nil
+	return alloc, nil
 }
 
 // MockL1PaymentVerifier stands in for a real L1 client in Phase 1 / testing.
@@ -474,11 +502,17 @@ func ConfirmPayment(ctx context.Context, verifier L1PaymentVerifier, payment *L1
 // a real client would look them up.
 type MockL1PaymentVerifier struct {
 	mu sync.Mutex
-	// allocations maps (tx hash, miner, height) to a commitment hex string.
-	allocations map[string]string
-	// prepayments maps (tx hash, miner) to the commitment of the prepaid total.
-	prepayments map[string]string
+	// allocations maps (tx hash, miner, height) to the entry recorded on L1.
+	allocations map[string]*Allocation
+	// prepayments maps (tx hash, miner) to the plaintext prepaid total.
+	prepayments map[string]*big.Int
 }
+
+// mockDefaultPrepaid is what FetchPrepayment reports for a miner that has
+// allocations but no prepayment seeded: a total large enough that any
+// allocation a test sets up fits inside it, which is what such a test means
+// by leaving the prepayment unspecified.
+var mockDefaultPrepaid = new(big.Int).SetUint64(1 << 62)
 
 // allocationKey builds the lookup key for one on-L1 allocation.
 func allocationKey(txHash, minerPubkey string, height common.BlockNum) string {
@@ -486,9 +520,9 @@ func allocationKey(txHash, minerPubkey string, height common.BlockNum) string {
 }
 
 // Allocate records the commitment for a plaintext (amount, random) pair,
-// standing in for the miner having posted that allocation on L1.
-// `randomHex` must be 64 hex chars.
-func (m *MockL1PaymentVerifier) Allocate(txHash, minerPubkey string, height common.BlockNum, amount *big.Int, randomHex string) error {
+// standing in for the miner having posted that allocation on L1 in block
+// `l1Block`. `randomHex` must be 64 hex chars.
+func (m *MockL1PaymentVerifier) Allocate(txHash, minerPubkey string, height common.BlockNum, amount *big.Int, randomHex string, l1Block uint64) error {
 	commitment, err := PoseidonCommit(amount, randomHex)
 	if err != nil {
 		return err
@@ -496,56 +530,61 @@ func (m *MockL1PaymentVerifier) Allocate(txHash, minerPubkey string, height comm
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.allocations == nil {
-		m.allocations = make(map[string]string)
+		m.allocations = make(map[string]*Allocation)
 	}
-	m.allocations[allocationKey(txHash, minerPubkey, height)] = commitment
+	m.allocations[allocationKey(txHash, minerPubkey, height)] = &Allocation{
+		Commitment:    commitment,
+		L1BlockNumber: l1Block,
+	}
 	return nil
 }
 
-// Prepay records the commitment to a miner's prepaid total, standing in for
-// the miner having made that prepayment on L1. `randomHex` must be 64 hex
-// chars.
-func (m *MockL1PaymentVerifier) Prepay(txHash, minerPubkey string, total *big.Int, randomHex string) error {
-	commitment, err := PoseidonCommit(total, randomHex)
-	if err != nil {
-		return err
+// Prepay records a miner's prepaid total, standing in for the miner having
+// transferred that much to the mining addr on L1. `total` must not be nil.
+func (m *MockL1PaymentVerifier) Prepay(txHash, minerPubkey string, total *big.Int) error {
+	if total == nil {
+		return errors.New("prepaid total is missing")
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.prepayments == nil {
-		m.prepayments = make(map[string]string)
+		m.prepayments = make(map[string]*big.Int)
 	}
-	m.prepayments[txHash+"/"+minerPubkey] = commitment
+	m.prepayments[txHash+"/"+minerPubkey] = new(big.Int).Set(total)
 	return nil
 }
 
-// FetchPrepayment returns the recorded prepayment commitment. A mock with no
-// prepayment recorded for a miner that does have allocations reports the
-// allocation's own commitment, so tests that only care about allocations do
-// not have to seed both.
-func (m *MockL1PaymentVerifier) FetchPrepayment(_ context.Context, txHash, minerPubkey string) (string, error) {
+// FetchPrepayment returns the recorded prepaid total.
+//
+// A miner with allocations but no recorded prepayment falls back to
+// mockDefaultPrepaid, so a test that only cares about allocations need not
+// seed both. The fallback is deliberately large: it stands for "some total
+// this allocation fits inside", which is exactly what such a test assumes.
+func (m *MockL1PaymentVerifier) FetchPrepayment(_ context.Context, txHash, minerPubkey string) (*big.Int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if commitment, ok := m.prepayments[txHash+"/"+minerPubkey]; ok {
-		return commitment, nil
+	if total, ok := m.prepayments[txHash+"/"+minerPubkey]; ok {
+		return new(big.Int).Set(total), nil
 	}
-	for key, commitment := range m.allocations {
+	for key := range m.allocations {
 		if strings.HasPrefix(key, txHash+"/"+minerPubkey+"/") {
-			return commitment, nil
+			return new(big.Int).Set(mockDefaultPrepaid), nil
 		}
 	}
-	return "", fmt.Errorf("%w: no prepayment in tx_hash=%s", ErrPaymentNotFound, txHash)
+	return nil, fmt.Errorf("%w: no prepayment in tx_hash=%s", ErrPaymentNotFound, txHash)
 }
 
-// FetchAllocation returns the recorded commitment, or ErrPaymentNotFound.
-func (m *MockL1PaymentVerifier) FetchAllocation(_ context.Context, txHash, minerPubkey string, height common.BlockNum) (string, error) {
+// FetchAllocation returns the recorded allocation, or ErrPaymentNotFound.
+func (m *MockL1PaymentVerifier) FetchAllocation(_ context.Context, txHash, minerPubkey string, height common.BlockNum) (*Allocation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	commitment, ok := m.allocations[allocationKey(txHash, minerPubkey, height)]
+	alloc, ok := m.allocations[allocationKey(txHash, minerPubkey, height)]
 	if !ok {
-		return "", fmt.Errorf("%w: tx_hash=%s height=%d", ErrPaymentNotFound, txHash, height)
+		return nil, fmt.Errorf("%w: tx_hash=%s height=%d", ErrPaymentNotFound, txHash, height)
 	}
-	return commitment, nil
+	// Copied, so a caller cannot reach back into the mock's own table.
+	copied := *alloc
+	return &copied, nil
 }
 
 // MockL1Payment creates a placeholder payment with a randomly generated tx

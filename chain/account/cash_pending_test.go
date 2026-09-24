@@ -81,8 +81,8 @@ func TestDropFromUndoesABlock(t *testing.T) {
 	if err := acc.CreateCash(cashAt("c1", Active)); err != nil {
 		t.Fatalf("CreateCash: %v", err)
 	}
-	if err := pending.ApplyThrough(10); err != nil {
-		t.Fatalf("ApplyThrough: %v", err)
+	if err := pending.ApplyBlocks([]store.Block{{Height: 10, Hash: "0xh10"}}); err != nil {
+		t.Fatalf("ApplyBlocks: %v", err)
 	}
 
 	// Height 11 locks it, and is the height L1 rules against.
@@ -117,8 +117,8 @@ func TestDropFromLeavesSettledHeightsAlone(t *testing.T) {
 
 	pending.SetBlock(10, "0xh10")
 	acc.CreateCash(cashAt("settled", Active))
-	if err := pending.ApplyThrough(10); err != nil {
-		t.Fatalf("ApplyThrough: %v", err)
+	if err := pending.ApplyBlocks([]store.Block{{Height: 10, Hash: "0xh10"}}); err != nil {
+		t.Fatalf("ApplyBlocks: %v", err)
 	}
 
 	pending.SetBlock(11, "0xh11")
@@ -139,9 +139,11 @@ func TestDropFromLeavesSettledHeightsAlone(t *testing.T) {
 	}
 }
 
-// TestApplyThroughMakesWritesDurable: settling a height moves its writes into
-// the cash table and clears the staging behind them.
-func TestApplyThroughMakesWritesDurable(t *testing.T) {
+// TestApplyBlocksMakesWritesDurable: settling a run of blocks moves their
+// writes into the cash table and clears the staging behind them. The cash is
+// created by one block and locked by the next, so this also covers a row two
+// blocks touched in turn ending in the state the later one left it.
+func TestApplyBlocksMakesWritesDurable(t *testing.T) {
 	acc, pending, db := newTestAccount(t)
 
 	pending.SetBlock(10, "0xh10")
@@ -149,8 +151,11 @@ func TestApplyThroughMakesWritesDurable(t *testing.T) {
 	pending.SetBlock(11, "0xh11")
 	acc.LockCash([]string{"c1"}, "order-1")
 
-	if err := pending.ApplyThrough(11); err != nil {
-		t.Fatalf("ApplyThrough: %v", err)
+	if err := pending.ApplyBlocks([]store.Block{
+		{Height: 10, Hash: "0xh10"},
+		{Height: 11, Hash: "0xh11"},
+	}); err != nil {
+		t.Fatalf("ApplyBlocks: %v", err)
 	}
 
 	var row CashScheme
@@ -168,9 +173,9 @@ func TestApplyThroughMakesWritesDurable(t *testing.T) {
 	}
 }
 
-// TestApplyThroughKeepsLaterHeightsStaged: settling one height must not
+// TestApplyBlocksKeepsLaterHeightsStaged: settling one height must not
 // promote the heights above it, which L1 has not ruled on yet.
-func TestApplyThroughKeepsLaterHeightsStaged(t *testing.T) {
+func TestApplyBlocksKeepsLaterHeightsStaged(t *testing.T) {
 	acc, pending, db := newTestAccount(t)
 
 	pending.SetBlock(10, "0xh10")
@@ -178,8 +183,8 @@ func TestApplyThroughKeepsLaterHeightsStaged(t *testing.T) {
 	pending.SetBlock(11, "0xh11")
 	acc.CreateCash(cashAt("c2", Active))
 
-	if err := pending.ApplyThrough(10); err != nil {
-		t.Fatalf("ApplyThrough: %v", err)
+	if err := pending.ApplyBlocks([]store.Block{{Height: 10, Hash: "0xh10"}}); err != nil {
+		t.Fatalf("ApplyBlocks: %v", err)
 	}
 
 	if n := settledCount(t, db); n != 1 {
@@ -199,8 +204,8 @@ func TestSetQueryMergesBothViews(t *testing.T) {
 	pending.SetBlock(10, "0xh10")
 	acc.CreateCash(cashAt("stays", Active))
 	acc.CreateCash(cashAt("gets-locked", Active))
-	if err := pending.ApplyThrough(10); err != nil {
-		t.Fatalf("ApplyThrough: %v", err)
+	if err := pending.ApplyBlocks([]store.Block{{Height: 10, Hash: "0xh10"}}); err != nil {
+		t.Fatalf("ApplyBlocks: %v", err)
 	}
 
 	pending.SetBlock(11, "0xh11")
@@ -237,8 +242,8 @@ func TestAppliedHeightRecordsPromotion(t *testing.T) {
 
 	pending.SetBlock(10, "0xh10")
 	acc.CreateCash(cashAt("c1", Active))
-	if err := pending.ApplyThrough(10); err != nil {
-		t.Fatalf("ApplyThrough: %v", err)
+	if err := pending.ApplyBlocks([]store.Block{{Height: 10, Hash: "0xh10"}}); err != nil {
+		t.Fatalf("ApplyBlocks: %v", err)
 	}
 
 	if h, err := pending.AppliedHeight(); err != nil || h != 10 {
@@ -253,7 +258,7 @@ func TestAppliedHeightSurvivesReopen(t *testing.T) {
 
 	pending.SetBlock(10, "0xh10")
 	acc.CreateCash(cashAt("c1", Active))
-	pending.ApplyThrough(10)
+	pending.ApplyBlocks([]store.Block{{Height: 10, Hash: "0xh10"}})
 
 	// A second handle onto the same database stands in for a restart.
 	restarted := store.NewPending(db)
@@ -273,5 +278,47 @@ func TestAppliedHeightSurvivesReopen(t *testing.T) {
 	}
 	if !acc.CashExists("c1") {
 		t.Fatal("promoted state must survive a restart")
+	}
+}
+
+// Two blocks can share a height — one this node produced or adopted, one the
+// synchronizer fetched — and both leave staged rows behind. Promoting the
+// canonical one must not carry the rival's writes into the tables with it.
+// This is the whole reason promotion goes by block rather than by height, and
+// the step has no inverse: once those rows are in, they cannot be taken back.
+func TestApplyBlocksLeavesARivalAtTheSameHeightStaged(t *testing.T) {
+	acc, pending, db := newTestAccount(t)
+
+	// The block this node follows, at height 10.
+	pending.SetBlock(10, "0xcanonical")
+	if err := acc.CreateCash(cashAt("mine", Active)); err != nil {
+		t.Fatalf("CreateCash: %v", err)
+	}
+	// A rival at the very same height, executed just the same.
+	pending.SetBlock(10, "0xrival")
+	if err := acc.CreateCash(cashAt("theirs", Active)); err != nil {
+		t.Fatalf("CreateCash: %v", err)
+	}
+
+	if err := pending.ApplyBlocks([]store.Block{{Height: 10, Hash: "0xcanonical"}}); err != nil {
+		t.Fatalf("ApplyBlocks: %v", err)
+	}
+
+	if n := settledCount(t, db); n != 1 {
+		t.Fatalf("settled rows = %d, want only the canonical block's", n)
+	}
+	if err := db.First(&CashScheme{}, "cash_id = ?", "mine").Error; err != nil {
+		t.Fatalf("the canonical block's cash must be settled: %v", err)
+	}
+	if err := db.First(&CashScheme{}, "cash_id = ?", "theirs").Error; err == nil {
+		t.Fatal("the rival block's cash must not reach the table")
+	}
+
+	// The rival's rows stay staged rather than being silently dropped: it is
+	// DropFrom's job to discard them, once the height is ruled on.
+	var staged int64
+	db.Model(&store.StagedWrite{}).Where("block_hash = ?", "0xrival").Count(&staged)
+	if staged == 0 {
+		t.Fatal("the rival's staged rows must remain for DropFrom to discard")
 	}
 }

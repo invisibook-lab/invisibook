@@ -72,7 +72,7 @@ L2 自己给不了自己的东西：一份不可篡改、不可回溯修改的�
 实质规则的地方——白皮书 §7 的整套成本模型都压在它身上。
 
 ```
-lock    矿工的 secp256k1 key（只有本人能改）
+lock    secp256k1_blake160_sighash_all，args = blake160(矿工出块公钥)（R3.5）
 type    budget_type_script
 data
     prepaid       u64                     预付总额，单位 shannon
@@ -106,12 +106,33 @@ VRF；若矿工能在算完 VRF、发现 goal 不够高之后回头改大承诺�
 证明**不能**省掉对每个 `amount` 的范围约束：BN254 的标量域会回绕，不约束大小的话，
 一组巨大的 amount 完全可以模 p 之后恰好等于 `prepaid`，等式照样成立而钱凭空多出来。
 
-**R3.3 `prepaid` 必须等于本次真实转入的容量。** 即输出的这个 cell 的 capacity 减去
-它自身占用的字节数。写一个比实际付款大的数就等于凭空印钱。
+**R3.3 `prepaid` 必须等于同一笔交易中转入 mining addr 的容量。** 创建预算 cell 的
+那笔交易里，要有一个 lock 等于 mining addr 的输出，其 capacity 恰好是 `prepaid`。
+写一个比实际付款大的数就等于凭空印钱。
+
+**钱不留在预算 cell 里。** 这一点容易看错。矿工付款的去向是 mining addr（第 4 节的
+资金流第一段），预算 cell 只存那张表；它自己的 capacity 是占用链上存储所要锁定的
+容量，连同这笔交易的手续费，都是矿工在 `prepaid` 之外自行承担的链上成本——押金在
+把 cell 花掉时收得回来（R3.1），手续费付给 CKB 矿工。把这两者与 `prepaid` 混为一谈，
+就会以为钱锁在 cell 里，而它早已不可追回。
 
 **R3.4 预付款不得来自已用代币。** 交易的 inputs 里不能有带 `spent_type_script` 的
 cell（见第 4 节）。少了这一条，第 4 节的整套标记形同虚设：项目方把代币从 mining addr
 花出去、打上标记，转头就能拿这些被标记的代币来写自己的预算 cell 继续挖矿。
+
+**R3.5 lock 必须是标准 sighash lock。** 预算 cell 的 lock 只能是
+`secp256k1_blake160_sighash_all`，其 args 是所有者公钥的 blake160。
+
+这一条是第 6 节 V7 第一项的前提。那一项要求 L2 区块的 `miner_pubkey` 与这个 cell 的
+所有者是同一把密钥；若 lock 的形式不固定——换成多签，或某个自定义脚本——args 里根本
+不存在"单一公钥"这回事，"同一把密钥"也就没有可比对的落点。
+
+**链上只能管到形式，管不了身份。** CKB 看不见 L2 区块，不知道出块公钥是谁，所以
+"args 是否等于 `blake160(miner_pubkey)`"只能由 L2 节点去比。链上把 lock 的形式定死，
+链下那一比才成立——两边缺一不可。
+
+要绑的是**这张表归谁用**，不是谁付的钱。出钱的可以另有其人：A 自愿掏钱、把预算 cell
+的 lock 设成 B 的，那是 A 的授权；冒领指的是 B 拿 A 的表去出块，而那由 lock 挡住。
 
 早前设想过一个 `cleared_below` 水位，用来清理已经用过的旧条目。`== prepaid` 之下它
 没有存在理由了：整张表一次写定、永不修改，"清理"只剩把整个 cell 花掉这一种形式，
@@ -266,9 +287,18 @@ L1 交出来的只是"哪些承诺在第几号区块上"。把它变成"这个�
 
 ```
 l2_block_hash, random                       打开 L1 上的区块承诺
+l1_block_hash, tx_idx                        这笔承诺落在 L1 的哪里
 amount, payment_random                       打开预算 cell 里的支付承诺
 vrf_output, vrf_proof, miner_pubkey, block_sig, prev_hash
 ```
+
+`l1_block_hash` 与 `tx_idx` 不是冗余信息，它们扛两件事：
+
+- **定位。** 没有它们，验证者只能扫遍 L1 去找哪个提交 cell 的 data 等于这串承诺，
+  代价是 O(L1 链长)。有了它们，取块、取交易、比对，三步而已。
+- **定时。** §8.2 识别"事后买出来的分叉"靠的就是每笔承诺**何时**上链。位置给出时间
+  锚点，而用哈希而非高度还顺带检测了重组：哈希不在当前 L1 主链上，就说明这笔承诺已
+  随重组消失，该分支上的这个区块也就不再算数。
 
 开启值从不上 L1。它必须与 L2 区块一起持久化，新节点同步时要能从对等节点一并取到
 ——丢了开启值，那个高度的赢家就无从复原。
@@ -277,8 +307,14 @@ vrf_output, vrf_proof, miner_pubkey, block_sig, prev_hash
 
 收到一组开启值，节点依次检查：
 
-**V1 承诺存在且已入块。** 重算 `SHA256(l2_block_hash || random)`，必须等于 L1 上
-某个提交 cell 的 data。记下它所在的 L1 区块号。
+**V1 承诺存在且已入块。** 按 `l1_block_hash` 取出那个 L1 区块（取不到，或它不在当前
+L1 主链上，都判不通过），按 `tx_idx` 取出那笔交易，在它创建的 cell 里找出带
+`commit_type_script` 的那个，要求其 data 等于重算的 `SHA256(l2_block_hash || random)`。
+
+一笔交易理论上可以创建不止一个提交 cell，所以定位到交易之后仍要在它的 outputs 里找
+匹配的那个——这是一次极短的遍历，不值得再为它引入一个 `output_idx` 字段。
+
+记下该 L1 区块的高度：它是这个区块"何时被锚定"的凭据，§8.2 靠它识别事后伪造的分叉。
 
 **V2 分支连续。** 这个区块必须挂在一条从分叉点起逐高度相接、中间没有缺口的链上。
 缺一个高度，整条分支就失去参选资格——不能把各个高度上得分最高的区块挑出来拼成
@@ -303,6 +339,14 @@ vrf_output, vrf_proof, miner_pubkey, block_sig, prev_hash
 
 **V7 身份一致。** 预算 cell 的 lock args、`miner_pubkey`、`block_sig` 的签名者是
 同一把密钥。矿工不能拿别人的支付来为自己出价。
+
+比对方式是 `blake160(miner_pubkey) == 预算 cell 的 lock args`——CKB 标准 lock 的
+args 是公钥的 blake160（20 字节），不是压缩公钥本身，与 `miner_pubkey` 和 `block_sig`
+那两项直接比公钥不同。lock 的形式由 R3.1 那一节的 R3.5 定死，否则这一比无从下手。
+
+**这一项是整套支付校验的地基，不是补充。** 少了它，V3 拿来比对的那个承诺就是矿工自己
+给的：他编一个承诺，再配一套能打开它的 `(amount, payment_random)`，Poseidon 照样对得
+上，`amount` 随他写多大，`goal` 也就随之膨胀。V3 会退化成"自述与自述一致"。
 
 **V8 父链接属实。** `prev_hash` 必须是本节点认定的 `l2_height - 1` 的区块哈希。
 这一项以前明确标注为"链上验不了"，现在整份清单都在链下，它与其他项没有区别了。
@@ -353,16 +397,23 @@ L1 在这里堵的是另一条路：单看得分，"当时就存在的链"与"�
 ### L1PaymentVerifier
 
 ```go
-FetchPrepayment(ctx, txHash, minerPubkey) (commitment string, err error)
-FetchAllocation(ctx, txHash, minerPubkey, height) (commitment string, err error)
+FetchPrepayment(ctx, txHash, minerPubkey) (prepaid *big.Int, err error)
+FetchAllocation(ctx, txHash, minerPubkey, height) (*Allocation, error)
 ```
 
-读该矿工的预算 cell，分别返回 `prepaid` 与 `allocations` 中 `height` 对应的承诺，
-查不到返回 `ErrPaymentNotFound`。
+读该矿工由 `txHash` 创建的那个预算 cell，分别返回**明文**的 `prepaid` 与
+`allocations` 中 `height` 对应的 Poseidon 承诺，查不到返回 `ErrPaymentNotFound`。
 
-> 两处要改：形参 `txHash`（预付交易哈希）应换成按 `minerPubkey` 定位预算 cell，
-> `txHash` 随之取消；`FetchAllocation` 还要返回**写入该条目的 L1 区块号**，V4 要
-> 用它判断支付承诺是否写得够早，现有签名表达不了。
+总额明文、每条出价是承诺，两者形态不同，见第 3 节：容量转移本就公开，`prepaid` 藏
+不住也不必藏；要藏的是每个高度的 `amount`。
+
+**`txHash` 不能省。** 一个矿工可以有多个预算 cell——想追加预算就再建一个（第 3
+节）——只凭 `minerPubkey` 定位不唯一，`txHash` 指明用的是哪一笔预付。
+
+> 还差的是 V7 的第一项：核验这个预算 cell 的 lock args 确实属于 `minerPubkey`。
+> 目前 `minerPubkey` 只是查询用的键，等于矿工自报家门；真实客户端必须反过来，按它
+> 去定位 cell 并比对 lock args（CKB 标准 lock 的 args 是公钥的 blake160，不是压缩
+> 公钥本身）。少了这一步，V3 比对的承诺就是矿工自己给的，等于自证。
 
 ### L1CommitmentSubmitter（已改）
 

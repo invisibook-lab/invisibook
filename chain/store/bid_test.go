@@ -107,6 +107,48 @@ func TestBidsRecordSubmissionWithoutABid(t *testing.T) {
 	}
 }
 
+func TestBidsRecordLocation(t *testing.T) {
+	bids := newBids(t)
+	bid := sampleBid()
+	if err := bids.Save(bid); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := bids.RecordSubmission(bid.BlockHash, "0xl1tx"); err != nil {
+		t.Fatalf("RecordSubmission: %v", err)
+	}
+
+	if err := bids.RecordLocation(bid.BlockHash, "0xl1block", 7); err != nil {
+		t.Fatalf("RecordLocation: %v", err)
+	}
+
+	got, err := bids.Get(bid.BlockHash)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.L1BlockHash != "0xl1block" || got.TxIdx != 7 {
+		t.Fatalf("location = %q/%d, want %q/7", got.L1BlockHash, got.TxIdx, "0xl1block")
+	}
+	// The opening is the one thing that cannot be reconstructed, and the two
+	// facts are written at different moments — so the later write must not
+	// disturb the earlier one.
+	if got.Random != bid.Random || got.Commitment != bid.Commitment {
+		t.Fatalf("recording the location disturbed the opening: %+v", got)
+	}
+	if got.L1TxHash != "0xl1tx" {
+		t.Fatalf("recording the location disturbed the tx hash: %q", got.L1TxHash)
+	}
+}
+
+// A location for a block this node never bid on is a bug worth reporting, not
+// a row to conjure up.
+func TestBidsRecordLocationWithoutABid(t *testing.T) {
+	bids := newBids(t)
+
+	if err := bids.RecordLocation("0xunknown", "0xl1block", 0); err == nil {
+		t.Fatal("recording a location for an unsaved block must fail")
+	}
+}
+
 // TestBidsSaveReplacesTheSameBlock: a resubmission path must not end up with
 // two openings for one block, which would leave it ambiguous which one the
 // commitment on L1 corresponds to.
