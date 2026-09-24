@@ -155,8 +155,14 @@ func (p *ProofOfBuy) catchUpReveals() {
 // Three things can be out of place, and all three are idempotent to fix:
 //
 //   - A block whose state was promoted but whose finalized marker was not
-//     written — the crash window between the two. Marking it finalized costs
-//     nothing: L1 had already ruled for it before the promotion ran.
+//     written — the crash window between the two. Nothing is done about it
+//     here. The finality worker recomputes the canonical chain from the block
+//     tree, the openings and L1's record, and marks whatever that shows to be
+//     settled; a block missing its marker simply gets one on the next pass.
+//     Recovering it by height instead would mean picking one block out of a
+//     height that may hold several, and marking the wrong one would point
+//     `LastFinalized` at a branch this node does not follow — every later
+//     enumeration would start from there.
 //   - Staged rows of blocks above the boundary. The finality worker's queue
 //     lives in memory, so after a restart nothing would ever rule on them; left
 //     alone they would overlay every read forever.
@@ -167,8 +173,6 @@ func (p *ProofOfBuy) reconcile() {
 		logrus.Errorf("PoB: reading the promoted height: %v — skipping reconciliation", err)
 		return
 	}
-
-	p.finalizeThrough(applied)
 
 	if err := p.pending.DropFrom(applied + 1); err != nil {
 		logrus.Errorf("PoB: dropping staged writes above height=%d: %v", applied, err)
@@ -183,33 +187,6 @@ func (p *ProofOfBuy) reconcile() {
 	}
 
 	logrus.Infof("PoB: reconciled to height=%d", applied)
-}
-
-// finalizeThrough marks every block up to `height` finalized, catching up the
-// chain when a crash landed between promoting a block's state and recording
-// that it was final.
-func (p *ProofOfBuy) finalizeThrough(height common.BlockNum) {
-	for h := common.BlockNum(1); h <= height; h++ {
-		// Asked per height rather than from LastFinalized: that reads an
-		// in-memory pointer the kernel has not populated this early, so on a
-		// fresh process it reports nothing finalized and every height would be
-		// marked again.
-		if done, err := p.Chain.GetFinalizedCompactBlockByHeight(h); err == nil && done != nil {
-			continue
-		}
-
-		block, err := p.Chain.GetBlockByHeight(h)
-		if err != nil {
-			logrus.Errorf("PoB: reading block %d to finalize it: %v", h, err)
-			return
-		}
-		if err := p.Chain.Finalize(block); err != nil {
-			logrus.Errorf("PoB: finalizing block %d: %v", h, err)
-			return
-		}
-		p.State.FinalizeBlock(block)
-		logrus.Infof("PoB: marked height=%d finalized, its state was already promoted", h)
-	}
 }
 
 // blockListener subscribes to the P2P block topic and forwards
