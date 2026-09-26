@@ -69,6 +69,24 @@ cargo test --manifest-path tests/Cargo.toml
 `--nocapture` 可以顺带读出每个脚本的实测 cycle 数——`verify_tx` 本来就返回它，不需要
 单独的度量程序。
 
+## 部署
+
+四个脚本逐链部署，没有固定地址，devnet 每次重置都要重来一遍。`chain/cmd/ckb-deploy`
+把编译好的四个二进制发成一笔交易里的四个 code cell，并把 L2 节点要的整段 `[ckb]`
+配置打到 stdout：
+
+```
+cd chain && go run ./cmd/ckb-deploy \
+    -rpc http://127.0.0.1:8114 -network devnet \
+    -sighash-dep 0x<devnet 创世交易> \
+    -mining-addr ckt1... \
+    -key-file ./devnet-miner.key >> cfg/core.toml
+```
+
+四个一笔发完，是因为它们本就是一套——彼此用对方的哈希做参数，只有一半的链没有意义。
+`hash_type` 取 `data1`，code hash 就是二进制本身的哈希，节点跑的脚本由配置唯一确定，
+不存在被换掉的可能。
+
 ## 一条会咬人的限制
 
 CKB-VM **不执行 RISC-V 的原子指令**（`lr.d` / `sc.d`）。目标三元组 `riscv64im**a**c`
@@ -92,3 +110,12 @@ riscv64-elf-objdump -d <脚本> | grep -cE "\b(lr\.[wd]|sc\.[wd]|amo)"
 注意 `ckb-debugger --bin <脚本>` 只能说明二进制装载得起来：没有交易上下文时
 `GroupOutput` 是空的，规则那段循环一次都不会进，于是无论规则写成什么都返回成功。要
 验证规则，只能像 `tests/` 里那样构造真实交易。
+
+## 端到端联调
+
+`scripts/devnet.sh up` 把整条路径在本地跑通:起一个 CKB devnet(创世里给矿工发好
+资金、打开 Indexer RPC)、编译并部署四个脚本、建预算 cell、等够 V4 的 24 个 L1 区块、
+起 L2 节点、申报开启值。`status` 看进度,`logs` 跟日志,`clean` 全部清掉。
+
+等 24 个区块不是保守起见:V4 比的是预算交易与**区块自己的锚定**之间的 L1 高度差,而
+锚定高度一经确定就不再变——L2 起得太早,最初那批区块会永远落不了盘。

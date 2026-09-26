@@ -22,6 +22,18 @@ type Config struct {
 	// L1PollInterval is the interval in milliseconds at which the finality
 	// worker asks L1 whether a commitment has landed.
 	L1PollInterval int `toml:"l1_poll_interval"`
+	// MinerSecret is the seed the node's miner keypair is derived from.
+	//
+	// One key wears three hats — it signs L2 blocks, evaluates the VRF, and
+	// owns the CKB address that pays on L1 — so whatever creates this
+	// miner's budget cell has to derive the very same key, or V7 will hold
+	// the cell against a stranger. `cmd/pob-miner` reads it from here for
+	// exactly that reason.
+	//
+	// A seed rather than a key, and a plain one at that: this is a
+	// development convenience, not key management. A real deployment wants
+	// the key held somewhere it can be protected.
+	MinerSecret string `toml:"miner_secret"`
 }
 
 // DefaultConsensusConfig returns a Config with sensible defaults.
@@ -34,5 +46,6 @@ func DefaultConsensusConfig() Config {
 		PackNum:                30000,
 		PaymentListen:          ":8081",
 		L1PollInterval:         1000,
+		MinerSecret:            "node1",
 	}
 }

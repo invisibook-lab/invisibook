@@ -21,6 +21,10 @@ import (
 	"github.com/invisibook-lab/invisibook/store"
 )
 
+// candidateForksSlow is how long the chain may take to enumerate candidate
+// forks before it is worth saying so.
+const candidateForksSlow = 250 * time.Millisecond
+
 // ProofOfBuy implements the Proof-of-Buy consensus as a yu tripod.
 // Phase 1: single-node mode with VRF + mock L1 payment + score-based block competition.
 type ProofOfBuy struct {
@@ -66,6 +70,12 @@ type ProofOfBuy struct {
 	// on L1 to be treated as irreversible.
 	pending *store.Pending
 
+	// genesis is this node's own copy of the block it defined at startup —
+	// a copy, because the block the kernel passes round is shared and the
+	// synchronizer writes a zero hash over it. The finality worker needs a
+	// genesis that stays correct; see restoreFinalizedGenesis.
+	genesis *types.Block
+
 	// pendingFinalizations is a buffered channel for blocks awaiting L1 depth.
 	pendingFinalizations chan *pendingFinalization
 }
@@ -109,7 +119,13 @@ func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, 
 
 // InitChain reconciles the stores after a restart, then starts the block
 // listener, the reveal listener and the finality worker goroutines.
-func (p *ProofOfBuy) InitChain(_ *types.Block) {
+func (p *ProofOfBuy) InitChain(genesis *types.Block) {
+	// Before anything else: the chain's first block has to have an identity,
+	// and yu leaves it without one. Every walk of the block tree starts from
+	// the last finalized block, which is genesis until something finalizes,
+	// so nothing below would ever get that far. See defineGenesis.
+	p.genesis = p.defineGenesis(genesis)
+
 	p.reconcile()
 	// Ours is not one of yu's built-in topics, and both PubP2P and SubP2P
 	// refuse an unregistered one outright — without this call every reveal
@@ -246,9 +262,21 @@ func (p *ProofOfBuy) StartBlock(block *types.Block) {
 	// Step 1: take this height's L1-confirmed payment declaration.
 	myPayment := p.resolvePayment(block.Height)
 	if myPayment == nil {
-		p.awaitRivalBlock(block, vrfInput)
-		p.paymentBook.Settle(block.Height)
-		return
+		// Nothing declared *yet*. Park, but keep watching the book: a miner
+		// declares whenever it gets round to it, and what a declaration
+		// carries is the opening of a commitment that has been sitting on L1
+		// since long before this height (V4 sees to that). So a declaration
+		// arriving now is this node learning something, not a payment being
+		// made late, and there is no reason to sit out a height it can still
+		// legitimately win.
+		myPayment = p.awaitPaymentOrRivalBlock(block, vrfInput)
+		if myPayment == nil {
+			p.paymentBook.Settle(block.Height)
+			return
+		}
+		// Rivals get their window measured from here; the old one elapsed
+		// while this node had nothing to compete with.
+		deadline = time.Now().Add(time.Duration(p.cfg.BlockInterval) * time.Millisecond)
 	}
 
 	// Steps 2-4: compete for the height.
@@ -306,24 +334,79 @@ func (p *ProofOfBuy) awaitRivalBlock(block *types.Block, vrfInput []byte) {
 	logrus.Infof("PoB: waiting for a block from a miner that paid for height=%d", block.Height)
 
 	for candidate := range p.blockCh {
-		if candidate.Height != block.Height {
-			logrus.Warnf("PoB: ignoring block for height=%d while waiting on height=%d",
-				candidate.Height, block.Height)
-			continue
+		if p.adoptRival(block, candidate, vrfInput) {
+			return
 		}
-		score, ok := p.verifyCandidate(candidate, vrfInput)
-		if !ok {
-			continue
+	}
+}
+
+// awaitPaymentOrRivalBlock parks until either this node has something to bid
+// with at this height, or another miner settles the height for it.
+//
+// It returns the payment when one turns up, leaving the caller to compete,
+// and nil when a rival's block was adopted instead.
+//
+// **Waiting here is the ordinary case, not a fallback.** A block may only be
+// produced against an allocation already committed on L1 — and committed 24
+// L1 blocks earlier at that (V4) — so a node with nothing declared for a
+// height has no business producing one. That is true of every height, and
+// unavoidably true of the first: the endpoint a miner's declarations arrive
+// through is served by the node itself, so the node necessarily reaches
+// height one before anything has been declared for it. It waits rather than
+// races.
+//
+// Both wake-ups are events, not polls. The network delivers rival blocks on
+// blockCh, and the payment book signals when declarations are stored; a
+// signal only says something arrived, so the book is re-read to see whether
+// it was for this height.
+func (p *ProofOfBuy) awaitPaymentOrRivalBlock(block *types.Block, vrfInput []byte) *L1Payment {
+	logrus.Infof("PoB: nothing declared for height=%d; waiting for a declaration of our own or a rival's block",
+		block.Height)
+
+	for {
+		// Read before waiting, and again after every wake-up. A declaration
+		// stored between the two would otherwise leave this parked with the
+		// answer already in the book.
+		if declared := p.paymentBook.Take(block.Height); declared != nil {
+			logrus.Infof("PoB: a declaration for height=%d arrived; competing after all", block.Height)
+			return p.confirmDeclared(block.Height, declared)
 		}
 
-		logrus.Infof("PoB: adopting block for height=%d from another miner, score=%s",
-			block.Height, score)
-		*block = *candidate
-		// produceBlock never ran, so open the state snapshot EndBlock's
-		// execution needs.
-		p.State.StartBlock(block)
-		return
+		select {
+		case candidate, ok := <-p.blockCh:
+			if !ok {
+				return nil
+			}
+			if p.adoptRival(block, candidate, vrfInput) {
+				return nil
+			}
+		case <-p.paymentBook.Updated():
+		}
 	}
+}
+
+// adoptRival verifies a candidate for this height and, if it stands, adopts
+// it into `block`. It reports whether the height is now settled.
+//
+// `vrfInput` must be the VRF input for `block`'s height.
+func (p *ProofOfBuy) adoptRival(block *types.Block, candidate *types.Block, vrfInput []byte) bool {
+	if candidate.Height != block.Height {
+		logrus.Warnf("PoB: ignoring block for height=%d while waiting on height=%d",
+			candidate.Height, block.Height)
+		return false
+	}
+	score, ok := p.verifyCandidate(candidate, vrfInput)
+	if !ok {
+		return false
+	}
+
+	logrus.Infof("PoB: adopting block for height=%d from another miner, score=%s",
+		block.Height, score)
+	*block = *candidate
+	// produceBlock never ran, so open the state snapshot EndBlock's
+	// execution needs.
+	p.State.StartBlock(block)
+	return true
 }
 
 // VerifyBlock checks a block that arrived from elsewhere, before the chain
@@ -422,20 +505,38 @@ func (p *ProofOfBuy) verifyCandidate(candidate *types.Block, vrfInput []byte) (*
 //
 // A height with no declaration yields nil: paying nothing buys nothing, and a
 // block carrying a payment L1 cannot confirm would be discarded by every peer
-// anyway. `require_declared_payment = false` relaxes this for development
-// against a mock L1, falling back to `min_payment` so a lone node keeps
-// producing blocks.
+// anyway. The caller then waits for one rather than producing a block it has
+// not bought — see awaitPaymentOrRivalBlock.
+//
+// `require_declared_payment = false` relaxes this for development against a
+// mock L1, where no declaration can ever be confirmed: it falls back to
+// `min_payment` so a lone node keeps producing. That fallback is the only
+// path on which this node produces a block it has not paid L1 for, which is
+// why it is off by default.
 func (p *ProofOfBuy) resolvePayment(height common.BlockNum) *L1Payment {
 	declared := p.paymentBook.Take(height)
 	if declared == nil {
 		if p.cfg.RequireDeclaredPayment {
-			logrus.Infof("PoB: no payment declared for height=%d, standing down", height)
+			// Said by the caller, which is the one that knows what it does
+			// next — and it waits rather than stands down.
 			return nil
 		}
 		logrus.Infof("PoB: no payment declared for height=%d, using min payment (dev mode)", height)
 		return p.minPayment()
 	}
 
+	return p.confirmDeclared(height, declared)
+}
+
+// confirmDeclared turns a declaration taken out of the book into the payment
+// this node bids with.
+//
+// Split out so that the wait in awaitPaymentOrRivalBlock, which takes from
+// the book itself, builds the payment exactly the way the ordinary path does.
+func (p *ProofOfBuy) confirmDeclared(height common.BlockNum, declared *L1PaymentInput) *L1Payment {
+	if declared == nil {
+		return nil
+	}
 	logrus.Infof("PoB: using declared payment height=%d amount=%s tx_hash=%s",
 		height, declared.Amount, declared.TxHash)
 	return NewL1Payment(declared.TxHash, declared.Amount, declared.Random, p.myPubkeyHex(), declared.BudgetProof)
@@ -613,6 +714,15 @@ func (p *ProofOfBuy) finalityWorker() {
 	defer ticker.Stop()
 
 	for {
+		// Submissions go out before anything else this loop does, and the
+		// priority is not a preference. A block whose commitment has not been
+		// sent is a bid that was never made: the L1 tokens behind it buy
+		// nothing, and nothing downstream — revealing, promoting — can happen
+		// for it either. The periodic work below reads the whole unfinalized
+		// chain and talks to L1 about every block on it, so a pass that runs
+		// long would otherwise keep the queue waiting behind it indefinitely.
+		p.submitQueued(&pending)
+
 		select {
 		case pf := <-p.pendingFinalizations:
 			if err := p.submitCommitment(pf); err != nil {
@@ -628,6 +738,29 @@ func (p *ProofOfBuy) finalityWorker() {
 			// Promoting is about the canonical chain, whoever produced it.
 			p.revealAnchored(&pending)
 			p.promoteSettled()
+		}
+	}
+}
+
+// submitQueued sends the commitment for every block already waiting, without
+// blocking when none is.
+//
+// It is what gives submissions priority over the loop's periodic work; see
+// finalityWorker. A failed submission is logged and dropped from the queue
+// exactly as the main path does it — the block stays unanchored, and the
+// height is simply lost to this miner.
+func (p *ProofOfBuy) submitQueued(pending *[]*pendingFinalization) {
+	for {
+		select {
+		case pf := <-p.pendingFinalizations:
+			if err := p.submitCommitment(pf); err != nil {
+				logrus.Errorf("PoB: committing block height=%d to L1: %v", pf.block.Height, err)
+				continue
+			}
+			*pending = append(*pending, pf)
+			logrus.Infof("PoB: committed block to L1 height=%d, l1_tx=%s", pf.block.Height, pf.l1TxHash)
+		default:
+			return
 		}
 	}
 }
@@ -651,6 +784,13 @@ func (p *ProofOfBuy) revealAnchored(pending *[]*pendingFinalization) {
 	revealed := 0
 	for _, pf := range *pending {
 		loc, err := p.l1Submitter.CommitmentOnChain(context.Background(), pf.l1TxHash)
+		if errors.Is(err, ErrSubmissionPending) {
+			// Sent and accepted, just not mined yet. Nothing to do but wait:
+			// this entry and every later one stay in the queue, and the
+			// openings stay unpublished until L1 has packed the commitment
+			// (§9.6).
+			break
+		}
 		if err != nil {
 			logrus.Errorf("PoB: checking L1 for height=%d: %v", pf.block.Height, err)
 			break
@@ -694,17 +834,47 @@ func (p *ProofOfBuy) revealAnchored(pending *[]*pendingFinalization) {
 // block adopted from another miner settles exactly as one of this node's own
 // would — the queue only ever held blocks this node produced.
 func (p *ProofOfBuy) promoteSettled() {
+	// The synchronizer's InitChain runs after this tripod's and caches a
+	// genesis block that never reached the block table. Undone here rather
+	// than at startup because the two are goroutines racing, and this costs a
+	// cached read.
+	p.restoreFinalizedGenesis(p.genesis)
+
+	started := time.Now()
 	forks, err := p.Chain.CandidateForks()
 	if err != nil {
 		logrus.Errorf("PoB: enumerating candidate forks: %v", err)
 		return
 	}
-	best := ChooseFork(forks)
+	// The cost grows with how far finality is behind, so this is also the
+	// early warning for the worker falling behind: nothing settles, the span
+	// to walk grows, and walking it gets slower again.
+	if elapsed := time.Since(started); elapsed > candidateForksSlow {
+		logrus.Warnf("PoB: enumerating %d candidate forks took %s", len(forks), elapsed)
+	}
+	// Finality is two steps, in this order. First, which blocks are in the
+	// record: those whose commitment reached an L1 block and whose opening
+	// has gone out. Then, among the branches those leave standing, the
+	// largest cumulative goal.
+	//
+	// The order is the whole defence. A branch bought after the fact cannot
+	// produce commitments anchored at the time, so filtering first keeps it
+	// out of the comparison entirely; comparing first would let it win on a
+	// total made of blocks L1 can vouch for none of.
+	ctx := context.Background()
+	opened := make(map[string]bool)
+	for _, fork := range forks {
+		if fork != nil {
+			p.verifiedOpenings(ctx, fork.Blocks, opened)
+		}
+	}
+
+	best := ChooseFork(eligibleForks(forks, opened))
 	if best == nil || len(best.Blocks) == 0 {
 		return
 	}
 
-	settled, staged := settledBlocks(best, p.verifiedOpenings(context.Background(), best.Blocks))
+	settled, staged := settledBlocks(best, opened)
 	if len(settled) == 0 {
 		return
 	}
@@ -725,28 +895,35 @@ func (p *ProofOfBuy) promoteSettled() {
 	logrus.Infof("PoB: settled %d block(s) through height=%d", len(settled), through.Height)
 }
 
-// verifiedOpenings returns the hashes of the blocks at the front of `blocks`
-// that are settled: opened on the L2 network, and backed by L1 — commitment
-// anchored where the opening says (V1), allocation table owned by the
-// producer (V7's first item), and that allocation written far enough ahead
-// (V4).
+// verifiedOpenings records, into `opened`, the blocks at the front of
+// `blocks` that are backed by L1 — commitment anchored where the opening says
+// (V1), allocation table owned by the producer (V7's first item), and that
+// allocation written far enough ahead (V4).
 //
 // It stops at the first block that is not, instead of checking the rest.
 // Finality is a run from the front, so nothing past a gap can settle anyway,
 // and every block examined costs reads against L1.
 //
-// Nothing is remembered between calls. V1 asks whether the anchoring block is
-// still on L1's canonical chain, and a reorg can turn that yes into a no — a
-// cached yes would be a stale answer driving a write that cannot be undone.
-// The blocks in question are the few above the last finalized one, so the
-// cost of asking again is small and the cost of being wrong is not.
-func (p *ProofOfBuy) verifiedOpenings(ctx context.Context, blocks []*types.Block) map[string]bool {
-	opened := make(map[string]bool, len(blocks))
+// `opened` accumulates across the branches of one pass, and a block already
+// in it is stepped over rather than re-examined. Candidate branches share a
+// prefix — often most of their length — so without this the same blocks would
+// be re-verified against L1 once per branch.
+//
+// Nothing is remembered between passes, and the caller must start each one
+// with an empty map. V1 asks whether the anchoring block is still on L1's
+// canonical chain, and a reorg can turn that yes into a no — a cached yes
+// would be a stale answer driving a write that cannot be undone. Within a
+// single pass the answers are one consistent view of L1, which is what makes
+// reusing them safe.
+func (p *ProofOfBuy) verifiedOpenings(ctx context.Context, blocks []*types.Block, opened map[string]bool) {
 	for _, block := range blocks {
 		if block == nil || block.Header == nil {
 			break
 		}
 		hash := block.Hash.String()
+		if opened[hash] {
+			continue
+		}
 
 		row, err := p.reveals.Get(hash)
 		if err != nil {
@@ -764,7 +941,6 @@ func (p *ProofOfBuy) verifiedOpenings(ctx context.Context, blocks []*types.Block
 		}
 		opened[hash] = true
 	}
-	return opened
 }
 
 // submitCommitment draws a blinding factor, records the opening, and posts the

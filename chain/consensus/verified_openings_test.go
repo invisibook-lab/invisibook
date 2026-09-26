@@ -38,7 +38,8 @@ func TestVerifiedOpeningsAcceptsABlockBackedByL1(t *testing.T) {
 		t.Fatalf("storing the opening: %v", err)
 	}
 
-	opened := p.verifiedOpenings(context.Background(), []*types.Block{block})
+	opened := map[string]bool{}
+	p.verifiedOpenings(context.Background(), []*types.Block{block}, opened)
 
 	if !opened[block.Hash.String()] {
 		t.Fatal("a block anchored, owned and paid for in time must count as opened")
@@ -52,7 +53,8 @@ func TestVerifiedOpeningsHoldsWhileNothingIsRevealed(t *testing.T) {
 	block, _, reader, verifier := l1Ready(t, 1000, 976)
 	p, _ := newTestPoB(t, reader, verifier)
 
-	opened := p.verifiedOpenings(context.Background(), []*types.Block{block})
+	opened := map[string]bool{}
+	p.verifiedOpenings(context.Background(), []*types.Block{block}, opened)
 
 	if len(opened) != 0 {
 		t.Fatalf("opened = %v, want nothing settled without an opening", opened)
@@ -69,7 +71,8 @@ func TestVerifiedOpeningsHoldsWhenL1DoesNotBackTheBlock(t *testing.T) {
 		t.Fatalf("storing the opening: %v", err)
 	}
 
-	opened := p.verifiedOpenings(context.Background(), []*types.Block{block})
+	opened := map[string]bool{}
+	p.verifiedOpenings(context.Background(), []*types.Block{block}, opened)
 
 	if len(opened) != 0 {
 		t.Fatalf("opened = %v, want nothing settled when L1 does not back it", opened)
@@ -86,7 +89,8 @@ func TestVerifiedOpeningsHoldsAfterAnAnchorIsReorgedAway(t *testing.T) {
 	}
 	reader.Orphan(reveal.L1BlockHash)
 
-	opened := p.verifiedOpenings(context.Background(), []*types.Block{block})
+	opened := map[string]bool{}
+	p.verifiedOpenings(context.Background(), []*types.Block{block}, opened)
 
 	if len(opened) != 0 {
 		t.Fatalf("opened = %v, want nothing settled once the anchor is gone", opened)

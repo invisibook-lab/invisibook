@@ -360,3 +360,89 @@ func TestSettledBlocksWithNothingSettled(t *testing.T) {
 func blockHash(name string) common.Hash {
 	return common.BytesToHash([]byte(name))
 }
+
+// opened builds the eligibility set out of the blocks that are in the record.
+func openedSet(blocks ...*types.Block) map[string]bool {
+	out := make(map[string]bool, len(blocks))
+	for _, block := range blocks {
+		out[block.Hash.String()] = true
+	}
+	return out
+}
+
+// The regression this whole two-step split exists for: filtering has to
+// happen before the comparison, not after it.
+//
+// Branch A carries one anchored block and then two that L1 can vouch for
+// nothing about — a branch bought after the fact can only look like this,
+// since its commitments could not have reached L1 at the time. On raw totals
+// A wins:
+//
+//	A: 10 + 500 + 500 = 1010      B: 40 + 45 = 85
+//
+// but only A's first block is in the record, so the branches actually being
+// compared are A: 10 and B: 85, and B is the main fork. Score first and A
+// takes it, and the node then promotes A's block at height 1 over B's —
+// irreversibly, on the strength of two blocks nobody ever paid L1 for.
+func TestEligibleForksFiltersBeforeScoring(t *testing.T) {
+	a1 := goalBlock(t, "0xa1", 1, 10)
+	a2 := goalBlock(t, "0xa2", 2, 500)
+	a3 := goalBlock(t, "0xa3", 3, 500)
+	b1 := goalBlock(t, "0xb1", 1, 40)
+	b2 := goalBlock(t, "0xb2", 2, 45)
+
+	a, b := branch(a1, a2, a3), branch(b1, b2)
+	// Everything on B is anchored and revealed; on A only the first block is.
+	opened := openedSet(a1, b1, b2)
+
+	// Scoring the branches as they stand gives the wrong answer, which is
+	// what makes the order load-bearing rather than cosmetic.
+	if got := ChooseFork([]*types.Fork{a, b}); got != a {
+		t.Fatal("expected the unfiltered comparison to favour A; the test no longer shows what it is for")
+	}
+
+	got := ChooseFork(eligibleForks([]*types.Fork{a, b}, opened))
+	if got == nil {
+		t.Fatal("no branch chosen")
+	}
+	if len(got.Blocks) != 2 || got.Blocks[0] != b1 {
+		t.Fatalf("chose the branch ending at %s, want B's anchored run", got.Blocks[len(got.Blocks)-1].Hash)
+	}
+}
+
+// Truncation keeps a branch a branch: the run that survives starts at the
+// fork point and has no gaps, so ChooseFork still compares continuous chains
+// rather than a selection of blocks.
+func TestEligibleForksTruncatesToTheLeadingRun(t *testing.T) {
+	b1 := goalBlock(t, "0xb1", 1, 40)
+	b2 := goalBlock(t, "0xb2", 2, 45)
+	b3 := goalBlock(t, "0xb3", 3, 35)
+
+	// b2 is missing from the record, so b3 cannot count either even though it
+	// is in: a branch with a hole is not a branch.
+	got := eligibleForks([]*types.Fork{branch(b1, b2, b3)}, openedSet(b1, b3))
+	if len(got) != 1 {
+		t.Fatalf("got %d branches, want 1", len(got))
+	}
+	if len(got[0].Blocks) != 1 || got[0].Blocks[0] != b1 {
+		t.Fatalf("truncated to %d blocks, want just the leading run", len(got[0].Blocks))
+	}
+}
+
+// A branch with nothing in the record is not a contender, and must not reach
+// the comparison as an empty one either.
+func TestEligibleForksDropsBranchesWithNothingAnchored(t *testing.T) {
+	a1 := goalBlock(t, "0xa1", 1, 10)
+	b1 := goalBlock(t, "0xb1", 1, 40)
+
+	got := eligibleForks([]*types.Fork{branch(a1), branch(b1), nil}, openedSet(b1))
+	if len(got) != 1 {
+		t.Fatalf("got %d branches, want only the one with an anchored block", len(got))
+	}
+	if got[0].Blocks[0] != b1 {
+		t.Fatal("kept the wrong branch")
+	}
+	if ChooseFork(eligibleForks([]*types.Fork{branch(a1)}, nil)) != nil {
+		t.Fatal("chose a branch none of whose blocks are in the record")
+	}
+}

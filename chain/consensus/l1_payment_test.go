@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yu-org/yu/common"
 )
@@ -474,5 +475,83 @@ func TestPaymentBookSettlePrunesLowerHeights(t *testing.T) {
 	}
 	if book.Take(12) == nil {
 		t.Fatal("height 12 is still ahead of the chain and must survive")
+	}
+}
+
+// A node reaches its first height before anything can possibly have been
+// declared for it — the endpoint declarations arrive through is served by the
+// node itself — so it parks there and waits. This is the signal that ends
+// that wait; without it a lone miner never produces a block at all.
+func TestPaymentBookSignalsOnStore(t *testing.T) {
+	book := NewPaymentBook()
+
+	select {
+	case <-book.Updated():
+		t.Fatal("an empty book signalled before anything was stored")
+	default:
+	}
+
+	if rejected := book.Store([]*L1PaymentInput{
+		{BlockHeight: 1, Amount: big.NewInt(10), Random: randA, TxHash: "0xprepay"},
+	}); rejected != nil {
+		t.Fatalf("storing: %v", rejected)
+	}
+
+	select {
+	case <-book.Updated():
+	default:
+		t.Fatal("storing a declaration did not wake the waiter")
+	}
+}
+
+// The signal must survive arriving between a waiter's read of the book and
+// its wait on the channel, or a lone miner parks forever holding a
+// declaration it never noticed.
+func TestPaymentBookDoesNotLoseAWakeUp(t *testing.T) {
+	book := NewPaymentBook()
+
+	// Stored while nobody is listening: the buffer holds the signal.
+	if rejected := book.Store([]*L1PaymentInput{
+		{BlockHeight: 1, Amount: big.NewInt(10), Random: randA, TxHash: "0xprepay"},
+	}); rejected != nil {
+		t.Fatalf("storing: %v", rejected)
+	}
+
+	select {
+	case <-book.Updated():
+	case <-time.After(time.Second):
+		t.Fatal("a declaration stored before the wait was never signalled")
+	}
+}
+
+// A burst collapses into one wake-up rather than queueing, which is all a
+// waiter needs: it re-reads the book, it does not count signals.
+func TestPaymentBookCoalescesSignals(t *testing.T) {
+	book := NewPaymentBook()
+
+	for height := 1; height <= 3; height++ {
+		if rejected := book.Store([]*L1PaymentInput{
+			{BlockHeight: common.BlockNum(height), Amount: big.NewInt(10), Random: randA, TxHash: "0xprepay"},
+		}); rejected != nil {
+			t.Fatalf("storing height %d: %v", height, rejected)
+		}
+	}
+
+	select {
+	case <-book.Updated():
+	default:
+		t.Fatal("a burst of declarations produced no signal")
+	}
+	select {
+	case <-book.Updated():
+		t.Fatal("a burst produced more than one pending signal")
+	default:
+	}
+
+	// Every height is still there; coalescing the signal drops no data.
+	for height := 1; height <= 3; height++ {
+		if book.Take(common.BlockNum(height)) == nil {
+			t.Fatalf("height %d was lost", height)
+		}
 	}
 }

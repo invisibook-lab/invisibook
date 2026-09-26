@@ -98,11 +98,44 @@ type PaymentBook struct {
 	// consumed is the highest height already handed to the consensus loop.
 	// Declarations at or below it arrive too late to be of any use.
 	consumed common.BlockNum
+
+	// updated wakes whoever is waiting to bid on a height it has nothing for
+	// yet. A node that has just started is always in that position: the
+	// endpoint its own declarations arrive through does not exist until it is
+	// running, so the first height is necessarily reached before anything has
+	// been declared for it.
+	//
+	// Buffered by one and sent to without blocking, so Store never waits on a
+	// reader and a burst of declarations collapses into a single wake-up. No
+	// wake-up is lost: a waiter re-reads the book after waking, and a Store
+	// landing between its read and its wait leaves the buffer full, which
+	// returns it immediately.
+	updated chan struct{}
 }
 
 // NewPaymentBook returns an empty PaymentBook.
 func NewPaymentBook() *PaymentBook {
-	return &PaymentBook{byHeight: make(map[common.BlockNum]*L1PaymentInput)}
+	return &PaymentBook{
+		byHeight: make(map[common.BlockNum]*L1PaymentInput),
+		updated:  make(chan struct{}, 1),
+	}
+}
+
+// Updated returns the channel that carries a signal whenever declarations are
+// stored.
+//
+// It says something arrived, not what: a waiter reads the book to find out
+// whether the height it cares about is now covered.
+func (b *PaymentBook) Updated() <-chan struct{} {
+	return b.updated
+}
+
+// notify signals a waiter without ever blocking the caller.
+func (b *PaymentBook) notify() {
+	select {
+	case b.updated <- struct{}{}:
+	default:
+	}
 }
 
 // ValidateDeclarations checks every declaration's fields and rejects a batch
@@ -191,6 +224,7 @@ func (b *PaymentBook) Store(inputs []*L1PaymentInput) []RejectedDeclaration {
 	for _, input := range inputs {
 		b.byHeight[input.BlockHeight] = input
 	}
+	b.notify()
 	return nil
 }
 

@@ -324,10 +324,24 @@ relayer, gated on the same `zk_proof`.
 | [chain/core/config.go](../chain/core/config.go) | TOML loader + `DefaultConfig` |
 | [chain/core/udt.go](../chain/core/udt.go) | `TokenID`, `UDT`, `NativeToken` |
 | [chain/consensus/proof_of_buy.go](../chain/consensus/proof_of_buy.go) | PoBuy tripod: block production, scoring, L1-gated finality |
+| [chain/consensus/genesis.go](../chain/consensus/genesis.go) | Defines the genesis block; yu leaves it with a zero hash, which makes it its own parent |
+| [chain/consensus/forkchoice.go](../chain/consensus/forkchoice.go) | Admission (anchored + revealed) then ranking (cumulative goal), in that order |
 | [chain/consensus/vrf.go](../chain/consensus/vrf.go) | ECVRF-SECP256K1-SHA256-TAI + secp256k1 key helpers |
 | [chain/consensus/score.go](../chain/consensus/score.go) | `CalcBlockScore` = payment × VRF factor |
 | [chain/consensus/l1_payment.go](../chain/consensus/l1_payment.go) | L1 payment types, verifier interface, `/pay_l1_token` endpoint |
 | [chain/consensus/l1_submitter.go](../chain/consensus/l1_submitter.go) | L2 header → L1 submission interface + mock |
+| [chain/ckb/client.go](../chain/ckb/client.go) | CKB client implementing all three L1 interfaces; narrow `nodeRPC` view of a node |
+| [chain/ckb/config.go](../chain/ckb/config.go) | `[ckb]` section; derives every script's args off the mining addr |
+| [chain/ckb/budget_data.go](../chain/ckb/budget_data.go) | Budget cell data: `prepaid` prefix + molecule fixvec allocation table |
+| [chain/ckb/reader.go](../chain/ckb/reader.go) | V1 (anchored commitment) and the budget cell lookup behind V7 |
+| [chain/ckb/payment_verifier.go](../chain/ckb/payment_verifier.go) | Prepayment and per-height allocation, gated on budget cell ownership |
+| [chain/ckb/submitter.go](../chain/ckb/submitter.go) | Creates commit cells; reports where a submission landed |
+| [chain/ckb/budget.go](../chain/ckb/budget.go) | Miner side: prepay the mining addr and write the allocation table (R3.3) |
+| [chain/ckb/tx.go](../chain/ckb/tx.go) | `wallet`: cell collection, fee, signing; skips cells carrying type scripts (R3.4) |
+| [chain/ckb/inflight.go](../chain/ckb/inflight.go) | Keeps this wallet's unconfirmed transactions from spending each other's inputs |
+| [chain/cmd/ckb-deploy](../chain/cmd/ckb-deploy) | Publishes the four PoB scripts and prints the `[ckb]` config |
+| [chain/cmd/pob-miner](../chain/cmd/pob-miner) | Miner side: address, prepay (budget cell), declare (openings) |
+| [scripts/devnet.sh](../scripts/devnet.sh) | Local CKB devnet + the whole PoB path end to end |
 
 ### 4.2 Core types cheat sheet
 

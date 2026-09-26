@@ -81,12 +81,51 @@ func ChooseFork(forks []*types.Fork) *types.Fork {
 	return best
 }
 
+// eligibleForks truncates every branch to the run of blocks that are backed
+// by L1, dropping those left with nothing.
+//
+// This is the first of finality's two steps, and it has to come first. A
+// block earns its place in the record by having its commitment anchored on L1
+// and its opening broadcast — that is what dates it, and what a fork bought
+// after the fact can never produce, since its commitments could only have
+// reached L1 recently (§8.2). Only then does cumulative goal decide which of
+// the surviving branches is the main fork.
+//
+// Scoring first and filtering afterwards is not the same thing, and the
+// difference is a branch finalized in error. Blocks that are not anchored
+// cost nothing to fabricate in quantity, so a branch stuffed with them can
+// carry the largest total while holding almost nothing L1 can vouch for.
+// Comparing totals first would let that branch win the comparison, and the
+// node would then promote its short anchored prefix — irreversibly — over a
+// rival whose anchored run was both longer and better paid for.
+//
+// Truncating keeps continuity intact: a leading run has no gaps, so what
+// reaches ChooseFork is still a branch rather than a selection of blocks.
+//
+// `opened` holds the hashes of blocks this node has verified openings for.
+func eligibleForks(forks []*types.Fork, opened map[string]bool) []*types.Fork {
+	out := make([]*types.Fork, 0, len(forks))
+	for _, fork := range forks {
+		if fork == nil {
+			continue
+		}
+		n := FinalizableCount(fork.Blocks, opened)
+		if n == 0 {
+			continue
+		}
+		out = append(out, &types.Fork{Blocks: fork.Blocks[:n]})
+	}
+	return out
+}
+
 // FinalizableCount returns how many blocks at the start of `canonical` are
 // settled, and so may be written down for good.
 //
-// The test is the protocol's, and scores play no part in it: a block is
-// settled once its commitment sits in an L1 block and its opening has gone
-// out on the L2 network. How far any rival trails does not enter into it.
+// It answers the first of finality's two questions — which blocks are in the
+// record at all — and scores play no part in it: a block is eligible once its
+// commitment sits in an L1 block and its opening has gone out on the L2
+// network. Which branch then wins is ChooseFork's question, decided on
+// cumulative goal over exactly the blocks this admits.
 //
 // That is what the L1 backup is for (§8.2). A commitment that reached an L1
 // block carries that block's height with it, while a branch bought after the

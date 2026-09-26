@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"sync"
 	"time"
 
@@ -30,17 +31,27 @@ type BlockCommitment struct {
 	Commitment string `json:"commitment"`
 }
 
+// ErrSubmissionPending reports that a commitment is in L1's pool: sent,
+// accepted, and not yet in a block.
+var ErrSubmissionPending = errors.New("the commitment is still waiting in L1's pool")
+
 // L1CommitmentSubmitter posts block commitments to L1 and reports whether they
 // are on chain.
 type L1CommitmentSubmitter interface {
 	// SubmitCommitment posts one commitment to L1 and returns the L1 tx hash.
 	SubmitCommitment(ctx context.Context, commitment *BlockCommitment) (l1TxHash string, err error)
 
-	// CommitmentOnChain reports where `l1TxHash` landed, or nil when it is not
-	// on an L1 block at all.
+	// CommitmentOnChain reports where `l1TxHash` landed, nil when L1 has no
+	// record of it at all, or an error wrapping ErrSubmissionPending while it
+	// is still waiting in L1's pool.
 	//
-	// A submission that is not on chain never landed, or was taken back by an
-	// L1 reorg; either way it has to be sent again.
+	// The three answers drive three different actions, which is why waiting
+	// is not folded into nil. A submission L1 has never heard of never landed
+	// or was taken back by a reorg, and has to be sent again; one sitting in
+	// the pool has to be left alone, because re-sending it rebuilds the very
+	// same transaction — same opening, same commitment, same inputs — and the
+	// node rejects it as a duplicate. Treating the two alike turns every
+	// block's normal wait into a resubmission loop that can never succeed.
 	//
 	// The location is not a convenience. Whoever later verifies the opening
 	// has to find this commitment on L1, and without a position that means

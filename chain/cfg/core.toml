@@ -8,9 +8,8 @@ db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
 [consensus]
 min_payment     = "100"
 # Protocol behaviour is to sit out any height with no L1-confirmed declaration.
-# The mock L1 holds no allocations, so no declaration can ever be confirmed and
-# a lone node would never produce a block — keep this off until a real CKB
-# client is wired in, then delete this line.
+# Turn this on together with [ckb] below: against the mock L1 no declaration
+# can ever be confirmed, so a lone node would never produce a block.
 require_declared_payment = false
 # Block reward: a fixed coinbase plus the handling fees the block collected,
 # paid to the producer's own miner key. Set to "0" to run without an
@@ -19,6 +18,10 @@ coinbase_reward = "1000"
 block_interval  = 3000   # milliseconds between blocks
 pack_num        = 30000  # max transactions per block
 payment_listen        = ":8081"
+# Seed the miner keypair is derived from. `cmd/pob-miner` reads it from here
+# so that the budget cell it creates on CKB is owned by the very key this node
+# produces blocks with — V7 compares the two.
+miner_secret          = "node1"
 l1_poll_interval      = 1000   # ms, how often to ask L1 whether a commitment landed
 
 [orderbook]
@@ -73,3 +76,48 @@ id     = "f19c7316d8b0b54fdf515a598d88961e"
 pubkey = "0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299"  # bob
 token  = "USDT"
 amount = "08dc6ec7efa5cb39b1ed533b754eae8e76b99d1c8cb1a867caa954ce0b082c9b"  # 600000
+
+# ── L1 ──────────────────────────────────────────────────────────────────────
+# Where CKB is, and which scripts this chain's cells are guarded by. With the
+# section absent or disabled the node runs against an in-memory mock L1:
+# payments are not real and blocks are not anchored, which is fine for
+# development and is not the protocol.
+#
+# There are no useful defaults below. The four PoB scripts are deployed per
+# chain, so `cmd/ckb-deploy` publishes them and prints this whole section:
+#
+#   go run ./cmd/ckb-deploy -rpc http://127.0.0.1:8114 -network devnet \
+#     -sighash-dep 0x<devnet genesis tx> -mining-addr ckt1... \
+#     -key-file ./devnet-miner.key >> cfg/core.toml
+#
+# Every `args` among those scripts is derived by the node from `mining_addr`,
+# because they are parameterised by each other: pob-spent by the mining addr,
+# pob-vault by the resulting spent script hash, pob-budget by both plus the
+# sighash code hash. That is why none of them appears here.
+#
+# [ckb]
+# enabled  = true
+# rpc_url  = "http://127.0.0.1:8114"
+# network  = "devnet"                  # mainnet | testnet | devnet
+# # Required on a devnet only: the standard lock lives in that chain's own
+# # genesis transaction, so there is no constant to fall back on.
+# sighash_dep_tx_hash = "0x..."
+# # The address every miner's prepayment is paid into. Chosen once and never
+# # changeable: pob-spent carries its lock hash in args, and a different args
+# # is a different mark that cannot govern the old address (ckb_layout.md §4).
+# mining_addr = "ckt1..."
+# fee_rate = 1000                      # shannon per 1000 bytes
+#
+# [ckb.budget_script]                  # pob-budget
+# code_hash   = "0x..."
+# hash_type   = "data1"
+# dep_tx_hash = "0x..."
+# dep_index   = 0
+# dep_type    = "code"
+#
+# [ckb.commit_script]                  # pob-submission
+# ...
+# [ckb.vault_script]                   # pob-vault
+# ...
+# [ckb.spent_script]                   # pob-spent
+# ...

@@ -12,6 +12,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/invisibook-lab/invisibook/account"
+	"github.com/invisibook-lab/invisibook/ckb"
 	"github.com/invisibook-lab/invisibook/consensus"
 	"github.com/invisibook-lab/invisibook/core"
 )
@@ -26,6 +27,7 @@ type Config struct {
 	Consensus  consensus.Config     `toml:"consensus"`
 	OrderBook  core.OrderBookConfig `toml:"orderbook"`
 	Account    account.Config       `toml:"account"`
+	CKB        ckb.Config           `toml:"ckb"`
 }
 
 // Default returns a Config with every section at its own default.
@@ -36,6 +38,7 @@ func Default() *Config {
 		Consensus:  consensus.DefaultConsensusConfig(),
 		OrderBook:  core.DefaultOrderBookConfig(),
 		Account:    account.DefaultConfig(),
+		CKB:        ckb.DefaultConfig(),
 	}
 }
 

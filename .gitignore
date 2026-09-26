@@ -19,3 +19,6 @@ invisibook
 
 # Dev dual-instance test data
 .dev/
+
+# Local CKB devnet scratch space (scripts/devnet.sh)
+.devnet/
