@@ -1,0 +1,15 @@
+[package]
+name = "pob-budget"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# ckb-std and nothing else: this script compares hashes and capacities. The
+# Groth16 verification R3.2 calls for is not here yet.
+ckb-std = "1.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

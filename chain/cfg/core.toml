@@ -1,8 +1,30 @@
 # Core Tripod Configuration
 
-[orderbook]
-db_path      = "data/orders.db"
+# One SQLite database for all tripods: orders and cash are the same
+# block's state, so they share a file and a transaction.
+db_path      = "data/chain.db"
 db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
+
+[consensus]
+min_payment     = "100"
+# Protocol behaviour is to sit out any height with no L1-confirmed declaration.
+# Turn this on together with [ckb] below: against the mock L1 no declaration
+# can ever be confirmed, so a lone node would never produce a block.
+require_declared_payment = false
+# Block reward: a fixed coinbase plus the handling fees the block collected,
+# paid to the producer's own miner key. Set to "0" to run without an
+# incentive layer.
+coinbase_reward = "1000"
+block_interval  = 3000   # milliseconds between blocks
+pack_num        = 30000  # max transactions per block
+payment_listen        = ":8081"
+# Seed the miner keypair is derived from. `cmd/pob-miner` reads it from here
+# so that the budget cell it creates on CKB is owned by the very key this node
+# produces blocks with — V7 compares the two.
+miner_secret          = "node1"
+l1_poll_interval      = 1000   # ms, how often to ask L1 whether a commitment landed
+
+[orderbook]
 # Verification keys for the OrderBook tripod's circuits. Split is for
 # SendOrder's split branch; settle_larger is the settle circuit for the
 # larger side (change + cross-leg ratio check). The smaller party confirms
@@ -17,8 +39,6 @@ settle_cozk_vk_path   = "vk/settle_cozk_vk.json"
 settle_cozk2p_vk_path = "vk/settle_cozk2p_vk.bin"
 
 [account]
-db_path      = "data/accounts.db"
-db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
 # Deposit / Withdraw verification keys — produced by `snarkjs zkey export verificationkey`
 # (or by re-running the corresponding `dev_setup_snarkjs` test). Paths are
 # relative to wherever you launch the chain from.
@@ -29,30 +49,75 @@ withdraw_vk_path = "vk/withdraw_vk.json"
 # IDs and ciphertexts must match cfg/tests/alice_cash.json and bob_cash.json.
 # amount = poseidon(plaintext, random) — computed by genesis_encrypt() in Rust.
 # alice mnemonic: "test test test test test test test test test test test junk"
-#   → pubkey (m/44'/60'/0'/0'/0'): 3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb
+#   → pubkey (m/44'/60'/0'/0/0): 038318535b54105d4a7aae60c08fc45f9687181b4fdfc625bd1a753fa7397fed75
 # bob mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
-#   → pubkey (m/44'/60'/0'/0'/0'): 175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b
+#   → pubkey (m/44'/60'/0'/0/0): 0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299
 
 [[account.genesis_cash]]
-id     = "f8c0ea0222c6acba512cc9ed613b64e3"
-pubkey = "3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb"  # alice
+id     = "b563773342050d6893696b861b49ae6f"
+pubkey = "038318535b54105d4a7aae60c08fc45f9687181b4fdfc625bd1a753fa7397fed75"  # alice
 token  = "ETH"
 amount = "067dcf69a72312493e98a059d4f3b68035fc4b1c096a87d557b7de6df8d4362d"  # 2000
 
 [[account.genesis_cash]]
-id     = "68ff80c3b73a39798be67087fb9f97ed"
-pubkey = "3b37d4c67dfd535549e73bc044ff6bc8b62bdfb962a92f1b3e11c6c0b3b4dedb"  # alice
+id     = "012aec8faef1826b2712c2affbf721fc"
+pubkey = "038318535b54105d4a7aae60c08fc45f9687181b4fdfc625bd1a753fa7397fed75"  # alice
 token  = "USDT"
 amount = "0ad0dcac78d801a291089d043d1627a04004e760c3b791637d40807486557f9a"  # 800000
 
 [[account.genesis_cash]]
-id     = "4e88dd94be4154a37da7dd5b9d06a4a1"
-pubkey = "175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b"  # bob
+id     = "da5bf897524620db998296c7e4e59d7e"
+pubkey = "0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299"  # bob
 token  = "ETH"
 amount = "08ad5f1147b02de6de96ef4d694628a7c6f0dc1e61b9a5d7d56a3817caf2d125"  # 1500
 
 [[account.genesis_cash]]
-id     = "ddada5eb9484fa322a931d53bb945431"
-pubkey = "175b274d53b54ddf4426bbdb98c8416972f0476a678ac320f52ff960f69e189b"  # bob
+id     = "f19c7316d8b0b54fdf515a598d88961e"
+pubkey = "0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299"  # bob
 token  = "USDT"
 amount = "08dc6ec7efa5cb39b1ed533b754eae8e76b99d1c8cb1a867caa954ce0b082c9b"  # 600000
+
+# ── L1 ──────────────────────────────────────────────────────────────────────
+# Where CKB is, and which scripts this chain's cells are guarded by. With the
+# section absent or disabled the node runs against an in-memory mock L1:
+# payments are not real and blocks are not anchored, which is fine for
+# development and is not the protocol.
+#
+# There are no useful defaults below. The four PoB scripts are deployed per
+# chain, so `cmd/ckb-deploy` publishes them and prints this whole section:
+#
+#   go run ./cmd/ckb-deploy -rpc http://127.0.0.1:8114 -network devnet \
+#     -sighash-dep 0x<devnet genesis tx> -mining-addr ckt1... \
+#     -key-file ./devnet-miner.key >> cfg/core.toml
+#
+# Every `args` among those scripts is derived by the node from `mining_addr`,
+# because they are parameterised by each other: pob-spent by the mining addr,
+# pob-vault by the resulting spent script hash, pob-budget by both plus the
+# sighash code hash. That is why none of them appears here.
+#
+# [ckb]
+# enabled  = true
+# rpc_url  = "http://127.0.0.1:8114"
+# network  = "devnet"                  # mainnet | testnet | devnet
+# # Required on a devnet only: the standard lock lives in that chain's own
+# # genesis transaction, so there is no constant to fall back on.
+# sighash_dep_tx_hash = "0x..."
+# # The address every miner's prepayment is paid into. Chosen once and never
+# # changeable: pob-spent carries its lock hash in args, and a different args
+# # is a different mark that cannot govern the old address (ckb_layout.md §4).
+# mining_addr = "ckt1..."
+# fee_rate = 1000                      # shannon per 1000 bytes
+#
+# [ckb.budget_script]                  # pob-budget
+# code_hash   = "0x..."
+# hash_type   = "data1"
+# dep_tx_hash = "0x..."
+# dep_index   = 0
+# dep_type    = "code"
+#
+# [ckb.commit_script]                  # pob-submission
+# ...
+# [ckb.vault_script]                   # pob-vault
+# ...
+# [ckb.spent_script]                   # pob-spent
+# ...

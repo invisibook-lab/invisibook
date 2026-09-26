@@ -1,10 +1,12 @@
-package core
+package account
 
 import (
 	"fmt"
 	"net/http"
 
 	"gorm.io/gorm"
+
+	"github.com/invisibook-lab/invisibook/store"
 
 	"github.com/yu-org/yu/core/context"
 	"github.com/yu-org/yu/core/tripod"
@@ -18,8 +20,10 @@ import (
 // amounts are encrypted ciphertext and cannot be summed on-chain.
 type Account struct {
 	*tripod.Tripod
-	db         *gorm.DB
-	cfg        *AccountConfig
+	db *gorm.DB
+	// pending stages this block's writes until L1 settles the height.
+	pending    *store.Pending
+	cfg        *Config
 	depositVK  *CircuitVK
 	withdrawVK *CircuitVK
 }
@@ -28,7 +32,7 @@ type Account struct {
 // `cfg` must carry a valid SQLite DSN and readable `DepositVKPath` /
 // `WithdrawVKPath`. DB init and VK loading panic on failure — the chain will
 // not start without all wallet circuits' verifying keys in memory.
-func NewAccount(cfg *AccountConfig) *Account {
+func NewAccount(cfg *Config, db *gorm.DB, pending *store.Pending) *Account {
 	tri := tripod.NewTripodWithName("account")
 	depositVK, err := LoadVK("deposit", cfg.DepositVKPath)
 	if err != nil {
@@ -40,7 +44,8 @@ func NewAccount(cfg *AccountConfig) *Account {
 	}
 	a := &Account{
 		Tripod:     tri,
-		db:         InitAccountDB(cfg.DBPath, ParseGormLogLevel(cfg.DBLogLevel)),
+		db:         db,
+		pending:    pending,
 		cfg:        cfg,
 		depositVK:  depositVK,
 		withdrawVK: withdrawVK,
@@ -66,7 +71,7 @@ func (a *Account) InitChain(block *types.Block) {
 			ZkProof: "genesis",
 			Status:  Active,
 		}
-		if err := a.CreateCash(cash); err != nil {
+		if err := a.createCashDirect(cash); err != nil {
 			panic(fmt.Sprintf("failed to seed genesis cash %s: %v", gc.ID, err))
 		}
 		fmt.Printf("genesis: id=%s pubkey=%s token=%s\n", gc.ID, gc.Pubkey, gc.Token)
@@ -89,7 +94,7 @@ func (a *Account) GetAccount(ctx *context.ReadContext) {
 		ctx.Json(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := Validator.Struct(req); err != nil {
+	if err := validate.Struct(req); err != nil {
 		ctx.Json(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -114,7 +119,7 @@ func (a *Account) GetAccount(ctx *context.ReadContext) {
 // attest. `OutputCommitment` is the Poseidon commitment of the new Cash's
 // amount and becomes its on-chain `Cash.Amount` field.
 type DepositRequest struct {
-	Pubkey           string  `json:"pubkey"            validate:"required"` // depositor's ed25519 pubkey (64-char hex)
+	Pubkey           string  `json:"pubkey"            validate:"required"` // depositor's compressed secp256k1 pubkey (66-char hex)
 	Token            TokenID `json:"token"             validate:"required"`
 	BridgeCommitment string  `json:"bridge_commitment" validate:"required,len=64"` // Poseidon(deposit_amount, r_bridge) hex
 	OutputCommitment string  `json:"output_commitment" validate:"required,len=64"` // Poseidon(output_amount, r_output) hex
@@ -134,7 +139,7 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 	if err := ctx.BindJson(req); err != nil {
 		return err
 	}
-	if err := Validator.Struct(req); err != nil {
+	if err := validate.Struct(req); err != nil {
 		return err
 	}
 
@@ -160,14 +165,14 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 	}
 
 	cash := &Cash{
-		ID:      computeCashID(req.Pubkey, req.Token, CipherText(req.OutputCommitment)),
+		ID:      ComputeCashID(req.Pubkey, req.Token, CipherText(req.OutputCommitment)),
 		Pubkey:  req.Pubkey,
 		Token:   req.Token,
 		Amount:  CipherText(req.OutputCommitment),
 		ZkProof: req.ZkProof,
 		Status:  Active,
 	}
-	if err := a.CreateCash(cash); err != nil {
+	if err := a.createCashDirect(cash); err != nil {
 		return fmt.Errorf("failed to create cash: %w", err)
 	}
 
@@ -211,7 +216,7 @@ func (a *Account) Withdraw(ctx *context.WriteContext) error {
 	if err := ctx.BindJson(req); err != nil {
 		return err
 	}
-	if err := Validator.Struct(req); err != nil {
+	if err := validate.Struct(req); err != nil {
 		return err
 	}
 
@@ -289,7 +294,7 @@ func (a *Account) Withdraw(ctx *context.WriteContext) error {
 			changePubkey = req.Pubkey
 		}
 		changeCash := &Cash{
-			ID:      computeCashID(changePubkey, req.Token, CipherText(req.OutputCommitments[0])),
+			ID:      ComputeCashID(changePubkey, req.Token, CipherText(req.OutputCommitments[0])),
 			Pubkey:  changePubkey,
 			Token:   req.Token,
 			Amount:  CipherText(req.OutputCommitments[0]),

@@ -1,0 +1,16 @@
+[package]
+name = "pob-spent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# ckb-std and nothing else. This script compares hashes; it opens no
+# commitment and verifies no proof, so a crypto crate linked in here would be
+# compiled into the script and paid for in cell capacity, for nothing.
+ckb-std = "1.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

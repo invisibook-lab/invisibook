@@ -1,9 +1,8 @@
 package core
 
 import (
-	"crypto/ed25519"
-	"encoding/hex"
 	"fmt"
+	"github.com/invisibook-lab/invisibook/account"
 	"strconv"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
@@ -37,7 +36,7 @@ type CoZkSettleRequest struct {
 	RecvACommitment      string `json:"recv_a_commitment"       validate:"required,len=64"`
 	RecvBCommitment      string `json:"recv_b_commitment"       validate:"required,len=64"`
 
-	// ed25519 signatures (128-char hex) over CoZkSettleMessage, by each
+	// owner signatures (128-char hex) over CoZkSettleMessage, by each
 	// order's pubkey.
 	SigA string `json:"sig_a" validate:"required,len=128"`
 	SigB string `json:"sig_b" validate:"required,len=128"`
@@ -61,7 +60,7 @@ type CoZkSettleEvent struct {
 }
 
 // coZkSettleMessage builds the canonical byte string both traders
-// ed25519-sign, domain-separated by `prefix` so a signature for one settle
+// sign, domain-separated by `prefix` so a signature for one settle
 // variant can never authorize the other.
 func coZkSettleMessage(prefix string, req *CoZkSettleRequest) []byte {
 	msg := prefix + ":" + string(req.OrderAID) + ":" + string(req.OrderBID) +
@@ -137,7 +136,7 @@ func cmpToFrDecimal(cmp int) (string, error) {
 
 // lockToken returns the token an order locks as collateral: Token1 for a
 // sell, Token2 for a buy.
-func lockToken(ord *Order) TokenID {
+func lockToken(ord *Order) account.TokenID {
 	if ord.Type == Buy {
 		return ord.Subject.Token2
 	}
@@ -146,7 +145,7 @@ func lockToken(ord *Order) TokenID {
 
 // recvToken returns the token an order's owner receives at settlement — the
 // opposite side of its locked token.
-func recvToken(ord *Order) TokenID {
+func recvToken(ord *Order) account.TokenID {
 	if ord.Type == Buy {
 		return ord.Subject.Token1
 	}
@@ -160,7 +159,7 @@ func recvToken(ord *Order) TokenID {
 //	 recv_b, order_a_commitment, order_b_commitment, price, a_is_seller,
 //	 locked_a_hashes[2], locked_b_hashes[2]]
 func buildSettleCoZkPublicSignals(
-	req *CoZkSettleRequest, orderA, orderB *Order, price uint64, aIsSeller bool, acc *Account,
+	req *CoZkSettleRequest, orderA, orderB *Order, price uint64, aIsSeller bool, acc *account.Account,
 ) ([]string, error) {
 	cmpDec, err := cmpToFrDecimal(req.Cmp)
 	if err != nil {
@@ -181,7 +180,7 @@ func buildSettleCoZkPublicSignals(
 	}
 	decs := make([]string, 0, len(hexFields))
 	for _, f := range hexFields {
-		dec, err := HexToDecimal(f.hex)
+		dec, err := account.HexToDecimal(f.hex)
 		if err != nil {
 			return nil, fmt.Errorf("invalid %s: %w", f.name, err)
 		}
@@ -209,24 +208,13 @@ func buildSettleCoZkPublicSignals(
 	return signals, nil
 }
 
-// verifyCoZkSignature checks an ed25519 signature (128-char hex) by the
-// 64-char hex pubkey over msg.
+// verifyCoZkSignature checks a settlement signature by its owner key, through
+// the same verifier every other owner signature on this chain goes through.
 func verifyCoZkSignature(pubkeyHex, sigHex string, msg []byte) error {
-	pubkey, err := hex.DecodeString(pubkeyHex)
-	if err != nil || len(pubkey) != ed25519.PublicKeySize {
-		return fmt.Errorf("invalid pubkey %q", pubkeyHex)
-	}
-	sig, err := hex.DecodeString(sigHex)
-	if err != nil || len(sig) != ed25519.SignatureSize {
-		return fmt.Errorf("invalid signature encoding")
-	}
-	if !ed25519.Verify(pubkey, msg, sig) {
-		return fmt.Errorf("signature verification failed")
-	}
-	return nil
+	return VerifyOwnerSignature(pubkeyHex, string(msg), sigHex)
 }
 
-// verifyCoZkPairSignatures checks both traders' ed25519 signatures over the
+// verifyCoZkPairSignatures checks both traders' signatures over the
 // canonical settlement message, each by its own order's pubkey.
 func verifyCoZkPairSignatures(req *CoZkSettleRequest, orderA, orderB *Order, msg []byte) error {
 	if err := verifyCoZkSignature(orderA.Pubkey, req.SigA, msg); err != nil {
@@ -318,7 +306,7 @@ func (ot *OrderBook) SettleOrdersCoZk(ctx *context.WriteContext) error {
 	if err != nil {
 		return fmt.Errorf("building settle_cozk public signals: %w", err)
 	}
-	if err := VerifyGroth16(ot.settleCoZkVK, req.ZkProof, signals); err != nil {
+	if err := account.VerifyGroth16(ot.settleCoZkVK, req.ZkProof, signals); err != nil {
 		return fmt.Errorf("settle_cozk proof verification failed: %w", err)
 	}
 
@@ -333,7 +321,7 @@ func (ot *OrderBook) SettleOrdersCoZk(ctx *context.WriteContext) error {
 func (ot *OrderBook) applyCoZkSettlement(
 	ctx *context.WriteContext, req *CoZkSettleRequest, orderA, orderB *Order, variant string,
 ) error {
-	// Pre-flight the cash IDs we are about to mint. computeCashID is
+	// Pre-flight the cash IDs we are about to mint. account.ComputeCashID is
 	// content-addressed over client-chosen commitments, so a caller could set
 	// a recv/locked commitment that collides with an existing cash and make a
 	// CreateCash fail *after* collateral is already spent (the per-tripod
@@ -343,14 +331,14 @@ func (ot *OrderBook) applyCoZkSettlement(
 	// collateral. `newCashIDs` are the recv cashes plus the surviving order's
 	// relisted locked cash (if any).
 	mintIDs := []string{
-		computeCashID(orderA.Pubkey, recvToken(orderA), CipherText(req.RecvACommitment)),
-		computeCashID(orderB.Pubkey, recvToken(orderB), CipherText(req.RecvBCommitment)),
+		account.ComputeCashID(orderA.Pubkey, recvToken(orderA), account.CipherText(req.RecvACommitment)),
+		account.ComputeCashID(orderB.Pubkey, recvToken(orderB), account.CipherText(req.RecvBCommitment)),
 	}
 	switch req.Cmp {
 	case 1:
-		mintIDs = append(mintIDs, computeCashID(orderA.Pubkey, lockToken(orderA), CipherText(req.NewLockedACommitment)))
+		mintIDs = append(mintIDs, account.ComputeCashID(orderA.Pubkey, lockToken(orderA), account.CipherText(req.NewLockedACommitment)))
 	case -1:
-		mintIDs = append(mintIDs, computeCashID(orderB.Pubkey, lockToken(orderB), CipherText(req.NewLockedBCommitment)))
+		mintIDs = append(mintIDs, account.ComputeCashID(orderB.Pubkey, lockToken(orderB), account.CipherText(req.NewLockedBCommitment)))
 	}
 	for _, id := range mintIDs {
 		if ot.Account.CashExists(id) {
@@ -377,13 +365,13 @@ func (ot *OrderBook) applyCoZkSettlement(
 		{orderB, req.RecvBCommitment},
 	} {
 		token := recvToken(mint.ord)
-		cash := &Cash{
-			ID:      computeCashID(mint.ord.Pubkey, token, CipherText(mint.commitment)),
+		cash := &account.Cash{
+			ID:      account.ComputeCashID(mint.ord.Pubkey, token, account.CipherText(mint.commitment)),
 			Pubkey:  mint.ord.Pubkey,
 			Token:   token,
-			Amount:  CipherText(mint.commitment),
+			Amount:  account.CipherText(mint.commitment),
 			ZkProof: req.ZkProof,
-			Status:  Active,
+			Status:  account.Active,
 		}
 		if err := ot.Account.CreateCash(cash); err != nil {
 			return fmt.Errorf("failed to create recv cash for order %s: %w", mint.ord.ID, err)
@@ -414,7 +402,7 @@ func (ot *OrderBook) applyCoZkSettlement(
 			return err
 		}
 		relisted, rematched, err = ot.relistWithRemainder(
-			orderB, CipherText(req.NewOrderBCommitment), CipherText(req.NewLockedBCommitment), req.ZkProof)
+			orderB, account.CipherText(req.NewOrderBCommitment), account.CipherText(req.NewLockedBCommitment), req.ZkProof)
 		if err != nil {
 			return err
 		}
@@ -424,7 +412,7 @@ func (ot *OrderBook) applyCoZkSettlement(
 			return err
 		}
 		relisted, rematched, err = ot.relistWithRemainder(
-			orderA, CipherText(req.NewOrderACommitment), CipherText(req.NewLockedACommitment), req.ZkProof)
+			orderA, account.CipherText(req.NewOrderACommitment), account.CipherText(req.NewLockedACommitment), req.ZkProof)
 		if err != nil {
 			return err
 		}
@@ -457,23 +445,23 @@ func (ot *OrderBook) applyCoZkSettlement(
 }
 
 // relistWithRemainder keeps the surviving larger order on the book: mints its
-// new Locked collateral cash, swaps the order's amount commitment and input
+// new account.Locked collateral cash, swaps the order's amount commitment and input
 // cash list, clears the match linkage, and returns it to Pending (retaining
 // its original block height, i.e. its time priority). It then immediately
 // attempts a re-match against the book. Returns the updated order and the
 // counter order it re-matched with (nil if none).
 func (ot *OrderBook) relistWithRemainder(
-	ord *Order, newOrderCommitment, newLockedCommitment CipherText, zkProof string,
+	ord *Order, newOrderCommitment, newLockedCommitment account.CipherText, zkProof string,
 ) (*Order, *Order, error) {
 	token := lockToken(ord)
-	newLockedID := computeCashID(ord.Pubkey, token, newLockedCommitment)
-	lockedCash := &Cash{
+	newLockedID := account.ComputeCashID(ord.Pubkey, token, newLockedCommitment)
+	lockedCash := &account.Cash{
 		ID:      newLockedID,
 		Pubkey:  ord.Pubkey,
 		Token:   token,
 		Amount:  newLockedCommitment,
 		ZkProof: zkProof,
-		Status:  Locked,
+		Status:  account.Locked,
 		By:      string(ord.ID),
 	}
 	if err := ot.Account.CreateCash(lockedCash); err != nil {
