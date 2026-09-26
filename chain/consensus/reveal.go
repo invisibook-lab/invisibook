@@ -10,8 +10,6 @@ import (
 
 	"github.com/yu-org/yu/common"
 	"github.com/yu-org/yu/core/types"
-
-	"github.com/invisibook-lab/invisibook/store"
 )
 
 // revealResubscribeDelay is how long the listener waits before retrying after
@@ -74,8 +72,8 @@ func (r *BlockReveal) Validate() error {
 }
 
 // ToRow converts a received reveal into the row the store keeps.
-func (r *BlockReveal) ToRow() *store.Reveal {
-	return &store.Reveal{
+func (r *BlockReveal) ToRow() *Reveal {
+	return &Reveal{
 		BlockHash:   r.L2BlockHash,
 		Height:      r.L2BlockHeight,
 		Random:      r.Random,
@@ -87,7 +85,7 @@ func (r *BlockReveal) ToRow() *store.Reveal {
 
 // RevealFromRow rebuilds a broadcastable reveal from a stored row, which is
 // how a node answers a peer catching up.
-func RevealFromRow(row *store.Reveal) *BlockReveal {
+func RevealFromRow(row *Reveal) *BlockReveal {
 	return &BlockReveal{
 		L2BlockHeight: row.Height,
 		L2BlockHash:   row.BlockHash,

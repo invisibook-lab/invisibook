@@ -57,11 +57,11 @@ type ProofOfBuy struct {
 	l1Submitter L1CommitmentSubmitter
 	// bids holds the opening of every commitment this node posted. L1 carries
 	// only the commitment, so losing an opening forfeits that bid outright.
-	bids *store.Bids
+	bids *Bids
 	// reveals holds the openings the whole network has published, this node's
 	// own included. Fork choice reads them: without the opening, a block's
 	// goal cannot be tied to any commitment on L1.
-	reveals *store.Reveals
+	reveals *Reveals
 	// revealSyncer catches up on the openings this node missed while it was
 	// down. Gossip cannot: a topic carries only what is published after you
 	// subscribe.
@@ -88,7 +88,7 @@ type ProofOfBuy struct {
 // `paymentBook` must be the same instance the HTTP endpoint writes into;
 // `bids` must be backed by the chain database, since an opening that is lost
 // cannot be reconstructed.
-func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, l1Reader L1Reader, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1CommitmentSubmitter, bids *store.Bids, reveals *store.Reveals, paymentBook *PaymentBook, pending *store.Pending) *ProofOfBuy {
+func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, l1Reader L1Reader, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1CommitmentSubmitter, bids *Bids, reveals *Reveals, paymentBook *PaymentBook, pending *store.Pending) *ProofOfBuy {
 	tri := tripod.NewTripod()
 	p := &ProofOfBuy{
 		Tripod:               tri,
@@ -969,7 +969,7 @@ func (p *ProofOfBuy) submitCommitment(pf *pendingFinalization) error {
 	}
 
 	blockHash := pf.block.Hash.String()
-	if err := p.bids.Save(&store.BlockBid{
+	if err := p.bids.Save(&BlockBid{
 		BlockHash:  blockHash,
 		Height:     pf.block.Height,
 		Goal:       cdata.BlockScore,

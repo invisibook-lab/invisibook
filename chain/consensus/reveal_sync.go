@@ -8,8 +8,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/yu-org/yu/common"
-
-	"github.com/invisibook-lab/invisibook/store"
 )
 
 // RevealSyncCode is the p2p request code for catching up on openings.
@@ -32,9 +30,9 @@ type RevealStore interface {
 	HighestHeight() (common.BlockNum, error)
 	// SinceHeight returns openings at or above `height`, in ascending order,
 	// at most `limit` of them when `limit` is positive.
-	SinceHeight(height common.BlockNum, limit int) ([]*store.Reveal, error)
+	SinceHeight(height common.BlockNum, limit int) ([]*Reveal, error)
 	// Put records one opening.
-	Put(reveal *store.Reveal) error
+	Put(reveal *Reveal) error
 }
 
 // PeerRequester is the slice of the p2p network the syncer needs: ask one

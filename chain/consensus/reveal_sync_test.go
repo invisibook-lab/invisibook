@@ -9,19 +9,17 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/yu-org/yu/common"
-
-	"github.com/invisibook-lab/invisibook/store"
 )
 
 // fakeRevealStore is an in-memory RevealStore, which is the whole point of
 // that interface being narrow.
 type fakeRevealStore struct {
-	rows   map[string]*store.Reveal
+	rows   map[string]*Reveal
 	putErr error
 }
 
 func newFakeRevealStore() *fakeRevealStore {
-	return &fakeRevealStore{rows: make(map[string]*store.Reveal)}
+	return &fakeRevealStore{rows: make(map[string]*Reveal)}
 }
 
 func (f *fakeRevealStore) HighestHeight() (common.BlockNum, error) {
@@ -34,8 +32,8 @@ func (f *fakeRevealStore) HighestHeight() (common.BlockNum, error) {
 	return highest, nil
 }
 
-func (f *fakeRevealStore) SinceHeight(height common.BlockNum, limit int) ([]*store.Reveal, error) {
-	var out []*store.Reveal
+func (f *fakeRevealStore) SinceHeight(height common.BlockNum, limit int) ([]*Reveal, error) {
+	var out []*Reveal
 	for _, row := range f.rows {
 		if row.Height >= height {
 			out = append(out, row)
@@ -47,7 +45,7 @@ func (f *fakeRevealStore) SinceHeight(height common.BlockNum, limit int) ([]*sto
 	return out, nil
 }
 
-func (f *fakeRevealStore) Put(reveal *store.Reveal) error {
+func (f *fakeRevealStore) Put(reveal *Reveal) error {
 	if f.putErr != nil {
 		return f.putErr
 	}

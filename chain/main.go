@@ -85,16 +85,16 @@ func main() {
 	}
 	// Only the commitment goes to L1; its opening lives here. A lost opening
 	// forfeits the bid, so it is persisted rather than kept in memory.
-	if err := store.MigrateBidTable(db); err != nil {
+	if err := consensus.MigrateBidTable(db); err != nil {
 		logrus.Fatal("migrating bid table: ", err)
 	}
-	bids := store.NewBids(db)
+	bids := consensus.NewBids(db)
 	// Openings collected from the whole network. Fork choice reads them, so
 	// they are consensus input rather than bookkeeping.
-	if err := store.MigrateRevealTable(db); err != nil {
+	if err := consensus.MigrateRevealTable(db); err != nil {
 		logrus.Fatal("migrating reveal table: ", err)
 	}
-	reveals := store.NewReveals(db)
+	reveals := consensus.NewReveals(db)
 	pending := store.NewPending(db)
 	pending.Register(account.CashApplier{})
 	pending.Register(core.Appliers()...)

@@ -1,4 +1,4 @@
-package store
+package consensus
 
 import (
 	"errors"
@@ -99,10 +99,6 @@ func (b *Bids) RecordSubmission(blockHash, l1TxHash string) error {
 // moments: the transaction hash the instant the submission is sent, the
 // location only once an L1 block has taken it in. `blockHash` must name a bid
 // already saved.
-//
-// Takes plain strings rather than a location struct from the consensus package
-// on purpose — that package already depends on this one, and importing it back
-// would close a cycle.
 func (b *Bids) RecordLocation(blockHash, l1BlockHash string, txIdx uint32) error {
 	result := b.db.Model(&BlockBid{}).
 		Where("block_hash = ?", blockHash).

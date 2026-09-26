@@ -197,7 +197,7 @@ only once that submission confirms.
   `L1CommitmentSubmitter` interface plus its mock. Only a commitment reaches
   L1: submitting the header and score in the clear would hand the L1 block
   producer exactly what it needs to censor selectively.
-- [`bid.go`](../chain/store/bid.go) — the openings of those commitments,
+- [`bid_store.go`](../chain/consensus/bid_store.go) — the openings of those commitments,
   written to disk *before* each submission goes out. L1 carries only the
   commitment, so an opening lost to a crash would leave a commitment nobody can
   ever open and tokens spent for nothing.

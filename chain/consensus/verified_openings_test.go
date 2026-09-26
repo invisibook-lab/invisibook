@@ -14,7 +14,7 @@ import (
 
 // newTestPoB builds a ProofOfBuy carrying only what verifiedOpenings reads:
 // the two L1 interfaces and a reveal store over an in-memory database.
-func newTestPoB(t *testing.T, reader L1Reader, verifier L1PaymentVerifier) (*ProofOfBuy, *store.Reveals) {
+func newTestPoB(t *testing.T, reader L1Reader, verifier L1PaymentVerifier) (*ProofOfBuy, *Reveals) {
 	t.Helper()
 
 	// A database per test: a shared-cache in-memory DSN is one database for
@@ -23,10 +23,10 @@ func newTestPoB(t *testing.T, reader L1Reader, verifier L1PaymentVerifier) (*Pro
 	if err != nil {
 		t.Fatalf("opening the test database: %v", err)
 	}
-	if err := store.MigrateRevealTable(db); err != nil {
+	if err := MigrateRevealTable(db); err != nil {
 		t.Fatalf("migrating the reveal table: %v", err)
 	}
-	reveals := store.NewReveals(db)
+	reveals := NewReveals(db)
 
 	return &ProofOfBuy{l1Reader: reader, l1Verifier: verifier, reveals: reveals}, reveals
 }
