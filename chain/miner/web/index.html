@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invisibook Miner</title>
+<style>
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f0f2f5; --border: #dde1e7;
+  --text: #16191d; --muted: #5d6673; --accent: #2456d6; --accent-text: #ffffff;
+  --ok: #167a4a; --ok-bg: #e2f4ea; --warn: #93600a; --warn-bg: #fbf0d9;
+  --bad: #b3261e; --bad-bg: #fbe4e2; --info: #2456d6; --info-bg: #e5edfc;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #101317; --surface: #181c21; --surface-2: #20252b; --border: #2c323a;
+    --text: #e8ebef; --muted: #98a2b0; --accent: #6b93ff; --accent-text: #0c1017;
+    --ok: #5fd39a; --ok-bg: #16362a; --warn: #e5b558; --warn-bg: #3a2f14;
+    --bad: #ff8a80; --bad-bg: #3d1d1b; --info: #8fb0ff; --info-bg: #1c2a4a;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #101317; --surface: #181c21; --surface-2: #20252b; --border: #2c323a;
+  --text: #e8ebef; --muted: #98a2b0; --accent: #6b93ff; --accent-text: #0c1017;
+  --ok: #5fd39a; --ok-bg: #16362a; --warn: #e5b558; --warn-bg: #3a2f14;
+  --bad: #ff8a80; --bad-bg: #3d1d1b; --info: #8fb0ff; --info-bg: #1c2a4a;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 24px 16px 64px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+h1 { font-size: 20px; margin: 0; letter-spacing: .02em; }
+h1 span { color: var(--muted); font-weight: 400; }
+h2 { font-size: 15px; margin: 0 0 12px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.stat { background: var(--surface-2); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+.stat .k { color: var(--muted); font-size: 12px; }
+.stat .v { font-size: 18px; font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
+.stat .v.mono { font-family: var(--mono); font-size: 12px; font-weight: 500; }
+.stat .sub { color: var(--muted); font-size: 12px; }
+.form { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; align-items: end; }
+label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+input[type=text], input[type=number], input[type=password] {
+  width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg); color: var(--text); font: inherit; }
+input:focus-visible, button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; background: var(--bg); color: var(--text); padding: 8px 14px; cursor: pointer; font: inherit; }
+.seg button[aria-pressed=true] { background: var(--accent); color: var(--accent-text); }
+button { font: inherit; padding: 8px 14px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+button.danger { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 600; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.spacer { flex: 1; }
+.muted { color: var(--muted); }
+.hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.banner { border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+.banner.bad { background: var(--bad-bg); color: var(--bad); }
+.banner.warn { background: var(--warn-bg); color: var(--warn); }
+.banner.ok { background: var(--ok-bg); color: var(--ok); }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.chip.ok { background: var(--ok-bg); color: var(--ok); }
+.chip.warn { background: var(--warn-bg); color: var(--warn); }
+.chip.bad { background: var(--bad-bg); color: var(--bad); }
+.chip.info { background: var(--info-bg); color: var(--info); }
+.chip.idle { background: var(--surface-2); color: var(--muted); }
+.tablewrap { max-height: 340px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; margin-top: 12px; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--surface-2); font-size: 12px; color: var(--muted); font-weight: 600; }
+tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td input { padding: 3px 6px; text-align: right; width: 150px; font-variant-numeric: tabular-nums; }
+td .bar { display: inline-block; height: 6px; border-radius: 3px; background: var(--accent); opacity: .55; vertical-align: middle; }
+.mono { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+.pp { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+.pp-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.pp-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 4px 16px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+.pp-meta b { color: var(--text); font-weight: 500; }
+.empty { color: var(--muted); padding: 8px 0; }
+.check { display: flex; gap: 8px; align-items: center; color: var(--text); font-size: 14px; }
+.check input { width: auto; }
+@media (max-width: 560px) { td input { width: 110px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>INVISIBOOK <span>· Proof of Buy miner</span></h1>
+    <div class="muted" id="conn">connecting…</div>
+  </header>
+
+  <div id="banner"></div>
+
+  <section class="card" aria-labelledby="h-status">
+    <h2 id="h-status">Miner</h2>
+    <div class="stats" id="stats"></div>
+  </section>
+
+  <section class="card" aria-labelledby="h-prepay">
+    <h2 id="h-prepay">New prepayment</h2>
+    <div class="form">
+      <label><span>Total to prepay (CKB)</span>
+        <input type="text" id="total" inputmode="decimal" value="1000">
+      </label>
+      <label><span>First L2 height</span>
+        <input type="number" id="from" min="1" step="1">
+      </label>
+      <label><span>Number of heights</span>
+        <input type="number" id="count" min="1" max="2000" step="1" value="50">
+      </label>
+      <div>
+        <div class="muted" style="font-size:12px;margin-bottom:4px">Split</div>
+        <div class="seg" role="group" aria-label="Split mode">
+          <button type="button" id="mode-random" aria-pressed="true">Random</button>
+          <button type="button" id="mode-even" aria-pressed="false">Even</button>
+        </div>
+      </div>
+      <label id="spread-wrap"><span>Random spread ±<span id="spread-val">50</span>%</span>
+        <input type="range" id="spread" min="5" max="95" step="5" value="50">
+      </label>
+      <div class="row">
+        <button type="button" id="gen" class="primary">Generate split</button>
+      </div>
+    </div>
+    <p class="hint" id="from-hint"></p>
+
+    <div id="plan" hidden>
+      <div class="row" style="margin-top:12px">
+        <div><b id="plan-total"></b> <span class="muted" id="plan-info"></span></div>
+        <div class="spacer"></div>
+        <button type="button" id="reroll">Re-roll</button>
+      </div>
+      <div class="tablewrap"><table>
+        <thead><tr><th class="num">L2 height</th><th class="num">Allocation (CKB)</th><th>Share</th></tr></thead>
+        <tbody id="plan-rows"></tbody>
+      </table></div>
+      <p class="hint">Amounts are editable. What you pay is the sum of this table, and every height's amount stays hidden on L1 until you declare it.</p>
+      <div class="row" style="margin-top:8px">
+        <label class="check"><input type="checkbox" id="auto" checked> Declare automatically once L1 confirms</label>
+        <div class="spacer"></div>
+        <span id="confirm-area"></span>
+        <button type="button" id="pay" class="primary">Prepay</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="h-list">
+    <h2 id="h-list">Prepayments</h2>
+    <div id="list"><div class="empty">Nothing yet.</div></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const SHANNON = 100000000n;
+const state = { mode: "random", status: null, plan: [], open: new Set(), lastKey: "" };
+
+// h builds an element; children are text or nodes, never HTML, so nothing the
+// API returns can inject markup.
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, "");
+    else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid != null) el.append(kid);
+  return el;
+}
+
+function token() { try { return localStorage.getItem("pobToken") || ""; } catch { return ""; } }
+
+async function api(path, body) {
+  const headers = {};
+  if (token()) headers.Authorization = "Bearer " + token();
+  const opts = { headers };
+  if (body !== undefined) {
+    opts.method = "POST";
+    headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, opts);
+  let data = null;
+  try { data = await res.json(); } catch { /* non-JSON error page */ }
+  if (!res.ok) {
+    const err = new Error((data && data.error) || (data && data.rejected && data.rejected.map(r => `height ${r.block_height}: ${r.error}`).join("; ")) || res.statusText);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+// ---- CKB amounts, in BigInt shannon so nothing rounds ----
+function parseCkb(s) {
+  s = String(s).trim();
+  const m = /^(\d*)(?:\.(\d{0,8}))?$/.exec(s);
+  if (!m || (m[1] === "" && !m[2])) return null;
+  const v = BigInt(m[1] || "0") * SHANNON + BigInt((m[2] || "").padEnd(8, "0") || "0");
+  return v > 0n ? v : null;
+}
+function fmtCkb(v) {
+  const whole = v / SHANNON, frac = (v % SHANNON).toString().padStart(8, "0").replace(/0+$/, "");
+  const w = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return frac ? `${w}.${frac}` : w;
+}
+
+// ---- banner ----
+function banner(kind, text) {
+  const b = $("banner");
+  b.replaceChildren();
+  if (!text) return;
+  b.append(h("div", { class: "banner " + kind, role: kind === "bad" ? "alert" : "status" }, text));
+  // Successes fade on their own; errors stay until the next action.
+  if (kind === "ok") setTimeout(() => { if (b.textContent === text) b.replaceChildren(); }, 6000);
+}
+
+function authBanner() {
+  const b = $("banner");
+  // Already asking: rebuilding it on every poll would wipe what is being typed.
+  if (b.querySelector("input")) return;
+  const input = h("input", { type: "password", placeholder: "API token", value: token(), style: "max-width:260px" });
+  b.replaceChildren(h("div", { class: "banner warn" },
+    h("div", { class: "row" },
+      h("span", {}, "This node wants an API token (miner_api_token)."),
+      input,
+      h("button", { type: "button", onclick: () => { try { localStorage.setItem("pobToken", input.value); } catch {} refresh(); } }, "Save"))));
+}
+
+function handleError(e) {
+  if (e.status === 401) return authBanner();
+  banner("bad", e.message);
+}
+
+// ---- status ----
+function stat(k, v, sub, mono) {
+  return h("div", { class: "stat" }, h("div", { class: "k" }, k), h("div", { class: "v" + (mono ? " mono" : "") }, v), sub ? h("div", { class: "sub" }, sub) : null);
+}
+
+function renderStatus(s) {
+  state.status = s;
+  $("conn").textContent = `${s.network || "node"} · L2 height ${s.consumed_height}`;
+  const stats = $("stats");
+  stats.replaceChildren(
+    stat("CKB balance", s.balance_ckb != null ? s.balance_ckb + " CKB" : "—", s.l1_error || (s.l1_enabled ? "spendable on L1" : "no [ckb] section: mock L1")),
+    stat("L2 height", String(s.consumed_height), (s.chain_advancing ? "advancing" : "waiting for a declaration") + ` · ${s.pending_declarations} queued`),
+    stat("L1 tip", s.l1_tip ? String(s.l1_tip) : "—", "CKB block"),
+    stat("Payment lead", `${s.payment_lead_blocks} L1 blocks`, "before a prepayment can be bid with"),
+    stat("Miner address", s.address || "—", "", true),
+    stat("Miner key", s.miner_pubkey.slice(0, 20) + "…", "", true),
+  );
+  // Follow the suggestion until the miner types their own height.
+  const from = $("from");
+  if (!from.dataset.edited) from.value = s.suggested_from;
+  $("from-hint").textContent = s.chain_advancing
+    ? `Earliest height a prepayment made now can be expected to bid at: ${s.suggested_from}. Earlier heights will pass while it waits out the ${s.payment_lead_blocks}-block payment lead.`
+    : `The chain is waiting at height ${s.consumed_height + 1}, so a prepayment can start there: it is declared once it clears the ${s.payment_lead_blocks}-block payment lead.`;
+  $("pay").disabled = !s.l1_enabled;
+  $("pay").title = s.l1_enabled ? "" : "This node has no CKB wallet";
+}
+
+// ---- plan ----
+function planBody(mode) {
+  return { mode, from: Number($("from").value), count: Number($("count").value),
+           total_ckb: $("total").value, spread_percent: Number($("spread").value) };
+}
+
+async function generate() {
+  banner("", "");
+  $("confirm-area").replaceChildren();
+  try {
+    const p = await api("/pob/plan", planBody(state.mode));
+    state.plan = p.allocations.map(a => ({ height: a.height, ckb: a.amount_ckb }));
+    renderPlan();
+  } catch (e) { handleError(e); }
+}
+
+function planSum() {
+  let sum = 0n, bad = 0;
+  for (const r of state.plan) { const v = parseCkb(r.ckb); if (v === null) bad++; else sum += v; }
+  return { sum, bad };
+}
+
+function renderPlan() {
+  const wrap = $("plan");
+  wrap.hidden = state.plan.length === 0;
+  const rows = $("plan-rows");
+  rows.replaceChildren();
+  const values = state.plan.map(r => parseCkb(r.ckb) ?? 0n);
+  const max = values.reduce((a, b) => (b > a ? b : a), 1n);
+  state.plan.forEach((r, i) => {
+    const bar = h("span", { class: "bar", style: `width:${Number((values[i] * 100n) / max)}px` });
+    const input = h("input", { type: "text", inputmode: "decimal", value: r.ckb, "aria-label": "Allocation for height " + r.height,
+      oninput: (e) => { r.ckb = e.target.value; const v = parseCkb(r.ckb); bar.style.width = v === null ? "0px" : Number((v * 100n) / max) + "px"; e.target.setAttribute("aria-invalid", v === null); updateTotals(); } });
+    rows.append(h("tr", {}, h("td", { class: "num" }, String(r.height)), h("td", { class: "num" }, input), h("td", {}, bar)));
+  });
+  updateTotals();
+}
+
+function updateTotals() {
+  const { sum, bad } = planSum();
+  $("plan-total").textContent = fmtCkb(sum) + " CKB";
+  $("plan-info").textContent = `over ${state.plan.length} heights` + (bad ? ` · ${bad} invalid amount(s)` : "");
+  $("pay").disabled = bad > 0 || sum === 0n || !(state.status && state.status.l1_enabled);
+  $("confirm-area").replaceChildren();
+}
+
+function askConfirm() {
+  const { sum } = planSum();
+  const area = $("confirm-area");
+  area.replaceChildren(
+    h("span", { class: "muted" }, `Spends ${fmtCkb(sum)} CKB on L1. Irreversible.`),
+    h("button", { type: "button", class: "danger", onclick: submit }, "Confirm"),
+    h("button", { type: "button", onclick: () => area.replaceChildren() }, "Cancel"));
+}
+
+async function submit() {
+  $("confirm-area").replaceChildren();
+  $("pay").disabled = true;
+  try {
+    await api("/pob/prepay", {
+      mode: "manual",
+      allocations: state.plan.map(r => ({ height: r.height, amount_ckb: r.ckb })),
+      auto_declare: $("auto").checked,
+    });
+    state.plan = [];
+    renderPlan();
+    banner("ok", "Prepayment submitted. Follow it below.");
+    refresh();
+  } catch (e) { handleError(e); updateTotals(); }
+}
+
+// ---- prepayments ----
+const STATUS_CHIP = { broadcasting: "info", confirming: "info", confirmed: "ok", failed: "bad", unconfirmed: "warn", interrupted: "warn" };
+const BID_CHIP = { maturing: "info", pending: "idle", prepaid: "info", declared: "ok", passed: "idle", missed: "warn" };
+
+function renderList(list) {
+  const root = $("list");
+  if (!list.length) { root.replaceChildren(h("div", { class: "empty" }, "Nothing yet.")); return; }
+  root.replaceChildren(...list.slice().reverse().map(renderPrepayment));
+}
+
+function renderPrepayment(p) {
+  const heights = p.bids.map(b => b.height);
+  const declared = p.bids.filter(b => b.state === "declared" || b.state === "passed").length;
+  const open = p.bids.some(b => b.state === "prepaid");
+  const expanded = state.open.has(p.id);
+  const actions = [];
+  if (open) actions.push(h("button", { type: "button", class: "primary", onclick: () => declare(p.id) }, "Declare remaining"));
+  actions.push(h("button", { type: "button", onclick: () => { expanded ? state.open.delete(p.id) : state.open.add(p.id); state.lastKey = ""; refresh(); } }, expanded ? "Hide heights" : "Show heights"));
+
+  const meta = [
+    ["Heights", `${Math.min(...heights)} – ${Math.max(...heights)} (${heights.length})`],
+    ["Declared", `${declared} / ${heights.length}`],
+    ["L1 block", p.l1_block ? String(p.l1_block) : "—"],
+    ["Declarable from L1", p.matures_at ? String(p.matures_at) : "—"],
+    ["Created", new Date(p.created_at).toLocaleString()],
+  ].map(([k, v]) => h("div", {}, k + " ", h("b", {}, v)));
+
+  const card = h("div", { class: "pp" },
+    h("div", { class: "pp-head" },
+      h("b", {}, p.total_ckb + " CKB"),
+      h("span", { class: "chip " + (STATUS_CHIP[p.status] || "idle") }, p.status),
+      h("span", { class: "muted mono" }, p.id),
+      h("div", { class: "spacer" }), ...actions),
+    h("div", { class: "pp-meta" }, ...meta),
+    p.tx_hash ? h("div", { class: "pp-meta" }, h("div", {}, "Tx ", h("span", { class: "mono" }, p.tx_hash))) : null,
+    p.error ? h("div", { class: "banner bad", style: "margin-top:8px" }, p.error) : null);
+
+  if (expanded) {
+    card.append(h("div", { class: "tablewrap" }, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", { class: "num" }, "Height"), h("th", { class: "num" }, "Allocation (CKB)"), h("th", {}, "State"))),
+      h("tbody", {}, p.bids.map(b => h("tr", {},
+        h("td", { class: "num" }, String(b.height)), h("td", { class: "num" }, b.amount_ckb),
+        h("td", {}, h("span", { class: "chip " + (BID_CHIP[b.state] || "idle") }, b.state))))))));
+  }
+  return card;
+}
+
+async function declare(id) {
+  try {
+    const r = await api("/pob/declare", { prepayment_id: id });
+    banner("ok", `Declared ${r.accepted.length} height(s).`);
+    refresh();
+  } catch (e) { handleError(e); }
+}
+
+// ---- refresh loop ----
+async function refresh() {
+  try {
+    const [s, l] = await Promise.all([api("/pob/status"), api("/pob/prepayments")]);
+    if ($("banner").querySelector(".banner.warn")) banner("", "");
+    // Only repaint what changed, so an open table keeps its scroll position.
+    const key = JSON.stringify([s, l]);
+    if (key !== state.lastKey) {
+      state.lastKey = key;
+      renderStatus(s);
+      renderList(l.prepayments);
+    }
+  } catch (e) { $("conn").textContent = "offline"; handleError(e); }
+}
+
+// ---- wiring ----
+function setMode(m) {
+  state.mode = m;
+  $("mode-random").setAttribute("aria-pressed", m === "random");
+  $("mode-even").setAttribute("aria-pressed", m === "even");
+  $("spread-wrap").hidden = m !== "random";
+}
+$("mode-random").addEventListener("click", () => setMode("random"));
+$("mode-even").addEventListener("click", () => setMode("even"));
+$("spread").addEventListener("input", (e) => { $("spread-val").textContent = e.target.value; });
+$("from").addEventListener("input", (e) => { e.target.dataset.edited = "1"; });
+$("gen").addEventListener("click", generate);
+$("reroll").addEventListener("click", generate);
+$("pay").addEventListener("click", askConfirm);
+
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>

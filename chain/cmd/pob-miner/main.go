@@ -39,32 +39,8 @@ import (
 	"github.com/invisibook-lab/invisibook/ckb"
 	"github.com/invisibook-lab/invisibook/config"
 	"github.com/invisibook-lab/invisibook/consensus"
+	"github.com/invisibook-lab/invisibook/miner"
 )
-
-// schedule is what `prepay` writes and `declare` reads: the openings of the
-// commitments now sitting on L1, and which prepayment they belong to.
-type schedule struct {
-	// TxHash is the L1 transaction that created the budget cell.
-	TxHash string `json:"tx_hash"`
-	// L1Block is the block that transaction was committed in.
-	//
-	// V4 measures from here: a block may only spend an allocation that
-	// predates its own anchoring by PaymentLeadBlocks. An anchor's height is
-	// fixed the moment it lands, so a block produced too early does not
-	// become valid later — it can never settle. Knowing this number is what
-	// lets a miner wait rather than find out afterwards.
-	L1Block uint64 `json:"l1_block"`
-	// Bids are the plaintext allocations, one per L2 height.
-	Bids []bid `json:"bids"`
-}
-
-// bid is one height's opening: the amount committed, and the blinding factor
-// that opens the commitment on L1.
-type bid struct {
-	Height uint32 `json:"height"`
-	Amount string `json:"amount"`
-	Random string `json:"random"`
-}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -210,28 +186,26 @@ func runPrepay(argv []string) error {
 		return fmt.Errorf("a prepayment of %s shannon does not fit in a cell's capacity", total)
 	}
 
-	bids := make([]bid, 0, *count)
-	entries := make([]ckb.BudgetEntry, 0, *count)
-	for i := uint(0); i < *count; i++ {
-		height := uint32(*from + i)
-		random, err := randomHex()
-		if err != nil {
-			return err
-		}
-		entry, err := ckb.Allocate(height, perHeight, random)
-		if err != nil {
-			return err
-		}
-		entries = append(entries, entry)
-		bids = append(bids, bid{Height: height, Amount: perHeight.String(), Random: random})
+	plan, err := miner.BuildPlan(miner.PlanRequest{
+		Mode:  miner.ModeEven,
+		From:  uint32(*from),
+		Count: uint32(*count),
+		Total: total,
+	}, rand.Reader)
+	if err != nil {
+		return err
+	}
+	bids, entries, err := miner.Seal(plan, rand.Reader)
+	if err != nil {
+		return err
 	}
 
 	// Saved before the transaction goes out, for the same reason the node
 	// stores a bid before submitting its commitment: a crash in between would
 	// otherwise leave commitments on L1 that nobody can ever open, and the
 	// capacity behind them spent for nothing.
-	plan := &schedule{Bids: bids}
-	if err := save(*out, plan); err != nil {
+	prepayment := &miner.Prepayment{Bids: bids}
+	if err := miner.SavePrepayment(*out, prepayment); err != nil {
 		return err
 	}
 
@@ -242,8 +216,8 @@ func runPrepay(argv []string) error {
 	if err != nil {
 		return err
 	}
-	plan.TxHash = txHash
-	if err := save(*out, plan); err != nil {
+	prepayment.TxHash = txHash
+	if err := miner.SavePrepayment(*out, prepayment); err != nil {
 		return err
 	}
 
@@ -251,8 +225,8 @@ func runPrepay(argv []string) error {
 	if err != nil {
 		return err
 	}
-	plan.L1Block = block
-	if err := save(*out, plan); err != nil {
+	prepayment.L1Block = block
+	if err := miner.SavePrepayment(*out, prepayment); err != nil {
 		return err
 	}
 
@@ -281,13 +255,9 @@ func runDeclare(argv []string) error {
 		return err
 	}
 
-	raw, err := os.ReadFile(*in)
+	plan, err := miner.LoadPrepayment(*in)
 	if err != nil {
-		return fmt.Errorf("reading the openings: %w", err)
-	}
-	var plan schedule
-	if err := json.Unmarshal(raw, &plan); err != nil {
-		return fmt.Errorf("parsing %s: %w", *in, err)
+		return err
 	}
 	if plan.TxHash == "" {
 		return fmt.Errorf("%s names no prepayment transaction; did prepay finish?", *in)
@@ -357,28 +327,4 @@ func newClient(cfg *config.Config) (*ckb.Client, error) {
 		return nil, err
 	}
 	return ckb.New(&cfg.CKB, privkey.Bytes())
-}
-
-// randomHex returns a fresh 32-byte blinding factor.
-// It must be unpredictable: it is the only thing hiding an allocation from
-// competitors until the miner chooses to reveal it.
-func randomHex() (string, error) {
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("drawing a blinding factor: %w", err)
-	}
-	return hex.EncodeToString(raw), nil
-}
-
-// save writes the openings, replacing whatever was there.
-func save(path string, plan *schedule) error {
-	raw, err := json.MarshalIndent(plan, "", "  ")
-	if err != nil {
-		return err
-	}
-	// 0600: these openings are worth exactly as much as the prepayment.
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		return fmt.Errorf("saving the openings to %s: %w", path, err)
-	}
-	return nil
 }

@@ -75,30 +75,12 @@ func (w *wallet) minerLock() *ckbtypes.Script {
 // one handler registered here carries the dep the config resolved, so the
 // same code path serves mainnet, testnet and a local devnet.
 func (w *wallet) newBuilder(ctx context.Context) (*builder.CkbTransactionBuilder, error) {
-	lock := w.minerLock()
-	minerAddr, err := address.Address{Script: lock, Network: w.network}.Encode()
+	minerAddr, err := w.Address()
 	if err != nil {
-		return nil, fmt.Errorf("encoding the miner address: %w", err)
+		return nil, err
 	}
 
-	// Built by hand rather than through collector.NewLiveCellIterator so the
-	// caller's context reaches the indexer calls: that constructor falls back
-	// to context.Background(), which would leave cell collection running
-	// after the block that wanted it has moved on.
-	iterator := &collector.LiveCellIterator{
-		LiveCellGetter: cellGetter{rpc: w.rpc, ctx: ctx},
-		SearchKey: &indexer.SearchKey{
-			Script:           lock,
-			ScriptType:       ckbtypes.ScriptTypeLock,
-			ScriptSearchMode: ckbtypes.ScriptSearchModeExact,
-			WithData:         true,
-		},
-		SearchOrder: indexer.SearchOrderAsc,
-		Limit:       cellPageSize,
-	}
-
-	b := builder.NewCkbTransactionBuilder(ckbtypes.NetworkTest,
-		&plainCells{inner: iterator, inflight: w.inflight})
+	b := builder.NewCkbTransactionBuilder(ckbtypes.NetworkTest, w.plainCellIterator(ctx))
 	b.ScriptHandlers = []collector.ScriptHandler{
 		&handler.Secp256k1Blake160SighashAllScriptHandler{
 			CellDep:  w.sighashDep,
@@ -110,6 +92,64 @@ func (w *wallet) newBuilder(ctx context.Context) (*builder.CkbTransactionBuilder
 		return nil, fmt.Errorf("adding the change output: %w", err)
 	}
 	return b, nil
+}
+
+// plainCellIterator walks this wallet's spendable cells: bare capacity under
+// the miner lock, less whatever its own unconfirmed transactions have taken.
+//
+// Built by hand rather than through collector.NewLiveCellIterator so the
+// caller's context reaches the indexer calls: that constructor falls back
+// to context.Background(), which would leave cell collection running
+// after the block that wanted it has moved on.
+func (w *wallet) plainCellIterator(ctx context.Context) *plainCells {
+	iterator := &collector.LiveCellIterator{
+		LiveCellGetter: cellGetter{rpc: w.rpc, ctx: ctx},
+		SearchKey: &indexer.SearchKey{
+			Script:           w.minerLock(),
+			ScriptType:       ckbtypes.ScriptTypeLock,
+			ScriptSearchMode: ckbtypes.ScriptSearchModeExact,
+			WithData:         true,
+		},
+		SearchOrder: indexer.SearchOrderAsc,
+		Limit:       cellPageSize,
+	}
+	return &plainCells{inner: iterator, inflight: w.inflight}
+}
+
+// Address is the miner's CKB address: where its funds have to be, and the
+// address every cell this wallet creates is locked to.
+func (w *wallet) Address() (string, error) {
+	addr, err := address.Address{Script: w.minerLock(), Network: w.network}.Encode()
+	if err != nil {
+		return "", fmt.Errorf("encoding the miner address: %w", err)
+	}
+	return addr, nil
+}
+
+// Balance is the capacity, in shannon, this wallet could spend right now: the
+// same cells a transaction would draw on, so it is what a prepayment can
+// actually use rather than everything sitting under the lock.
+func (w *wallet) Balance(ctx context.Context) (uint64, error) {
+	cells := w.plainCellIterator(ctx)
+	var total uint64
+	for cells.HasNext() {
+		cell := cells.Next()
+		if cell == nil || cell.Output == nil {
+			continue
+		}
+		total += cell.Output.Capacity
+	}
+	return total, nil
+}
+
+// TipNumber is the number of L1's current tip. It is what tells a miner
+// whether a prepayment is old enough to bid with yet (V4).
+func (w *wallet) TipNumber(ctx context.Context) (uint64, error) {
+	tip, err := w.rpc.GetTipBlockNumber(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("asking L1 for its tip: %w", err)
+	}
+	return tip, nil
 }
 
 // send builds, signs and broadcasts a transaction, returning its hash.

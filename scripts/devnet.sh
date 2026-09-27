@@ -5,6 +5,8 @@
 # against a real chain instead of the in-memory mock.
 #
 #   scripts/devnet.sh up       build, deploy, prepay and start everything
+#   scripts/devnet.sh console  build, deploy and start everything, leaving
+#                              prepaying to the browser console at :8081
 #   scripts/devnet.sh status   where things are: L1 tip, L2 tip, anchoring
 #   scripts/devnet.sh logs     follow the L2 node's log
 #   scripts/devnet.sh down     stop the processes, keep the chain data
@@ -193,6 +195,7 @@ text = text.replace('db_path      = "data/chain.db"', f'db_path      = "{dev}/ch
 # The protocol behaviour: sit out any height with no L1-confirmed declaration.
 # Off in the repo's config because the mock L1 can confirm nothing.
 text = text.replace('require_declared_payment = false', 'require_declared_payment = true')
+text = text.replace('schedule_path         = "data/prepayments.json"', f'schedule_path         = "{dev}/prepayments.json"')
 open(dst, 'w').write(text)
 EOF
 
@@ -294,6 +297,29 @@ up() {
     say "up. \`scripts/devnet.sh status\` to watch it, \`logs\` to follow the node."
 }
 
+# console brings up the same devnet as `up` but stops short of prepaying: the
+# L2 node starts at once and waits at height one for a declaration, and the
+# prepayment is made from the miner console instead of pob-miner.
+console() {
+    preflight
+    mkdir -p "$DEV"
+
+    local lock_args mining_addr
+    lock_args="$(cd "$CHAIN" && go run ./cmd/pob-miner address -core-config cfg/core.toml \
+        | awk '/^lock_args/ {print $2}')"
+    [ -n "$lock_args" ] || die "could not derive the miner's lock args"
+    mining_addr="$(cd "$CHAIN" && go run ./cmd/pob-miner address -lock-args "$MINING_ADDR_ARGS" \
+        | awk '/^address/ {print $2}')"
+
+    init_devnet "$lock_args"
+    start_l1
+    build_contracts
+    write_configs "$(genesis_dep_tx)" "$mining_addr"
+    start_l2
+
+    say "up. Open $PAYMENT/ to prepay; \`scripts/devnet.sh status\` to watch the chain."
+}
+
 status() {
     printf 'L1 tip      %s\n' "$(tip 2>/dev/null || echo 'not running')"
     if [ -f "$DEV/logs/l2.log" ]; then
@@ -330,10 +356,11 @@ down() {
 }
 
 case "${1:-up}" in
-    up)     up ;;
+    up)      up ;;
+    console) console ;;
     status) status ;;
     logs)   tail -f "$DEV/logs/l2.log" ;;
     down)   down ;;
     clean)  down; rm -rf "$DEV"; say "removed $DEV" ;;
-    *)      die "usage: $0 up|status|logs|down|clean" ;;
+    *)      die "usage: $0 up|console|status|logs|down|clean" ;;
 esac

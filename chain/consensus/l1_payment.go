@@ -269,6 +269,14 @@ func (b *PaymentBook) Pending() int {
 	return len(b.byHeight)
 }
 
+// Consumed reports the highest height the chain has already settled. Every
+// declaration has to be for a height above it.
+func (b *PaymentBook) Consumed() common.BlockNum {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.consumed
+}
+
 // PayL1TokenRequest is the request body for POST /pay_l1_token. One request may
 // declare payments for any number of future L2 heights.
 type PayL1TokenRequest struct {
@@ -292,6 +300,9 @@ type PaymentServer struct {
 	book        *PaymentBook
 	verifier    L1PaymentVerifier
 	minerPubkey string
+	// mounts add further routes to the engine Router builds, so the miner
+	// console can share this listener instead of opening another port.
+	mounts []func(gin.IRouter)
 }
 
 // NewPaymentServer builds a PaymentServer.
@@ -304,10 +315,8 @@ func NewPaymentServer(book *PaymentBook, verifier L1PaymentVerifier, minerPubkey
 	return &PaymentServer{book: book, verifier: verifier, minerPubkey: minerPubkey}
 }
 
-// PayL1Token handles POST /pay_l1_token requests. Each declaration is first
-// checked for shape, then looked up on L1; the whole batch is accepted or
-// rejected together, and a rejected batch leaves the book untouched and
-// reports one reason per offending height.
+// PayL1Token handles POST /pay_l1_token requests by handing the batch to
+// Declare and mapping its outcome onto an HTTP status.
 func (ps *PaymentServer) PayL1Token(c *gin.Context) {
 	var req PayL1TokenRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -319,36 +328,47 @@ func (ps *PaymentServer) PayL1Token(c *gin.Context) {
 		return
 	}
 
+	resp := ps.Declare(c.Request.Context(), req.Payments)
+	if len(resp.Rejected) > 0 {
+		c.JSON(http.StatusBadRequest, resp)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// Declare puts a batch of declarations into the book. Each declaration is
+// first checked for shape, then looked up on L1; the whole batch is accepted
+// or rejected together, and a rejected batch leaves the book untouched and
+// reports one reason per offending height.
+// `payments` must not be empty.
+func (ps *PaymentServer) Declare(ctx context.Context, payments []PaymentDeclaration) PayL1TokenResponse {
 	// Shape first, so a malformed field is reported as such rather than as a
 	// lookup failure.
-	inputs, rejected := ValidateDeclarations(req.Payments)
+	inputs, rejected := ValidateDeclarations(payments)
 	if rejected != nil {
-		logrus.Warnf("PaymentServer: rejected malformed batch of %d declaration(s)", len(req.Payments))
-		c.JSON(http.StatusBadRequest, PayL1TokenResponse{Rejected: rejected})
-		return
+		logrus.Warnf("PaymentServer: rejected malformed batch of %d declaration(s)", len(payments))
+		return PayL1TokenResponse{Rejected: rejected}
 	}
 
 	// Then confirm every allocation against L1 before the book is touched, so
 	// a batch containing one unconfirmable payment never takes partial effect.
-	if rejected := ps.confirmOnL1(c.Request.Context(), inputs); rejected != nil {
+	if rejected := ps.confirmOnL1(ctx, inputs); rejected != nil {
 		logrus.Warnf("PaymentServer: rejected batch of %d declaration(s): %d failed L1 confirmation",
-			len(req.Payments), len(rejected))
-		c.JSON(http.StatusBadRequest, PayL1TokenResponse{Rejected: rejected})
-		return
+			len(payments), len(rejected))
+		return PayL1TokenResponse{Rejected: rejected}
 	}
 
 	if rejected := ps.book.Store(inputs); rejected != nil {
-		logrus.Warnf("PaymentServer: rejected batch of %d declaration(s)", len(req.Payments))
-		c.JSON(http.StatusBadRequest, PayL1TokenResponse{Rejected: rejected})
-		return
+		logrus.Warnf("PaymentServer: rejected batch of %d declaration(s)", len(payments))
+		return PayL1TokenResponse{Rejected: rejected}
 	}
 
-	accepted := make([]common.BlockNum, 0, len(req.Payments))
-	for _, d := range req.Payments {
+	accepted := make([]common.BlockNum, 0, len(payments))
+	for _, d := range payments {
 		accepted = append(accepted, d.BlockHeight)
 	}
 	logrus.Infof("PaymentServer: accepted %d payment declaration(s), all confirmed on L1", len(accepted))
-	c.JSON(http.StatusOK, PayL1TokenResponse{Accepted: accepted})
+	return PayL1TokenResponse{Accepted: accepted}
 }
 
 // confirmOnL1 confirms every already-validated declaration against L1,
@@ -374,7 +394,16 @@ func (ps *PaymentServer) Router() *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.POST("/pay_l1_token", ps.PayL1Token)
+	for _, mount := range ps.mounts {
+		mount(r)
+	}
 	return r
+}
+
+// Mount registers `mount` to add routes to the engine Router builds.
+// It must be called before Start.
+func (ps *PaymentServer) Mount(mount func(gin.IRouter)) {
+	ps.mounts = append(ps.mounts, mount)
 }
 
 // Start serves the payment endpoints on `listenAddr` (e.g. "127.0.0.1:8081")

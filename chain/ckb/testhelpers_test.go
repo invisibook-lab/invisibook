@@ -31,6 +31,8 @@ type fakeNode struct {
 	sent []*ckbtypes.Transaction
 	// cells is what the indexer hands cell collection.
 	cells []*indexer.LiveCell
+	// tip is the block number GetTipBlockNumber reports.
+	tip uint64
 }
 
 func newFakeNode() *fakeNode {
@@ -68,6 +70,10 @@ func (f *fakeNode) SendTransaction(_ context.Context, tx *ckbtypes.Transaction) 
 	f.sent = append(f.sent, tx)
 	hash := tx.ComputeHash()
 	return &hash, nil
+}
+
+func (f *fakeNode) GetTipBlockNumber(context.Context) (uint64, error) {
+	return f.tip, nil
 }
 
 // addBlock records a block as known, and optionally as the one the node

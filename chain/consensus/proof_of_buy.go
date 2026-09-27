@@ -202,6 +202,12 @@ func (p *ProofOfBuy) reconcile() {
 		return
 	}
 
+	// The payment book lives in memory and starts out believing nothing has
+	// been produced. Left that way it would take declarations for heights the
+	// chain already has, and anything reading it would report the chain at
+	// zero, so it is told where the chain resumes from.
+	p.paymentBook.Settle(applied)
+
 	logrus.Infof("PoB: reconciled to height=%d", applied)
 }
 

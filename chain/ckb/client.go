@@ -43,7 +43,7 @@ var (
 // Narrow on purpose, and for the same reason the reveal syncer takes a narrow
 // store: rpc.Client is a hundred-odd methods wide, and depending on all of it
 // would mean the only way to exercise a read path is to run a CKB node.
-// Against five methods, a test supplies a struct.
+// Against six methods, a test supplies a struct.
 type nodeRPC interface {
 	// GetBlock returns a block by hash, or nil when the node does not know it.
 	GetBlock(ctx context.Context, hash ckbtypes.Hash) (*ckbtypes.Block, error)
@@ -55,6 +55,8 @@ type nodeRPC interface {
 	GetCells(ctx context.Context, searchKey *indexer.SearchKey, order indexer.SearchOrder, limit uint64, afterCursor string) (*indexer.LiveCells, error)
 	// SendTransaction broadcasts a signed transaction.
 	SendTransaction(ctx context.Context, tx *ckbtypes.Transaction) (*ckbtypes.Hash, error)
+	// GetTipBlockNumber returns the number of the canonical chain's tip.
+	GetTipBlockNumber(ctx context.Context) (uint64, error)
 }
 
 // rpc.Client is the production nodeRPC; checked here so that a signature

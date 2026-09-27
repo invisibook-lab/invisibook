@@ -34,6 +34,15 @@ type Config struct {
 	// development convenience, not key management. A real deployment wants
 	// the key held somewhere it can be protected.
 	MinerSecret string `toml:"miner_secret"`
+	// SchedulePath is the file the miner console keeps its prepayments in,
+	// openings included. Losing it forfeits every prepayment in it, so it is
+	// written with owner-only permissions and belongs on the same volume as
+	// the chain database.
+	SchedulePath string `toml:"schedule_path"`
+	// MinerAPIToken, when set, is the bearer token the miner console's
+	// endpoints demand. When empty they answer loopback callers only, since
+	// they spend the miner's CKB.
+	MinerAPIToken string `toml:"miner_api_token"`
 }
 
 // DefaultConsensusConfig returns a Config with sensible defaults.
@@ -47,5 +56,6 @@ func DefaultConsensusConfig() Config {
 		PaymentListen:          ":8081",
 		L1PollInterval:         1000,
 		MinerSecret:            "node1",
+		SchedulePath:           "data/prepayments.json",
 	}
 }

@@ -162,7 +162,9 @@ only once that submission confirms.
   keyed by L2 height, and a gin `POST /pay_l1_token` endpoint through which a
   miner declares payments — `{block_height, amount, random, tx_hash}` — for any
   number of future heights in one batch, and a batch is accepted or rejected as
-  a whole.
+  a whole. The same listener serves the miner console (see
+  [`miner/`](../chain/miner)): a browser page at `/` and the `/pob` endpoints
+  behind it.
 
   On L1 a miner makes **one large prepayment** and then allocates parts of it
   to individual L2 heights. Each allocation is stored as a **Poseidon
@@ -340,8 +342,43 @@ relayer, gated on the same `zk_proof`.
 | [chain/ckb/tx.go](../chain/ckb/tx.go) | `wallet`: cell collection, fee, signing; skips cells carrying type scripts (R3.4) |
 | [chain/ckb/inflight.go](../chain/ckb/inflight.go) | Keeps this wallet's unconfirmed transactions from spending each other's inputs |
 | [chain/cmd/ckb-deploy](../chain/cmd/ckb-deploy) | Publishes the four PoB scripts and prints the `[ckb]` config |
+| [chain/miner](../chain/miner) | Miner console: prepay/allocation planning (even, random, manual), the openings store, declaration, and the browser UI on the payment listener |
 | [chain/cmd/pob-miner](../chain/cmd/pob-miner) | Miner side: address, prepay (budget cell), declare (openings) |
 | [scripts/devnet.sh](../scripts/devnet.sh) | Local CKB devnet + the whole PoB path end to end |
+
+#### Miner console
+
+Open `http://127.0.0.1:8081/` on the node's machine. The page drives these
+endpoints, which answer loopback callers only unless `miner_api_token` is set
+(then every call needs `Authorization: Bearer <token>`); writes must be
+`application/json`. Amounts are decimal CKB.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /pob/status` | Miner address, spendable CKB, settled L2 height, and the earliest height a prepayment made now can be bid at |
+| `POST /pob/plan` | Divide a prepayment without paying: `{mode, from, count, total_ckb, spread_percent}` or, for `manual`, `{allocations: [{height, amount_ckb}]}`. `mode` is `random` (default), `even` or `manual` |
+| `POST /pob/prepay` | Same body plus `auto_declare` (default true). Saves the openings, then sends the budget cell in the background; answers 202 |
+| `POST /pob/declare` | `{prepayment_id, from}`: hands the not-yet-declared openings to the node |
+| `GET /pob/prepayments` | Every prepayment with per-height state; blinding factors are never returned |
+
+Every split sums exactly to the total, because the budget cell is balanced by
+equality (R3.2). Openings live in `schedule_path` (mode 0600) and are written
+before the L1 transaction goes out.
+
+A prepayment is declared only once L1's tip reaches its budget cell's block +
+`PaymentLeadBlocks` (`matures_at`). The node produces a block as soon as a
+declaration for the waiting height arrives, so declaring earlier would yield a
+block whose anchor can never clear V4. Auto-declare waits for this; a manual
+`/pob/declare` before it is refused.
+
+The suggested start height continues from the miner's last allocation when
+that is still ahead, since a gap between prepayments is a height nobody
+produces for a solo miner. Otherwise it is the next height while the chain is
+waiting, or next + the lead converted to L2 heights at L1's measured pace
+while it is moving.
+
+`scripts/devnet.sh console` brings up a CKB devnet and the node without
+prepaying, for driving the whole flow from the console.
 
 ### 4.2 Core types cheat sheet
 
