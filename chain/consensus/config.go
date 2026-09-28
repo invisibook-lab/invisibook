@@ -34,14 +34,13 @@ type Config struct {
 	// development convenience, not key management. A real deployment wants
 	// the key held somewhere it can be protected.
 	MinerSecret string `toml:"miner_secret"`
-	// SchedulePath is the file the miner console keeps its prepayments in,
+	// SchedulePath is the file `pob-miner console` keeps its prepayments in,
 	// openings included. Losing it forfeits every prepayment in it, so it is
-	// written with owner-only permissions and belongs on the same volume as
-	// the chain database.
+	// written with owner-only permissions. The node itself never reads it.
 	SchedulePath string `toml:"schedule_path"`
-	// MinerAPIToken, when set, is the bearer token the miner console's
+	// MinerAPIToken, when set, is the bearer token `pob-miner console`'s
 	// endpoints demand. When empty they answer loopback callers only, since
-	// they spend the miner's CKB.
+	// they spend the miner's CKB. The node itself never reads it.
 	MinerAPIToken string `toml:"miner_api_token"`
 }
 

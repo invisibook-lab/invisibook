@@ -14,7 +14,6 @@ import (
 	"github.com/invisibook-lab/invisibook/config"
 	"github.com/invisibook-lab/invisibook/consensus"
 	"github.com/invisibook-lab/invisibook/core"
-	"github.com/invisibook-lab/invisibook/miner"
 	"github.com/invisibook-lab/invisibook/store"
 )
 
@@ -107,11 +106,9 @@ func main() {
 	// The payment endpoint confirms each declaration against L1 before it
 	// reaches the book, so it needs the same verifier and miner identity the
 	// consensus loop uses.
+	// The miner's console lives in `pob-miner console`, which declares and
+	// reads the book's state through this same listener.
 	paymentServer := consensus.NewPaymentServer(paymentBook, l1Verifier, consensus.MinerPubkeyHex(pubkey))
-
-	// The browser console shares that listener: it prepays, allocates and
-	// declares through the same key and the same book.
-	mountMinerConsole(paymentServer, paymentBook, l1Verifier, pubkey, coreCfg)
 	paymentServer.Start(coreCfg.Consensus.PaymentListen)
 
 	// PoB is the one tripod defining the genesis block (DefineGenesis); the
@@ -119,36 +116,6 @@ func main() {
 	startup.InitKernel(yuCfg).
 		WithTripods(pobTri, accountTri, orderBookTri, synchronizer.NewSynchronizer(yuCfg.SyncMode)).
 		Startup()
-}
-
-// mountMinerConsole adds the miner console to the payment server.
-//
-// The wallet is the CKB client when there is one; the verifier is that same
-// object, so a type assertion recovers it rather than connecting twice. Under
-// the mock L1 there is no wallet and the console runs read-only.
-//
-// A console that cannot keep its openings is worse than none — losing them
-// forfeits the prepayment — so failing to open the store is fatal.
-func mountMinerConsole(server *consensus.PaymentServer, book *consensus.PaymentBook, verifier consensus.L1PaymentVerifier, pubkey keypair.PubKey, cfg *config.Config) {
-	store, err := miner.OpenStore(cfg.Consensus.SchedulePath)
-	if err != nil {
-		logrus.Fatal("opening the prepayment store: ", err)
-	}
-
-	var wallet miner.Wallet
-	network := "mock"
-	if client, ok := verifier.(*ckb.Client); ok {
-		wallet, network = client, cfg.CKB.Network
-	}
-
-	svc := miner.NewService(wallet, server, book, store, miner.Info{
-		MinerPubkey:     consensus.MinerPubkeyHex(pubkey),
-		Network:         network,
-		BlockIntervalMs: cfg.Consensus.BlockInterval,
-	})
-	// Pick up prepayments a restart interrupted.
-	svc.Resume()
-	server.Mount(miner.NewAPI(svc, cfg.Consensus.MinerAPIToken).Mount)
 }
 
 // connectL1 returns the three interfaces the consensus reaches L1 through,

@@ -4,6 +4,11 @@
 //	pob-miner address              print the miner's CKB address and lock args
 //	pob-miner prepay               create the budget cell, save the openings
 //	pob-miner declare              post those openings to the node
+//	pob-miner console              the same, from a browser (see chain/miner)
+//
+// Prepaying proves the allocation table balances (R3.2), which takes the
+// Rust prover linked in with `-tags budgetstark` (`make build-pob-miner`).
+// The node never proves or pays: everything that spends lives here.
 //
 // The split between the last two is not incidental. `prepay` puts *commitments*
 // on L1 — a competitor reading the chain learns the miner's total and nothing
@@ -31,11 +36,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/nervosnetwork/ckb-sdk-go/v2/address"
 	ckbtypes "github.com/nervosnetwork/ckb-sdk-go/v2/types"
 	"github.com/yu-org/yu/common"
 	"github.com/yu-org/yu/core/keypair"
 
+	"github.com/invisibook-lab/invisibook/budgetproof"
 	"github.com/invisibook-lab/invisibook/ckb"
 	"github.com/invisibook-lab/invisibook/config"
 	"github.com/invisibook-lab/invisibook/consensus"
@@ -57,6 +64,8 @@ func main() {
 		err = runPrepay(args)
 	case "declare":
 		err = runDeclare(args)
+	case "console":
+		err = runConsole(args)
 	default:
 		usage()
 		os.Exit(2)
@@ -68,7 +77,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: pob-miner address|prepay|declare [flags]")
+	fmt.Fprintln(os.Stderr, "usage: pob-miner address|prepay|declare|console [flags]")
 }
 
 // runAddress prints where this miner's money has to be, and under which args
@@ -177,10 +186,9 @@ func runPrepay(argv []string) error {
 		return err
 	}
 
-	// The total has to equal what the table divides up (R3.2) — and equal the
-	// capacity moved into the mining addr (R3.3), which CreateBudget handles.
-	// R3.2 is not enforced anywhere yet, on chain or off; balancing it here is
-	// what an honest miner does while that is still on trust.
+	// The total has to equal what the table divides up (R3.2, proven in Seal)
+	// and the capacity moved into the mining addr (R3.3, which CreateBudget
+	// handles).
 	total := new(big.Int).Mul(perHeight, big.NewInt(int64(*count)))
 	if !total.IsUint64() {
 		return fmt.Errorf("a prepayment of %s shannon does not fit in a cell's capacity", total)
@@ -195,7 +203,7 @@ func runPrepay(argv []string) error {
 	if err != nil {
 		return err
 	}
-	bids, entries, err := miner.Seal(plan, rand.Reader)
+	bids, entries, proof, err := miner.Seal(plan, rand.Reader, budgetproof.Prove)
 	if err != nil {
 		return err
 	}
@@ -212,7 +220,7 @@ func runPrepay(argv []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	txHash, err := client.CreateBudget(ctx, total.Uint64(), entries)
+	txHash, err := client.CreateBudget(ctx, total.Uint64(), entries, proof)
 	if err != nil {
 		return err
 	}
@@ -245,7 +253,7 @@ func runPrepay(argv []string) error {
 // cell was created; what travels here is the plaintext that opens a
 // commitment already on L1, which is why the node can refuse a declaration
 // outright — a miner claiming more than it committed to produces a different
-// Poseidon hash.
+// Poseidon2 hash.
 func runDeclare(argv []string) error {
 	fs := flag.NewFlagSet("declare", flag.ExitOnError)
 	in := fs.String("in", "schedule.json", "the openings saved by prepay")
@@ -305,6 +313,67 @@ func runDeclare(argv []string) error {
 	fmt.Printf("declared %d of %d heights (%d..%d)\n",
 		len(answer.Accepted), len(payments), answer.Accepted[0], answer.Accepted[len(answer.Accepted)-1])
 	return nil
+}
+
+// runConsole serves the miner console: plan a prepayment in the browser,
+// shape each height's amount by hand, pay for it, and have its openings
+// declared once they clear the payment lead.
+//
+// It runs beside the node, not inside it. The console holds the miner's
+// wallet and the prover; what it needs from the node — the settled height,
+// the declarations queued, and a place to declare — it asks over the node's
+// payment listener.
+func runConsole(argv []string) error {
+	fs := flag.NewFlagSet("console", flag.ExitOnError)
+	cfgPath := fs.String("core-config", "cfg/core.toml", "path to the node's core config")
+	node := fs.String("node", "http://127.0.0.1:8081", "the node's payment listener")
+	listen := fs.String("listen", "127.0.0.1:8082", "where to serve the console")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	pubkey, _, err := minerKey(cfg)
+	if err != nil {
+		return err
+	}
+
+	// Without a [ckb] section there is no wallet: the console still plans
+	// and shows the chain, and says why it cannot pay.
+	var wallet miner.Wallet
+	network := "mock"
+	if cfg.CKB.Enabled {
+		client, err := newClient(cfg)
+		if err != nil {
+			return err
+		}
+		wallet, network = client, cfg.CKB.Network
+	}
+
+	// A console that cannot keep its openings is worse than none: losing
+	// them forfeits the prepayment.
+	store, err := miner.OpenStore(cfg.Consensus.SchedulePath)
+	if err != nil {
+		return fmt.Errorf("opening the prepayment store: %w", err)
+	}
+	nodeClient := miner.NewNodeClient(*node)
+	svc := miner.NewService(wallet, nodeClient, nodeClient, store, miner.Info{
+		MinerPubkey:     consensus.MinerPubkeyHex(pubkey),
+		Network:         network,
+		BlockIntervalMs: cfg.Consensus.BlockInterval,
+	})
+	// Pick up prepayments a restart interrupted.
+	svc.Resume()
+
+	gin.SetMode(gin.ReleaseMode)
+	router := gin.New()
+	router.Use(gin.Recovery())
+	miner.NewAPI(svc, cfg.Consensus.MinerAPIToken).Mount(router)
+	fmt.Printf("miner console on http://%s/ (node %s, schedule %s)\n", *listen, *node, cfg.Consensus.SchedulePath)
+	return router.Run(*listen)
 }
 
 // minerKey derives the node's miner keypair from the seed in its config, so

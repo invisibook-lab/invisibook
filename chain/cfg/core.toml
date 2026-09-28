@@ -23,10 +23,10 @@ payment_listen        = ":8081"
 # produces blocks with — V7 compares the two.
 miner_secret          = "node1"
 l1_poll_interval      = 1000   # ms, how often to ask L1 whether a commitment landed
-# Where the miner console keeps its prepayments, openings included. Losing this
-# file forfeits every prepayment in it, so back it up like a key.
+# Where `pob-miner console` keeps its prepayments, openings included. Losing
+# this file forfeits every prepayment in it, so back it up like a key.
 schedule_path         = "data/prepayments.json"
-# Bearer token for the miner console's /pob endpoints. Leave empty to serve
+# Bearer token for `pob-miner console`'s /pob endpoints. Leave empty to serve
 # this machine only; they spend the miner's CKB.
 miner_api_token       = ""
 

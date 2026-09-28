@@ -33,14 +33,14 @@ const (
 // BudgetEntry is one row of a miner's allocation table: what it committed to
 // bidding at one L2 height.
 //
-// The amount itself is not here and never reaches L1. Only the Poseidon
+// The amount itself is not here and never reaches L1. Only the Poseidon2
 // commitment to `(amount, random)` does, so that a rival cannot read how much
 // this miner is spending at a given height and bid just above it —
 // proof_of_buy.md §7.2. The opening travels on the L2 network instead.
 type BudgetEntry struct {
 	// Height is the L2 block height this allocation buys.
 	Height uint32
-	// Commitment is `consensus.PoseidonCommit(amount, random)`, a 64-char
+	// Commitment is `consensus.PaymentCommit(amount, random)`, a 64-char
 	// lowercase hex string.
 	Commitment string
 }

@@ -2,6 +2,7 @@ package ckb
 
 import (
 	"context"
+	"encoding/binary"
 	"math/big"
 	"testing"
 
@@ -15,16 +16,21 @@ func TestCreateBudget(t *testing.T) {
 	fund(client, node, 100_000_00000000)
 
 	const prepaid = 5_000_00000000
-	first, err := Allocate(100, big.NewInt(3_000_00000000), repeatHex("aa", 32))
+	first, err := Allocate(100, big.NewInt(3_000_00000000), repeatHex("2a", 32))
 	if err != nil {
 		t.Fatalf("committing to an allocation: %v", err)
 	}
-	second, err := Allocate(101, big.NewInt(2_000_00000000), repeatHex("bb", 32))
+	second, err := Allocate(101, big.NewInt(2_000_00000000), repeatHex("3b", 32))
 	if err != nil {
 		t.Fatalf("committing to an allocation: %v", err)
 	}
 
-	if _, err := client.CreateBudget(context.Background(), prepaid, []BudgetEntry{first, second}); err != nil {
+	// Real proofs run to ~110 KB, which is what makes chunking matter.
+	proof := make([]byte, 110_000)
+	for i := range proof {
+		proof[i] = byte(i * 7)
+	}
+	if _, err := client.CreateBudget(context.Background(), prepaid, []BudgetEntry{first, second}, proof); err != nil {
 		t.Fatalf("creating the budget cell: %v", err)
 	}
 	if len(node.sent) != 1 {
@@ -78,6 +84,35 @@ func TestCreateBudget(t *testing.T) {
 		t.Fatalf("the table reads back as %+v", data.Allocations)
 	}
 
+	// R3.2: the script reassembles its proof from WitnessArgs.output_type in
+	// the witnesses from the budget cell's own index on. Slot 0 still has to
+	// carry the sighash lock's placeholder, which signing fills in, and no
+	// witness may outgrow the lock's 32 KB buffer.
+	chunks := proofWitnesses(proof)
+	var joined []byte
+	for i := range chunks {
+		if budgetIdx+i >= len(tx.Witnesses) {
+			t.Fatalf("no witness for proof chunk %d", i)
+		}
+		args, err := ckbtypes.DeserializeWitnessArgs(tx.Witnesses[budgetIdx+i])
+		if err != nil {
+			t.Fatalf("witness %d is not WitnessArgs: %v", budgetIdx+i, err)
+		}
+		joined = append(joined, args.OutputType...)
+	}
+	if string(joined[4:]) != string(proof) || binary.LittleEndian.Uint32(joined) != uint32(len(proof)) {
+		t.Fatal("the witnesses do not reassemble into the proof")
+	}
+	for i, w := range tx.Witnesses {
+		if len(w) > maxWitnessSize {
+			t.Fatalf("witness %d is %d bytes, past the sighash lock's %d", i, len(w), maxWitnessSize)
+		}
+	}
+	first0, err := ckbtypes.DeserializeWitnessArgs(tx.Witnesses[0])
+	if err != nil || len(first0.Lock) == 0 {
+		t.Fatalf("witness 0 lost the sighash lock: %v", err)
+	}
+
 	// A type script runs when its cell is created, not only when it is spent,
 	// so both scripts have to be findable in this very transaction.
 	if !hasDep(tx, client.set.budgetDep) || !hasDep(tx, client.set.vaultDep) {
@@ -108,7 +143,7 @@ func TestCreateBudgetIgnoresCellsCarryingScripts(t *testing.T) {
 	})
 	fund(client, node, 100_000_00000000)
 
-	if _, err := client.CreateBudget(context.Background(), 5_000_00000000, nil); err != nil {
+	if _, err := client.CreateBudget(context.Background(), 5_000_00000000, nil, []byte("proof")); err != nil {
 		t.Fatalf("creating the budget cell: %v", err)
 	}
 	for _, input := range node.sent[0].Inputs {
@@ -125,7 +160,7 @@ func TestCreateBudgetRejectsPrepaymentBelowTheCellFloor(t *testing.T) {
 	client := testClient(t, node)
 	fund(client, node, 100_000_00000000)
 
-	if _, err := client.CreateBudget(context.Background(), 1, nil); err == nil {
+	if _, err := client.CreateBudget(context.Background(), 1, nil, []byte("proof")); err == nil {
 		t.Fatal("accepted a prepayment too small to occupy its own cell")
 	}
 	if len(node.sent) != 0 {
@@ -142,11 +177,49 @@ func TestCreateBudgetRejectsMalformedTable(t *testing.T) {
 
 	_, err := client.CreateBudget(context.Background(), 5_000_00000000, []BudgetEntry{
 		entry(9, "a"), entry(2, "b"),
-	})
+	}, []byte("proof"))
 	if err == nil {
 		t.Fatal("accepted a table that is not ascending by height")
 	}
 	if len(node.sent) != 0 {
 		t.Fatal("spent a prepayment on a table that cannot be read back")
+	}
+}
+
+// Without a proof the script cannot let the cell exist, so nothing is sent.
+func TestCreateBudgetRequiresAProof(t *testing.T) {
+	node := newFakeNode()
+	client := testClient(t, node)
+	fund(client, node, 100_000_00000000)
+
+	if _, err := client.CreateBudget(context.Background(), 5_000_00000000, nil, nil); err == nil {
+		t.Fatal("accepted a table with no balance proof")
+	}
+	if len(node.sent) != 0 {
+		t.Fatal("broadcast a budget cell L1 would refuse")
+	}
+}
+
+// The layout budget_stark::witness::split produces, byte for byte.
+func TestProofWitnessesLayout(t *testing.T) {
+	for _, n := range []int{0, 1, proofChunkPayload - 4, proofChunkPayload, 110_000} {
+		proof := make([]byte, n)
+		for i := range proof {
+			proof[i] = byte(i)
+		}
+		chunks := proofWitnesses(proof)
+		var joined []byte
+		for i, c := range chunks {
+			if len(c) > proofChunkPayload || len(c) == 0 {
+				t.Fatalf("n=%d: chunk %d is %d bytes", n, i, len(c))
+			}
+			joined = append(joined, c...)
+		}
+		if got := binary.LittleEndian.Uint32(joined); got != uint32(n) {
+			t.Fatalf("n=%d: length prefix %d", n, got)
+		}
+		if string(joined[4:]) != string(proof) {
+			t.Fatalf("n=%d: chunks do not reassemble", n)
+		}
 	}
 }

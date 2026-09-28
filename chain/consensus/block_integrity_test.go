@@ -313,7 +313,7 @@ func sealedRival(t *testing.T, verifier *MockL1PaymentVerifier) (*types.Block, [
 	}}
 	cdata := &ConsensusData{
 		VRFResult:  vrfResult,
-		L1Payment:  NewL1Payment("0xprepay", amount, randA, producer, ""),
+		L1Payment:  NewL1Payment("0xprepay", amount, randA, producer),
 		BlockScore: CalcBlockScore(amount, vrfResult.Output).String(),
 	}
 	if err := SealBlock(block, txnsWithHashes("0xaa", "0xbb"), cdata, pub, priv); err != nil {

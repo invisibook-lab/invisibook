@@ -4,9 +4,13 @@ The PoB miner console: lets a miner carry out the prepayment and allocation of
 [proof_of_buy_en.md](../../docs/proof_of_buy_en.md) §7.2 from a browser, instead of running
 `pob-miner prepay` / `declare` by hand.
 
-It starts with the node and is served on the node's payment listener (`payment_listen` in
-`core.toml`, `:8081` by default). It uses the node's own miner key and payment book, so the
-key that pays, produces and signs is always the same one (§6.2 Identity Binding).
+It runs in `pob-miner console`, beside the node rather than inside it, at `127.0.0.1:8082`
+by default. It derives the miner key from the node's own `core.toml`, so the key that pays,
+produces and signs is always the same one (§6.2 Identity Binding), and reaches the node over
+its payment listener (`:8081`): `GET /payment_status` for the settled height and the
+declaration queue, `POST /pay_l1_token` to declare. Prepaying proves the table balances
+(R3.2) with the Rust prover, so pob-miner is built with `make build-pob-miner`; the node
+never proves.
 
 ## What it does
 
@@ -38,7 +42,8 @@ key that pays, produces and signs is always the same one (§6.2 Identity Binding
 
 ## Usage
 
-With the node running, open `http://127.0.0.1:8081/` on the node's machine.
+With the node running, start `pob-miner console -core-config <the node's core.toml>` and
+open `http://127.0.0.1:8082/`.
 
 The node needs a `[ckb]` section. Against the in-memory mock L1 the console can show
 status but cannot prepay.
@@ -46,7 +51,7 @@ status but cannot prepay.
 Local end-to-end run:
 
 ```
-scripts/devnet.sh console   # CKB devnet + node, no prepayment
+scripts/devnet.sh console   # CKB devnet + node + pob-miner console, no prepayment
 scripts/devnet.sh down      # stop
 ```
 
@@ -73,16 +78,16 @@ Amounts are in CKB; writes must be `application/json`.
 # Preview: 1000 CKB split at random over heights 31..80
 curl -s -H 'Content-Type: application/json' \
   -d '{"mode":"random","from":31,"count":50,"total_ckb":"1000"}' \
-  http://127.0.0.1:8081/pob/plan
+  http://127.0.0.1:8082/pob/plan
 
 # Allocate by hand and prepay, without auto-declaring
 curl -s -H 'Content-Type: application/json' \
   -d '{"mode":"manual","allocations":[{"height":31,"amount_ckb":"20"},{"height":32,"amount_ckb":"5.5"}],"auto_declare":false}' \
-  http://127.0.0.1:8081/pob/prepay
+  http://127.0.0.1:8082/pob/prepay
 
 # Declare by hand once the lead time is met
 curl -s -H 'Content-Type: application/json' \
-  -d '{"prepayment_id":"<id>"}' http://127.0.0.1:8081/pob/declare
+  -d '{"prepayment_id":"<id>"}' http://127.0.0.1:8082/pob/declare
 ```
 
 ### Suggested start height

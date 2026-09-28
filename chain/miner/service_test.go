@@ -14,9 +14,25 @@ import (
 
 	"github.com/yu-org/yu/common"
 
+	"github.com/invisibook-lab/invisibook/budgetproof"
 	"github.com/invisibook-lab/invisibook/ckb"
 	"github.com/invisibook-lab/invisibook/consensus"
 )
+
+// fakeProve stands in for the Rust prover: the commitments it reports are
+// the real ones, the proof is not.
+func fakeProve(amounts []uint64, randoms []string) (*budgetproof.Proof, error) {
+	out := &budgetproof.Proof{Bytes: []byte("fake proof")}
+	for i, a := range amounts {
+		c, err := consensus.PaymentCommit(new(big.Int).SetUint64(a), randoms[i])
+		if err != nil {
+			return nil, err
+		}
+		out.Prepaid += a
+		out.Commitments = append(out.Commitments, c)
+	}
+	return out, nil
+}
 
 // fakeWallet stands in for the CKB client.
 type fakeWallet struct {
@@ -31,7 +47,7 @@ type fakeWallet struct {
 	tip *atomic.Uint64
 }
 
-func (w *fakeWallet) CreateBudget(_ context.Context, prepaid uint64, entries []ckb.BudgetEntry) (string, error) {
+func (w *fakeWallet) CreateBudget(_ context.Context, prepaid uint64, entries []ckb.BudgetEntry, _ []byte) (string, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.sendErr != nil {
@@ -93,6 +109,7 @@ func newTestService(t *testing.T, wallet Wallet) (*Service, *fakeBook, *fakeDecl
 	book, declarer := &fakeBook{consumed: 10}, &fakeDeclarer{}
 	svc := NewService(wallet, declarer, book, store, Info{MinerPubkey: "02ab", Network: "devnet", BlockIntervalMs: 3000})
 	svc.maturePoll = time.Millisecond
+	svc.prove = fakeProve
 	// Let background steps finish before the temp dir is removed under them.
 	t.Cleanup(svc.Wait)
 	return svc, book, declarer

@@ -539,7 +539,7 @@ func (p *ProofOfBuy) confirmDeclared(height common.BlockNum, declared *L1Payment
 	}
 	logrus.Infof("PoB: using declared payment height=%d amount=%s tx_hash=%s",
 		height, declared.Amount, declared.TxHash)
-	return NewL1Payment(declared.TxHash, declared.Amount, declared.Random, p.myPubkeyHex(), declared.BudgetProof)
+	return NewL1Payment(declared.TxHash, declared.Amount, declared.Random, p.myPubkeyHex())
 }
 
 // minPayment builds the fallback bid used in development mode, when this node

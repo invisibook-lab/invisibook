@@ -2,6 +2,7 @@ package ckb
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"math/big"
 
@@ -14,11 +15,11 @@ import (
 //
 // `amount` is what this miner is willing to spend on `height`, in shannon;
 // `randomHex` is the 64-character blinding factor that opens the commitment
-// later. The caller must keep both: the L2 network is shown the opening when
+// later (consensus.NewPaymentRandomHex). The caller must keep both: the L2 network is shown the opening when
 // the block is revealed, and an opening that is lost makes the allocation
 // unusable — the money is spent and the height cannot be bid on with it.
 func Allocate(height uint32, amount *big.Int, randomHex string) (BudgetEntry, error) {
-	commitment, err := consensus.PoseidonCommit(amount, randomHex)
+	commitment, err := consensus.PaymentCommit(amount, randomHex)
 	if err != nil {
 		return BudgetEntry{}, fmt.Errorf("committing to the allocation for height %d: %w", height, err)
 	}
@@ -33,10 +34,12 @@ func Allocate(height uint32, amount *big.Int, randomHex string) (BudgetEntry, er
 // or a miner could claim to have paid whatever it liked. The script sums the
 // two sides and refuses the mismatch.
 //
-// What it cannot refuse yet is a table that does not add up to that total —
-// R3.2, the zero-knowledge proof that `Σ amount == prepaid`, is not
-// implemented on either side. Until it is, the ceiling is unenforced and this
-// function's caller is on its honour.
+// The table must also add up to that total (R3.2). `proof` is the
+// zero-knowledge proof that it does (budgetproof.Prove over the same
+// openings); it travels in the witnesses from the budget cell's own output
+// index on (see proofWitnesses), where the script looks for it. Without a
+// proof that verifies against `prepaid` and exactly these commitments, in
+// this order, the cell cannot be created.
 //
 // The table is written once and can never be corrected (R3.1), which is what
 // makes §7.3's ordering enforceable — a miner that could raise an allocation
@@ -45,7 +48,10 @@ func Allocate(height uint32, amount *big.Int, randomHex string) (BudgetEntry, er
 // table.
 //
 // `allocations` must be ascending by height with no height twice.
-func (c *Client) CreateBudget(ctx context.Context, prepaid uint64, allocations []BudgetEntry) (string, error) {
+func (c *Client) CreateBudget(ctx context.Context, prepaid uint64, allocations []BudgetEntry, proof []byte) (string, error) {
+	if len(proof) == 0 {
+		return "", fmt.Errorf("the allocation table carries no balance proof")
+	}
 	data, err := (&BudgetData{Prepaid: prepaid, Allocations: allocations}).Encode()
 	if err != nil {
 		return "", err
@@ -77,7 +83,21 @@ func (c *Client) CreateBudget(ctx context.Context, prepaid uint64, allocations [
 		return "", err
 	}
 	b.AddOutput(payment, nil)
-	b.AddOutput(budget, data)
+	budgetIndex := b.AddOutput(budget, data)
+	// The proof has to be in place before Build, which prices the
+	// transaction by its size: added afterwards, ~100 KB would go unpaid.
+	// Build only appends one witness per input it draws, so the slots from
+	// the budget cell's index on are made here; the sighash handler later
+	// writes its placeholder into slot 0 without disturbing these.
+	chunks := proofWitnesses(proof)
+	for len(b.Witnesses) < budgetIndex+len(chunks) {
+		b.Witnesses = append(b.Witnesses, []byte{})
+	}
+	for i, chunk := range chunks {
+		if err := b.SetWitness(uint(budgetIndex+i), ckbtypes.WitnessTypeOutputType, chunk); err != nil {
+			return "", fmt.Errorf("attaching the balance proof: %w", err)
+		}
+	}
 	b.AddCellDep(c.set.vaultDep)
 	b.AddCellDep(c.set.budgetDep)
 
@@ -86,4 +106,33 @@ func (c *Client) CreateBudget(ctx context.Context, prepaid uint64, allocations [
 		return "", fmt.Errorf("prepaying %d shannon over %d heights: %w", prepaid, len(allocations), err)
 	}
 	return txHash, nil
+}
+
+// maxWitnessSize is the largest witness the standard sighash lock accepts: it
+// reads every witness it signs over — each of its own group's, and every one
+// past the inputs — into a 32 KB buffer, and fails with -22 on anything
+// bigger.
+const maxWitnessSize = 32 * 1024
+
+// proofChunkPayload is how much proof one witness carries: maxWitnessSize
+// less the WitnessArgs envelope, with room to spare.
+const proofChunkPayload = maxWitnessSize - 64
+
+// proofWitnesses cuts a balance proof into the chunks that go, one per
+// witness, into WitnessArgs.output_type from the budget cell's index on: the
+// total length as a little-endian u32, then the proof, split every
+// proofChunkPayload bytes. A ~110 KB proof in one witness would be refused by
+// the miner's own lock. This is budget_stark::witness::split; the script
+// reassembles it with budget_stark::witness::join.
+func proofWitnesses(proof []byte) [][]byte {
+	prefixed := make([]byte, 4, 4+len(proof))
+	binary.LittleEndian.PutUint32(prefixed, uint32(len(proof)))
+	prefixed = append(prefixed, proof...)
+
+	var chunks [][]byte
+	for len(prefixed) > proofChunkPayload {
+		chunks = append(chunks, prefixed[:proofChunkPayload])
+		prefixed = prefixed[proofChunkPayload:]
+	}
+	return append(chunks, prefixed)
 }

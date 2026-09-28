@@ -9,7 +9,9 @@ import (
 	"math/big"
 	"sort"
 
+	"github.com/invisibook-lab/invisibook/budgetproof"
 	"github.com/invisibook-lab/invisibook/ckb"
+	"github.com/invisibook-lab/invisibook/consensus"
 )
 
 // Mode is how a prepayment is divided among L2 heights.
@@ -26,10 +28,9 @@ const (
 )
 
 const (
-	// MaxAllocations bounds how many heights one prepayment may cover. The
-	// table is written to L1 once and its storage deposit stays locked until
-	// the budget cell is spent, so an accidental huge count is costly.
-	MaxAllocations = 2000
+	// MaxAllocations bounds how many heights one prepayment may cover: the
+	// most one balance proof covers (lib/budget-stark's MAX_ENTRIES).
+	MaxAllocations = 1024
 	// DefaultSpreadBps is how far a random share may stray from the mean when
 	// the caller does not say: ±50%.
 	DefaultSpreadBps = 5000
@@ -209,37 +210,64 @@ func manualPlan(table []Allocation) ([]Allocation, error) {
 	return plan, nil
 }
 
-// BlindingFactor draws a fresh 32-byte value, hex encoded. It must be
-// unpredictable: it is the only thing hiding an allocation from competitors
-// until the miner chooses to reveal it.
+// BlindingFactor draws 32 fresh random bytes, hex encoded. The console cuts
+// prepayment IDs from it; blinding factors for commitments come from
+// consensus.NewPaymentRandomHex, which additionally keeps every word inside
+// the commitment's field.
 func BlindingFactor(rnd io.Reader) (string, error) {
 	raw := make([]byte, 32)
 	if _, err := io.ReadFull(rnd, raw); err != nil {
-		return "", fmt.Errorf("drawing a blinding factor: %w", err)
+		return "", fmt.Errorf("drawing random bytes: %w", err)
 	}
 	return hex.EncodeToString(raw), nil
 }
 
+// Prover proves that a table of amounts under the given blinding factors
+// balances (R3.2). budgetproof.Prove is the real one.
+type Prover func(amounts []uint64, randoms []string) (*budgetproof.Proof, error)
+
 // Seal turns a plan into what has to be kept and what goes to L1: the bids,
-// each holding its amount and a fresh blinding factor, and the table of
-// commitments to them. The caller must persist the bids before sending the
-// entries anywhere: an opening that is lost makes its allocation unusable.
-func Seal(plan []Allocation, rnd io.Reader) ([]Bid, []ckb.BudgetEntry, error) {
+// each holding its amount and a fresh blinding factor, the table of
+// commitments to them, and the proof that the table adds up to the plan's
+// total. The caller must persist the bids before sending the entries
+// anywhere: an opening that is lost makes its allocation unusable.
+func Seal(plan []Allocation, rnd io.Reader, prove Prover) ([]Bid, []ckb.BudgetEntry, []byte, error) {
 	bids := make([]Bid, len(plan))
 	entries := make([]ckb.BudgetEntry, len(plan))
+	amounts := make([]uint64, len(plan))
+	randoms := make([]string, len(plan))
 	for i, a := range plan {
-		random, err := BlindingFactor(rnd)
+		if a.Amount == nil || a.Amount.Sign() < 0 || !a.Amount.IsUint64() {
+			return nil, nil, nil, fmt.Errorf("height %d: amount %v is not a u64", a.Height, a.Amount)
+		}
+		random, err := consensus.NewPaymentRandomHex(rnd)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		entry, err := ckb.Allocate(a.Height, a.Amount, random)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		entries[i] = entry
 		bids[i] = Bid{Height: a.Height, Amount: a.Amount.String(), Random: random}
+		amounts[i] = a.Amount.Uint64()
+		randoms[i] = random
 	}
-	return bids, entries, nil
+
+	proof, err := prove(amounts, randoms)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("proving the table balances: %w", err)
+	}
+	// The table on L1 holds this package's commitments and the proof is over
+	// the prover's. L1 would refuse a mismatch, but only after the miner had
+	// paid the fee; comparing here costs nothing.
+	for i, c := range proof.Commitments {
+		if c != entries[i].Commitment {
+			return nil, nil, nil, fmt.Errorf("height %d: the prover committed to %s, the table holds %s",
+				entries[i].Height, c, entries[i].Commitment)
+		}
+	}
+	return bids, entries, proof.Bytes, nil
 }
 
 // PlanTotal is the sum of a plan's amounts, in shannon.

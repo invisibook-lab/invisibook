@@ -13,6 +13,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/yu-org/yu/common"
 
+	"github.com/invisibook-lab/invisibook/budgetproof"
 	"github.com/invisibook-lab/invisibook/ckb"
 	"github.com/invisibook-lab/invisibook/consensus"
 )
@@ -53,7 +54,8 @@ var ErrNoL1 = errors.New("this node has no [ckb] section, so it has no L1 wallet
 // Wallet is the slice of the CKB client the console spends through.
 type Wallet interface {
 	// CreateBudget pays `prepaid` shannon and writes the allocation table.
-	CreateBudget(ctx context.Context, prepaid uint64, allocations []ckb.BudgetEntry) (string, error)
+	// `proof` shows the table balances and goes into the witness.
+	CreateBudget(ctx context.Context, prepaid uint64, allocations []ckb.BudgetEntry, proof []byte) (string, error)
 	// AwaitCommitted blocks until the transaction is in an L1 block and
 	// returns that block's number.
 	AwaitCommitted(ctx context.Context, txHash string) (uint64, error)
@@ -96,6 +98,8 @@ type Service struct {
 	info     Info
 	// rnd is where blinding factors and random shares come from.
 	rnd io.Reader
+	// prove makes the balance proof a budget cell needs (R3.2).
+	prove Prover
 	// maturePoll is how often a maturing prepayment checks L1's tip.
 	maturePoll time.Duration
 	// sendMu serialises prepayments, so two of them never pick the same
@@ -123,7 +127,7 @@ type Service struct {
 func NewService(wallet Wallet, declarer Declarer, book Book, store *Store, info Info) *Service {
 	return &Service{
 		wallet: wallet, declarer: declarer, book: book, store: store, info: info,
-		rnd: rand.Reader, maturePoll: defaultMaturePoll,
+		rnd: rand.Reader, prove: budgetproof.Prove, maturePoll: defaultMaturePoll,
 	}
 }
 
@@ -328,7 +332,7 @@ func (s *Service) Prepay(plan []Allocation, autoDeclare bool) (Prepayment, error
 		return Prepayment{}, fmt.Errorf("a prepayment of %s shannon does not fit in a cell's capacity", total)
 	}
 
-	bids, entries, err := Seal(plan, s.rnd)
+	bids, entries, proof, err := Seal(plan, s.rnd, s.prove)
 	if err != nil {
 		return Prepayment{}, err
 	}
@@ -354,7 +358,7 @@ func (s *Service) Prepay(plan []Allocation, autoDeclare bool) (Prepayment, error
 	s.background.Add(1)
 	go func() {
 		defer s.background.Done()
-		s.send(p.ID, total.Uint64(), entries)
+		s.send(p.ID, total.Uint64(), entries, proof)
 	}()
 	out, _ := s.store.Get(p.ID)
 	return out, nil
@@ -362,10 +366,10 @@ func (s *Service) Prepay(plan []Allocation, autoDeclare bool) (Prepayment, error
 
 // send broadcasts prepayment `id` and follows it to a commitment, recording
 // each step. It runs in the background.
-func (s *Service) send(id string, total uint64, entries []ckb.BudgetEntry) {
+func (s *Service) send(id string, total uint64, entries []ckb.BudgetEntry, proof []byte) {
 	s.sendMu.Lock()
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
-	txHash, err := s.wallet.CreateBudget(ctx, total, entries)
+	txHash, err := s.wallet.CreateBudget(ctx, total, entries, proof)
 	cancel()
 	s.sendMu.Unlock()
 

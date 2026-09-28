@@ -2,8 +2,12 @@ package miner
 
 import (
 	"bytes"
+	"errors"
 	"math/big"
+	"strings"
 	"testing"
+
+	"github.com/invisibook-lab/invisibook/budgetproof"
 )
 
 // zeroSource is a deterministic reader: every random draw comes out as zero.
@@ -126,12 +130,15 @@ func TestManualPlan(t *testing.T) {
 // factor and one commitment goes to L1 per height.
 func TestSealKeepsOpeningsAndCommitments(t *testing.T) {
 	plan := []Allocation{{Height: 5, Amount: big.NewInt(100)}, {Height: 6, Amount: big.NewInt(100)}}
-	bids, entries, err := Seal(plan, seededSource())
+	bids, entries, proof, err := Seal(plan, seededSource(), fakeProve)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(bids) != 2 || len(entries) != 2 {
 		t.Fatalf("got %d bids, %d entries", len(bids), len(entries))
+	}
+	if len(proof) == 0 {
+		t.Error("no balance proof")
 	}
 	if bids[0].Random == bids[1].Random {
 		t.Error("two heights share a blinding factor")
@@ -141,5 +148,32 @@ func TestSealKeepsOpeningsAndCommitments(t *testing.T) {
 	}
 	if bids[0].Height != entries[0].Height || len(bids[0].Random) != 64 {
 		t.Errorf("bid/entry mismatch: %+v %+v", bids[0], entries[0])
+	}
+}
+
+// A prover whose commitments disagree with the table would get the budget
+// cell refused on L1 after the fee is paid; Seal stops it first.
+func TestSealRefusesAProofOverOtherCommitments(t *testing.T) {
+	plan := []Allocation{{Height: 5, Amount: big.NewInt(100)}}
+	skewed := func(amounts []uint64, randoms []string) (*budgetproof.Proof, error) {
+		p, err := fakeProve(amounts, randoms)
+		if err != nil {
+			return nil, err
+		}
+		p.Commitments[0] = strings.Repeat("00", 32)
+		return p, nil
+	}
+	if _, _, _, err := Seal(plan, seededSource(), skewed); err == nil {
+		t.Fatal("sealed a table the proof does not cover")
+	}
+}
+
+func TestSealPassesProverFailuresOn(t *testing.T) {
+	plan := []Allocation{{Height: 5, Amount: big.NewInt(100)}}
+	unavailable := func([]uint64, []string) (*budgetproof.Proof, error) {
+		return nil, budgetproof.ErrUnavailable
+	}
+	if _, _, _, err := Seal(plan, seededSource(), unavailable); !errors.Is(err, budgetproof.ErrUnavailable) {
+		t.Fatalf("got %v, want ErrUnavailable", err)
 	}
 }

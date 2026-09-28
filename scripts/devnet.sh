@@ -6,7 +6,7 @@
 #
 #   scripts/devnet.sh up       build, deploy, prepay and start everything
 #   scripts/devnet.sh console  build, deploy and start everything, leaving
-#                              prepaying to the browser console at :8081
+#                              prepaying to `pob-miner console` at :8082
 #   scripts/devnet.sh status   where things are: L1 tip, L2 tip, anchoring
 #   scripts/devnet.sh logs     follow the L2 node's log
 #   scripts/devnet.sh down     stop the processes, keep the chain data
@@ -21,6 +21,7 @@ DEV="${DEV:-$ROOT/.devnet}"
 CHAIN="$ROOT/chain"
 RPC="http://127.0.0.1:8114"
 PAYMENT="http://127.0.0.1:8081"
+CONSOLE="127.0.0.1:8082"
 
 # The standard sighash lock. Same on a devnet as everywhere else — only the
 # genesis transaction holding it differs, which is why that is looked up.
@@ -169,6 +170,17 @@ genesis_dep_tx() {
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["transactions"][1]["hash"])'
 }
 
+# build_prover builds R3.2's balance prover (Rust) as the static library
+# pob-miner links with `-tags budgetstark`. Without it pob-miner cannot
+# prepay: a budget cell without a proof cannot exist. The node never proves.
+build_prover() {
+    say "building the budget balance prover"
+    (cd "$ROOT/lib" && cargo build --release -p budget-stark-ffi >/dev/null 2>&1) \
+        || die "building the prover failed; run \`make build-budget-stark-lib\` to see why"
+    mkdir -p "$CHAIN/lib"
+    cp "$ROOT/lib/target/release/libbudget_stark_ffi.a" "$CHAIN/lib/"
+}
+
 build_contracts() {
     say "building the four PoB scripts"
     export CC_riscv64imac_unknown_none_elf="${CC_riscv64imac_unknown_none_elf:-riscv64-elf-gcc}"
@@ -219,7 +231,7 @@ EOF
 
 prepay() {
     say "prepaying: $BID_COUNT heights from $BID_FROM at $BID_AMOUNT shannon each"
-    (cd "$CHAIN" && go run ./cmd/pob-miner prepay \
+    (cd "$CHAIN" && go run -tags budgetstark ./cmd/pob-miner prepay \
         -core-config "$DEV/core.toml" \
         -from "$BID_FROM" -count "$BID_COUNT" -amount "$BID_AMOUNT" \
         -out "$DEV/schedule.json")
@@ -288,6 +300,7 @@ up() {
     init_devnet "$lock_args"
     start_l1
     build_contracts
+    build_prover
     write_configs "$(genesis_dep_tx)" "$mining_addr"
     prepay
     wait_for_lead
@@ -297,9 +310,25 @@ up() {
     say "up. \`scripts/devnet.sh status\` to watch it, \`logs\` to follow the node."
 }
 
+# start_console runs `pob-miner console` beside the node: the browser page
+# that prepays, shapes each height's amount and declares.
+start_console() {
+    say "starting the miner console"
+    (cd "$CHAIN" && exec go run -tags budgetstark ./cmd/pob-miner console \
+        -core-config "$DEV/core.toml" -node "$PAYMENT" -listen "$CONSOLE") \
+        >"$DEV/logs/console.log" 2>&1 &
+    echo $! >"$DEV/console.pid"
+
+    for _ in $(seq 1 120); do
+        [ "$(http_code "http://$CONSOLE/")" != "000" ] && return 0
+        sleep 1
+    done
+    die "the miner console never came up; see $DEV/logs/console.log"
+}
+
 # console brings up the same devnet as `up` but stops short of prepaying: the
 # L2 node starts at once and waits at height one for a declaration, and the
-# prepayment is made from the miner console instead of pob-miner.
+# prepayment is made from the browser through `pob-miner console`.
 console() {
     preflight
     mkdir -p "$DEV"
@@ -314,10 +343,12 @@ console() {
     init_devnet "$lock_args"
     start_l1
     build_contracts
+    build_prover
     write_configs "$(genesis_dep_tx)" "$mining_addr"
     start_l2
+    start_console
 
-    say "up. Open $PAYMENT/ to prepay; \`scripts/devnet.sh status\` to watch the chain."
+    say "up. Open http://$CONSOLE/ to prepay; \`scripts/devnet.sh status\` to watch the chain."
 }
 
 status() {
@@ -333,7 +364,7 @@ status() {
 }
 
 down() {
-    for name in l2 ckb-miner ckb; do
+    for name in console l2 ckb-miner ckb; do
         if [ -f "$DEV/$name.pid" ]; then
             # `go run` execs the binary as a child, so the recorded pid is the
             # wrapper and killing it alone leaves the node holding its ports.

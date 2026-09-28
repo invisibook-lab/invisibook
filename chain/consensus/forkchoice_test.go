@@ -22,7 +22,7 @@ func goalBlock(t *testing.T, hash string, height common.BlockNum, goal int64) *t
 
 	extra, err := EncodeConsensusData(&ConsensusData{
 		VRFResult: &VRFResult{Output: vrfOutput, Proof: []byte("proof")},
-		L1Payment: NewL1Payment("0xprepay", big.NewInt(goal), randA, "minerA", ""),
+		L1Payment: NewL1Payment("0xprepay", big.NewInt(goal), randA, "minerA"),
 		// Deliberately inconsistent with the real goal: nothing may read it.
 		BlockScore: "999999999",
 	})
@@ -175,7 +175,7 @@ func TestChooseForkDiscardsBranchesItCannotScore(t *testing.T) {
 		{"short vrf output", func(b *types.Block) {
 			extra, err := EncodeConsensusData(&ConsensusData{
 				VRFResult: &VRFResult{Output: []byte{1, 2, 3}},
-				L1Payment: NewL1Payment("0xprepay", big.NewInt(10), randA, "minerA", ""),
+				L1Payment: NewL1Payment("0xprepay", big.NewInt(10), randA, "minerA"),
 			})
 			if err != nil {
 				t.Fatalf("encoding: %v", err)
@@ -204,7 +204,7 @@ func TestChooseForkDiscardsBranchesItCannotScore(t *testing.T) {
 func TestChooseForkSurvivesAShortVRFOutput(t *testing.T) {
 	extra, err := EncodeConsensusData(&ConsensusData{
 		VRFResult: &VRFResult{Output: []byte{1}},
-		L1Payment: NewL1Payment("0xprepay", big.NewInt(10), randA, "minerA", ""),
+		L1Payment: NewL1Payment("0xprepay", big.NewInt(10), randA, "minerA"),
 	})
 	if err != nil {
 		t.Fatalf("encoding: %v", err)

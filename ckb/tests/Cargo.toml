@@ -12,3 +12,6 @@ publish = false
 
 [dev-dependencies]
 ckb-testtool = "1.1.1"
+budget-stark = { path = "../../lib/budget-stark", features = ["prover"] }
+p3-koala-bear = "=0.8.0"
+p3-field = "=0.8.0"

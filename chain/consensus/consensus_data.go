@@ -19,7 +19,6 @@ type l1PaymentJSON struct {
 	TxHash      string `json:"tx_hash"`
 	Amount      string `json:"amount"`
 	Random      string `json:"random"`
-	BudgetProof string `json:"budget_proof,omitempty"`
 	Payer       string `json:"payer"`
 	MinerPubkey string `json:"miner_pubkey"`
 }
@@ -41,7 +40,6 @@ func EncodeConsensusData(data *ConsensusData) ([]byte, error) {
 			TxHash:      data.L1Payment.TxHash,
 			Amount:      data.L1Payment.Amount.String(),
 			Random:      data.L1Payment.Random,
-			BudgetProof: data.L1Payment.BudgetProof,
 			Payer:       data.L1Payment.Payer,
 			MinerPubkey: data.L1Payment.MinerPubkey,
 		}
@@ -68,7 +66,6 @@ func DecodeConsensusData(raw []byte) (*ConsensusData, error) {
 			TxHash:      j.L1Payment.TxHash,
 			Amount:      amount,
 			Random:      j.L1Payment.Random,
-			BudgetProof: j.L1Payment.BudgetProof,
 			Payer:       j.L1Payment.Payer,
 			MinerPubkey: j.L1Payment.MinerPubkey,
 		}

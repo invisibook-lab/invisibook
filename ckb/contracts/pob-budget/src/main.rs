@@ -4,13 +4,19 @@
 //! This is the one place on chain with substantive rules, because the whole
 //! cost model of whitepaper §7 rests on it.
 //!
-//! Four of the five rules live here:
+//! All five rules live here:
 //!
 //! * **R3.1** — once created, the data never changes. A budget cell has only
 //!   two legal transfers: being created, or being spent whole by its owner to
 //!   reclaim the capacity. There is no "edit" in between. This is what makes
 //!   §7.3's ordering enforceable: a miner that could raise an allocation after
 //!   seeing its VRF output would have no reason to commit first.
+//! * **R3.2** — the allocation table adds up exactly to `prepaid`, every
+//!   amount a u64. The amounts are hidden behind Poseidon2 commitments, so
+//!   this is a zero-knowledge proof (a Plonky3 STARK, `lib/budget-stark`),
+//!   cut into chunks across consecutive witnesses from the budget cell's own
+//!   index (`budget_stark::witness`). A table that spends its prepayment more
+//!   than once cannot exist on chain.
 //! * **R3.3** — `prepaid` must equal the capacity this same transaction moves
 //!   into the mining addr. Writing a larger number than was actually paid
 //!   would be printing money.
@@ -23,11 +29,8 @@
 //!   cell's lock args, and that comparison has no meaning if the lock could
 //!   be any script at all.
 //!
-//! **R3.2 (`Σ amount == prepaid`, in zero knowledge) is not implemented.**
-//! The circuit does not exist yet, so nothing here constrains the allocation
-//! table against the total: a miner can write a table that spends its
-//! prepayment many times over and this script will accept it. That hole
-//! closes when the Groth16 verification lands.
+//! Verifying R3.2 costs about 49M cycles for a table of up to 128 entries
+//! (1.4% of a block's budget), ~90M at the 1024-entry maximum.
 //!
 //! The three hashes the rules need — mining addr lock, spent script, and the
 //! sighash lock's code hash — arrive as `args` rather than being hardcoded,
@@ -46,14 +49,25 @@ extern crate alloc;
 use ckb_std::default_alloc;
 #[cfg(not(test))]
 ckb_std::entry!(program_entry);
+// A proof is ~110 KB and decodes into several times that, far past the
+// default 516 KB heap.
 #[cfg(not(test))]
-default_alloc!();
+const FIXED_BLOCK_HEAP: usize = 64 * 1024;
+#[cfg(not(test))]
+const BUDDY_HEAP: usize = 2 * 1024 * 1024;
+#[cfg(not(test))]
+default_alloc!(FIXED_BLOCK_HEAP, BUDDY_HEAP, 64);
 
+use alloc::vec::Vec;
+
+use budget_stark::hash::{digest_from_bytes, Digest};
+use budget_stark::verify;
+use budget_stark::witness::join;
 use ckb_std::ckb_constants::{CellField, Source};
-use ckb_std::ckb_types::packed::ScriptReader;
+use ckb_std::ckb_types::packed::{ScriptReader, WitnessArgsReader};
 use ckb_std::ckb_types::prelude::*;
 use ckb_std::high_level::{load_cell_capacity, load_cell_data, load_cell_lock_hash,
-                          load_cell_type_hash, QueryIter};
+                          load_cell_type_hash, load_script_hash, load_witness, QueryIter};
 use ckb_std::syscalls;
 
 /// Length of a CKB script hash.
@@ -62,6 +76,12 @@ const HASH_LEN: usize = 32;
 const ARGS_LEN: usize = HASH_LEN * 3;
 /// `prepaid` is the first 8 bytes of the cell's data, little-endian.
 const PREPAID_LEN: usize = 8;
+/// The table's entry count: a u32 little-endian molecule fixvec header.
+const COUNT_LEN: usize = 4;
+/// One table entry: height u32 ‖ 32-byte commitment.
+const ENTRY_LEN: usize = 36;
+/// Where the commitment starts inside an entry.
+const COMMITMENT_OFFSET: usize = 4;
 
 /// The script's `args` is not three 32-byte hashes.
 const ERR_BAD_ARGS: i8 = 1;
@@ -77,6 +97,11 @@ const ERR_BAD_LOCK: i8 = 5;
 const ERR_BAD_DATA: i8 = 6;
 /// A cell could not be read.
 const ERR_LOAD: i8 = 7;
+/// The allocation table is malformed, or holds something that is not a
+/// commitment (R3.2).
+const ERR_BAD_TABLE: i8 = 8;
+/// The balance proof is missing or does not verify (R3.2).
+const ERR_UNBALANCED: i8 = 9;
 
 /// The three hashes carried in `args`.
 struct Args {
@@ -85,7 +110,7 @@ struct Args {
     sighash_code: [u8; HASH_LEN],
 }
 
-/// Entry point: enforces R3.1, R3.3, R3.4 and R3.5.
+/// Entry point: enforces R3.1 to R3.5.
 pub fn program_entry() -> i8 {
     let creating = group_len(Source::GroupOutput) > 0;
     let spending = group_len(Source::GroupInput) > 0;
@@ -143,6 +168,11 @@ pub fn program_entry() -> i8 {
             Ok(value) => value,
             Err(code) => return code,
         };
+
+        // R3.2 — per cell: each table has to balance against its own total.
+        if let Err(code) = check_balanced(index, prepaid, &data) {
+            return code;
+        }
         declared = match declared.checked_add(prepaid) {
             Some(total) => total,
             // An overflow here would wrap around into a small number and let
@@ -158,6 +188,60 @@ pub fn program_entry() -> i8 {
         return ERR_PREPAID_MISMATCH;
     }
     0
+}
+
+/// Verifies the balance proof for the `index`-th budget cell this script
+/// creates, whose data is `data` and total `prepaid` (R3.2).
+fn check_balanced(index: usize, prepaid: u64, data: &[u8]) -> Result<(), i8> {
+    let commitments = read_commitments(data)?;
+
+    // The proof starts at the witness sharing this cell's index in the whole
+    // transaction and runs on through the ones after it.
+    let first = output_index(index)?;
+    let proof = join(|chunk| {
+        let witness = load_witness(first + chunk, Source::Input).ok()?;
+        // A borrowing reader: owned molecule types clone through atomics.
+        let args = WitnessArgsReader::from_slice(&witness).ok()?;
+        Some(args.output_type().to_opt()?.raw_data().to_vec())
+    })
+    .ok_or(ERR_UNBALANCED)?;
+
+    verify(prepaid, &commitments, &proof).map_err(|_| ERR_UNBALANCED)
+}
+
+/// The transaction-wide index of the `group_index`-th output this script
+/// guards.
+fn output_index(group_index: usize) -> Result<usize, i8> {
+    let own = load_script_hash().map_err(|_| ERR_LOAD)?;
+    QueryIter::new(load_cell_type_hash, Source::Output)
+        .enumerate()
+        .filter(|(_, hash)| *hash == Some(own))
+        .nth(group_index)
+        .map(|(index, _)| index)
+        .ok_or(ERR_LOAD)
+}
+
+/// Reads the allocation table's commitments, in order, out of a budget
+/// cell's data. The layout is `chain/ckb/budget_data.go`'s.
+fn read_commitments(data: &[u8]) -> Result<Vec<Digest>, i8> {
+    let header = data
+        .get(PREPAID_LEN..PREPAID_LEN + COUNT_LEN)
+        .ok_or(ERR_BAD_TABLE)?;
+    let mut count = [0u8; COUNT_LEN];
+    count.copy_from_slice(header);
+    let count = u32::from_le_bytes(count) as usize;
+
+    let body = &data[PREPAID_LEN + COUNT_LEN..];
+    if Some(body.len()) != count.checked_mul(ENTRY_LEN) {
+        return Err(ERR_BAD_TABLE);
+    }
+    body.chunks_exact(ENTRY_LEN)
+        .map(|entry| {
+            let mut bytes = [0u8; 32];
+            bytes.copy_from_slice(&entry[COMMITMENT_OFFSET..]);
+            digest_from_bytes(&bytes).ok_or(ERR_BAD_TABLE)
+        })
+        .collect()
 }
 
 /// Counts the cells this script guards on one side of the transaction.

@@ -16,6 +16,7 @@ node_modules/
 
 # Go build binary
 invisibook
+/chain/pob-miner
 
 # Dev dual-instance test data
 .dev/

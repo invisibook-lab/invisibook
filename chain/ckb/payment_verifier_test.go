@@ -43,7 +43,7 @@ func mustPubkey(t *testing.T) []byte {
 	return key.PubKey()
 }
 
-func TestFetchPrepaymentAndAllocation(t *testing.T) {
+func TestFetchAllocation(t *testing.T) {
 	node := newFakeNode()
 	client := testClient(t, node)
 
@@ -61,14 +61,6 @@ func TestFetchPrepaymentAndAllocation(t *testing.T) {
 	node.addCommittedTx(tx, ckbtypes.HexToHash(hashOf(0x76)), 1234, 2)
 
 	pubkey := minerPubkeyHex(t)
-	total, err := client.FetchPrepayment(context.Background(), tx.Hash.String(), pubkey)
-	if err != nil {
-		t.Fatalf("reading the prepayment: %v", err)
-	}
-	if total.Cmp(big.NewInt(prepaid)) != 0 {
-		t.Fatalf("prepaid reads back as %s, want %d", total, uint64(prepaid))
-	}
-
 	allocation, err := client.FetchAllocation(context.Background(), tx.Hash.String(), pubkey, 11)
 	if err != nil {
 		t.Fatalf("reading the allocation: %v", err)
@@ -84,14 +76,25 @@ func TestFetchPrepaymentAndAllocation(t *testing.T) {
 	}
 }
 
-// The ownership check is the ground the payment path stands on. Both lookups
-// are told which miner to look up, so without it a miner would be handed back
-// a commitment it chose itself and V3 would compare its story to its story.
+// oneEntryBudgetTx is a budget transaction whose table holds height 10, so a
+// lookup of that height can fail only for the reason a test sets up.
+func oneEntryBudgetTx(t *testing.T, c *Client) *ckbtypes.Transaction {
+	t.Helper()
+	bid, err := Allocate(10, big.NewInt(700_00000000), repeatHex("11", 32))
+	if err != nil {
+		t.Fatalf("committing to an allocation: %v", err)
+	}
+	return budgetTx(t, c, 1000_00000000, []BudgetEntry{bid})
+}
+
+// The ownership check is the ground the payment path stands on. The lookup is
+// told which miner to look up, so without it a miner would be handed back a
+// commitment it chose itself and V3 would compare its story to its story.
 func TestFetchRejectsSomebodyElsesBudget(t *testing.T) {
 	node := newFakeNode()
 	client := testClient(t, node)
 
-	tx := budgetTx(t, client, 1000_00000000, nil)
+	tx := oneEntryBudgetTx(t, client)
 	// Same cell, a different owner: the args no longer hash from this key.
 	tx.Outputs[1].Lock = &ckbtypes.Script{
 		CodeHash: client.set.sighashCodeHash,
@@ -100,7 +103,7 @@ func TestFetchRejectsSomebodyElsesBudget(t *testing.T) {
 	}
 	node.addCommittedTx(tx, ckbtypes.HexToHash(hashOf(0x77)), 1234, 0)
 
-	_, err := client.FetchPrepayment(context.Background(), tx.Hash.String(), minerPubkeyHex(t))
+	_, err := client.FetchAllocation(context.Background(), tx.Hash.String(), minerPubkeyHex(t), 10)
 	if !errors.Is(err, consensus.ErrPaymentNotFound) {
 		t.Fatalf("another miner's budget cell gave %v, want ErrPaymentNotFound", err)
 	}
@@ -113,11 +116,11 @@ func TestFetchRejectsNonSighashLock(t *testing.T) {
 	node := newFakeNode()
 	client := testClient(t, node)
 
-	tx := budgetTx(t, client, 1000_00000000, nil)
+	tx := oneEntryBudgetTx(t, client)
 	tx.Outputs[1].Lock.CodeHash = ckbtypes.HexToHash(hashOf(0x45))
 	node.addCommittedTx(tx, ckbtypes.HexToHash(hashOf(0x78)), 1234, 0)
 
-	_, err := client.FetchPrepayment(context.Background(), tx.Hash.String(), minerPubkeyHex(t))
+	_, err := client.FetchAllocation(context.Background(), tx.Hash.String(), minerPubkeyHex(t), 10)
 	if !errors.Is(err, consensus.ErrPaymentNotFound) {
 		t.Fatalf("a budget cell under a non-standard lock gave %v, want ErrPaymentNotFound", err)
 	}
@@ -154,13 +157,13 @@ func TestFetchRejectsUncommittedTransaction(t *testing.T) {
 	node := newFakeNode()
 	client := testClient(t, node)
 
-	tx := budgetTx(t, client, 1000_00000000, nil)
+	tx := oneEntryBudgetTx(t, client)
 	node.txs[tx.Hash] = &ckbtypes.TransactionWithStatus{
 		Transaction: tx,
 		TxStatus:    &ckbtypes.TxStatus{Status: ckbtypes.TransactionStatusPending},
 	}
 
-	_, err := client.FetchPrepayment(context.Background(), tx.Hash.String(), minerPubkeyHex(t))
+	_, err := client.FetchAllocation(context.Background(), tx.Hash.String(), minerPubkeyHex(t), 10)
 	if !errors.Is(err, consensus.ErrPaymentNotFound) {
 		t.Fatalf("a pending prepayment gave %v, want ErrPaymentNotFound", err)
 	}

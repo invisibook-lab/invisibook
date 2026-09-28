@@ -142,3 +142,11 @@ func (p *ProofOfBuy) payBlockReward(block *types.Block) {
 	logrus.Infof("PoB: block reward height=%d coinbase=%s fees=%s total=%s to %s",
 		block.Height, coinbase, fees, reward, shortHex(owner))
 }
+
+// shortHex trims a long hex string down to something readable in a log line.
+func shortHex(s string) string {
+	if len(s) <= 12 {
+		return s
+	}
+	return s[:12] + "…"
+}

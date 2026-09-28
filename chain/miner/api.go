@@ -13,8 +13,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/yu-org/yu/common"
-
-	"github.com/invisibook-lab/invisibook/consensus"
 )
 
 // indexHTML is the browser console, served at the root of the payment
@@ -384,7 +382,3 @@ func (a *API) view(p Prepayment, consumed common.BlockNum, tip uint64, tipKnown 
 	}
 	return v
 }
-
-// Compile-time check that the node's own payment server is the Declarer the
-// service expects.
-var _ Declarer = (*consensus.PaymentServer)(nil)

@@ -3,7 +3,6 @@ package consensus
 import (
 	"encoding/json"
 	"math/big"
-	"strings"
 	"testing"
 
 	"github.com/yu-org/yu/common"
@@ -35,32 +34,6 @@ func TestRewardRandomHexIsDeterministic(t *testing.T) {
 	other := RewardRandomHex(common.BytesToHash([]byte("block-two")))
 	if other == first {
 		t.Fatal("different blocks must derive different blinding factors")
-	}
-}
-
-func TestCheckBudgetCeiling(t *testing.T) {
-	// Spending 300 of a 1000 prepayment, then bidding 700, exactly fits.
-	if err := CheckBudgetCeiling(big.NewInt(300), big.NewInt(700), big.NewInt(1000)); err != nil {
-		t.Fatalf("a bid that exactly exhausts the prepayment must pass, got %v", err)
-	}
-	// One more overspends it.
-	if err := CheckBudgetCeiling(big.NewInt(300), big.NewInt(701), big.NewInt(1000)); err == nil {
-		t.Fatal("a bid past the prepaid total must be rejected")
-	}
-}
-
-func TestVerifyAllocationBudgetRejectsMissingInputs(t *testing.T) {
-	payment := NewL1Payment("0xprepay", big.NewInt(500), strings.Repeat("a1", 32), "minerA", "")
-
-	if err := VerifyAllocationBudget(nil, "", payment); err == nil {
-		t.Fatal("a missing prepaid total must be rejected")
-	}
-	// Zero funds nothing, so it is refused rather than read as "no ceiling".
-	if err := VerifyAllocationBudget(big.NewInt(0), "", payment); err == nil {
-		t.Fatal("a prepaid total of zero must be rejected")
-	}
-	if err := VerifyAllocationBudget(big.NewInt(1000), "", nil); err == nil {
-		t.Fatal("a missing allocation must be rejected")
 	}
 }
 

@@ -17,8 +17,10 @@ import (
 
 // Blinding factors used throughout these tests. Any 64-char hex string works.
 var (
-	randA = strings.Repeat("a1", 32)
-	randB = strings.Repeat("b2", 32)
+	// Each 4-byte word stays below the KoalaBear prime, so these also open
+	// payment commitments (PaymentCommit refuses non-canonical words).
+	randA = strings.Repeat("a1a1a121", 8)
+	randB = strings.Repeat("b2b2b232", 8)
 )
 
 // declareAll runs the validate-then-store path the HTTP handler uses, minus
@@ -210,7 +212,7 @@ func TestConfirmPayment(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("accepts an opening that matches the commitment", func(t *testing.T) {
-		payment := NewL1Payment("0xprepay", big.NewInt(500), randA, "minerA", "")
+		payment := NewL1Payment("0xprepay", big.NewInt(500), randA, "minerA")
 		alloc, err := ConfirmPayment(ctx, verifier, payment, "minerA", height)
 		if err != nil {
 			t.Fatalf("expected the payment to be confirmed, got %v", err)
@@ -225,7 +227,7 @@ func TestConfirmPayment(t *testing.T) {
 
 	t.Run("rejects an inflated amount", func(t *testing.T) {
 		// The miner committed to 500 on L1 but now claims 50000 to win the height.
-		payment := NewL1Payment("0xprepay", big.NewInt(50000), randA, "minerA", "")
+		payment := NewL1Payment("0xprepay", big.NewInt(50000), randA, "minerA")
 		_, err := ConfirmPayment(ctx, verifier, payment, "minerA", height)
 		if !errors.Is(err, ErrCommitmentMismatch) {
 			t.Fatalf("expected ErrCommitmentMismatch, got %v", err)
@@ -233,7 +235,7 @@ func TestConfirmPayment(t *testing.T) {
 	})
 
 	t.Run("rejects a substituted random", func(t *testing.T) {
-		payment := NewL1Payment("0xprepay", big.NewInt(500), randB, "minerA", "")
+		payment := NewL1Payment("0xprepay", big.NewInt(500), randB, "minerA")
 		if _, err := ConfirmPayment(ctx, verifier, payment, "minerA", height); !errors.Is(err, ErrCommitmentMismatch) {
 			t.Fatalf("expected ErrCommitmentMismatch, got %v", err)
 		}
@@ -241,7 +243,7 @@ func TestConfirmPayment(t *testing.T) {
 
 	t.Run("rejects a payment claimed by another miner", func(t *testing.T) {
 		// minerB replays minerA's allocation inside its own block.
-		payment := NewL1Payment("0xprepay", big.NewInt(500), randA, "minerA", "")
+		payment := NewL1Payment("0xprepay", big.NewInt(500), randA, "minerA")
 		_, err := ConfirmPayment(ctx, verifier, payment, "minerB", height)
 		if err == nil {
 			t.Fatal("a payment bound to another miner must be rejected")
@@ -252,7 +254,7 @@ func TestConfirmPayment(t *testing.T) {
 	})
 
 	t.Run("rejects a height with no allocation on L1", func(t *testing.T) {
-		payment := NewL1Payment("0xprepay", big.NewInt(500), randA, "minerA", "")
+		payment := NewL1Payment("0xprepay", big.NewInt(500), randA, "minerA")
 		if _, err := ConfirmPayment(ctx, verifier, payment, "minerA", height+1); !errors.Is(err, ErrPaymentNotFound) {
 			t.Fatalf("expected ErrPaymentNotFound, got %v", err)
 		}
@@ -270,54 +272,6 @@ func TestConfirmPayment(t *testing.T) {
 			t.Fatal("a payment without an amount must be rejected")
 		}
 	})
-}
-
-// A seeded prepayment must win over the fallback.
-//
-// Tests for the budget ceiling will rest on this: they need a total small
-// enough for an allocation to overrun it, and the fallback — deliberately
-// huge, so that a test caring only about allocations need not seed both —
-// can never express that.
-func TestMockPrepaymentSeedOverridesTheFallback(t *testing.T) {
-	const height common.BlockNum = 7
-	ctx := context.Background()
-	verifier := &MockL1PaymentVerifier{}
-	if err := verifier.Allocate("0xprepay", "minerA", height, big.NewInt(500), randA, 0); err != nil {
-		t.Fatalf("seeding the allocation: %v", err)
-	}
-
-	got, err := verifier.FetchPrepayment(ctx, "0xprepay", "minerA")
-	if err != nil {
-		t.Fatalf("FetchPrepayment with nothing seeded: %v", err)
-	}
-	if got.Cmp(mockDefaultPrepaid) != 0 {
-		t.Fatalf("unseeded total = %s, want the fallback %s", got, mockDefaultPrepaid)
-	}
-
-	if err := verifier.Prepay("0xprepay", "minerA", big.NewInt(900)); err != nil {
-		t.Fatalf("Prepay: %v", err)
-	}
-	got, err = verifier.FetchPrepayment(ctx, "0xprepay", "minerA")
-	if err != nil {
-		t.Fatalf("FetchPrepayment after seeding: %v", err)
-	}
-	if got.Cmp(big.NewInt(900)) != 0 {
-		t.Fatalf("seeded total = %s, want 900", got)
-	}
-}
-
-func TestMockPrepayRejectsAMissingTotal(t *testing.T) {
-	if err := (&MockL1PaymentVerifier{}).Prepay("0xprepay", "minerA", nil); err == nil {
-		t.Fatal("a nil prepaid total must be rejected")
-	}
-}
-
-// A miner with no allocations at all has no prepayment to fall back on.
-func TestMockFetchPrepaymentReportsAnUnknownMiner(t *testing.T) {
-	_, err := (&MockL1PaymentVerifier{}).FetchPrepayment(context.Background(), "0xprepay", "nobody")
-	if !errors.Is(err, ErrPaymentNotFound) {
-		t.Fatalf("expected ErrPaymentNotFound, got %v", err)
-	}
 }
 
 // ───────────────────────── POST /pay_l1_token ──────────────────────────

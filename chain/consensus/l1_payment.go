@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
-	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -43,7 +42,7 @@ func MinerPubkeyHex(pubkey keypair.PubKey) string {
 // in L1 transaction `TxHash`, it allocated `Amount` of L1 token to the L2 block
 // at `BlockHeight`. One declaration binds exactly one height.
 //
-// On L1 that allocation is stored as a Poseidon commitment, so competitors
+// On L1 that allocation is stored as a Poseidon2 commitment, so competitors
 // cannot read how much a miner bid for an upcoming height. The declaration
 // submitted here is the plaintext opening of that commitment: `Amount` and
 // `Random` together must hash to the commitment sitting on L1.
@@ -56,10 +55,6 @@ type PaymentDeclaration struct {
 	Random string `json:"random"`
 	// TxHash is the L1 prepayment transaction this allocation is drawn from.
 	TxHash string `json:"tx_hash"`
-	// BudgetProof proves this allocation and the ones before it stay within
-	// the prepaid total. Empty until the circuit exists — see
-	// VerifyAllocationBudget.
-	BudgetProof AllocationBudgetProof `json:"budget_proof,omitempty"`
 }
 
 // L1PaymentInput is a declaration that passed validation and was confirmed
@@ -74,8 +69,6 @@ type L1PaymentInput struct {
 	Random string
 	// TxHash is the L1 prepayment transaction this allocation is drawn from.
 	TxHash string
-	// BudgetProof proves the allocations stay within the prepaid total.
-	BudgetProof AllocationBudgetProof
 }
 
 // RejectedDeclaration explains why one declaration in a batch was refused.
@@ -195,7 +188,6 @@ func validateShape(d PaymentDeclaration) (*L1PaymentInput, error) {
 		Amount:      amount,
 		Random:      d.Random,
 		TxHash:      d.TxHash,
-		BudgetProof: d.BudgetProof,
 	}, nil
 }
 
@@ -300,9 +292,17 @@ type PaymentServer struct {
 	book        *PaymentBook
 	verifier    L1PaymentVerifier
 	minerPubkey string
-	// mounts add further routes to the engine Router builds, so the miner
-	// console can share this listener instead of opening another port.
-	mounts []func(gin.IRouter)
+}
+
+// PaymentStatus is the book's state as GET /payment_status reports it: what a
+// miner needs to pick heights worth bidding on and to see its declarations
+// queue.
+type PaymentStatus struct {
+	// ConsumedHeight is the highest height already settled; declarations must
+	// be above it.
+	ConsumedHeight common.BlockNum `json:"consumed_height"`
+	// Pending is how many declared future heights the book holds.
+	Pending int `json:"pending"`
 }
 
 // NewPaymentServer builds a PaymentServer.
@@ -377,7 +377,7 @@ func (ps *PaymentServer) Declare(ctx context.Context, payments []PaymentDeclarat
 func (ps *PaymentServer) confirmOnL1(ctx context.Context, inputs []*L1PaymentInput) []RejectedDeclaration {
 	var rejected []RejectedDeclaration
 	for _, input := range inputs {
-		payment := NewL1Payment(input.TxHash, input.Amount, input.Random, ps.minerPubkey, input.BudgetProof)
+		payment := NewL1Payment(input.TxHash, input.Amount, input.Random, ps.minerPubkey)
 		if _, err := ConfirmPayment(ctx, ps.verifier, payment, ps.minerPubkey, input.BlockHeight); err != nil {
 			rejected = append(rejected, RejectedDeclaration{
 				BlockHeight: input.BlockHeight,
@@ -388,22 +388,23 @@ func (ps *PaymentServer) confirmOnL1(ctx context.Context, inputs []*L1PaymentInp
 	return rejected
 }
 
+// Status handles GET /payment_status. Read-only and public: a height count
+// and a queue length say nothing a block explorer would not.
+func (ps *PaymentServer) Status(c *gin.Context) {
+	c.JSON(http.StatusOK, PaymentStatus{
+		ConsumedHeight: ps.book.Consumed(),
+		Pending:        ps.book.Pending(),
+	})
+}
+
 // Router builds the gin engine exposing the payment endpoints.
 func (ps *PaymentServer) Router() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.POST("/pay_l1_token", ps.PayL1Token)
-	for _, mount := range ps.mounts {
-		mount(r)
-	}
+	r.GET("/payment_status", ps.Status)
 	return r
-}
-
-// Mount registers `mount` to add routes to the engine Router builds.
-// It must be called before Start.
-func (ps *PaymentServer) Mount(mount func(gin.IRouter)) {
-	ps.mounts = append(ps.mounts, mount)
 }
 
 // Start serves the payment endpoints on `listenAddr` (e.g. "127.0.0.1:8081")
@@ -431,9 +432,6 @@ type L1Payment struct {
 	Amount *big.Int `json:"amount"`
 	// Random is the hex blinding factor opening the on-L1 commitment.
 	Random string `json:"random"`
-	// BudgetProof proves this allocation and the ones before it stay within
-	// the miner's prepaid total.
-	BudgetProof AllocationBudgetProof `json:"budget_proof,omitempty"`
 	// Payer is the miner's L1 address.
 	Payer string `json:"payer"`
 	// MinerPubkey identifies which miner made this payment.
@@ -443,12 +441,11 @@ type L1Payment struct {
 // NewL1Payment builds an L1Payment from a validated declaration.
 // `amount` must not be nil; `txHash` and `random` come from the miner's
 // declaration.
-func NewL1Payment(txHash string, amount *big.Int, random, minerPubkey string, budgetProof AllocationBudgetProof) *L1Payment {
+func NewL1Payment(txHash string, amount *big.Int, random, minerPubkey string) *L1Payment {
 	return &L1Payment{
 		TxHash:      txHash,
 		Amount:      new(big.Int).Set(amount),
 		Random:      random,
-		BudgetProof: budgetProof,
 		Payer:       mockPayerAddr,
 		MinerPubkey: minerPubkey,
 	}
@@ -482,28 +479,17 @@ type L1PaymentVerifier interface {
 	// part of prepayment `txHash` for L2 block `height`. It returns an error
 	// wrapping ErrPaymentNotFound when no such allocation exists.
 	FetchAllocation(ctx context.Context, txHash, minerPubkey string, height common.BlockNum) (*Allocation, error)
-
-	// FetchPrepayment returns the plaintext total the miner paid to the mining
-	// addr in `txHash`, the ceiling every allocation drawn from it must
-	// respect. It returns an error wrapping ErrPaymentNotFound when the
-	// transaction holds no prepayment by this miner.
-	//
-	// Plaintext, not a commitment: a capacity transfer is public on CKB, so
-	// the total cannot be hidden and there is no reason to try. Only the
-	// per-height amounts are committed (ckb_layout.md §3).
-	FetchPrepayment(ctx context.Context, txHash, minerPubkey string) (*big.Int, error)
 }
 
 // ConfirmPayment checks a claimed L1 payment against L1: that the claim is
 // well formed, that it is bound to `minerPubkey` — the identity that must have
 // paid for it — that L1 holds an allocation for `height`, that the plaintext
-// amount really opens the commitment recorded there, and that the allocation
-// stays inside the prepayment it is drawn from.
+// amount really opens the commitment recorded there.
 //
 // The last check is what makes the plaintext trustworthy. The allocation is
 // committed on L1 before the miner knows anyone else's bid, so revealing it
 // later cannot be a lie: a miner that tries to claim a larger amount than it
-// committed to produces a different Poseidon hash and is rejected here.
+// committed to produces a different Poseidon2 hash and is rejected here.
 //
 // Every path that accepts a payment claim goes through here, so the checks a
 // miner's own declaration passes when it is submitted are exactly the checks
@@ -538,24 +524,16 @@ func ConfirmPayment(ctx context.Context, verifier L1PaymentVerifier, payment *L1
 		return nil, err
 	}
 
-	opening, err := PoseidonCommit(payment.Amount, payment.Random)
+	// Whether the table this allocation belongs to balances against its
+	// prepayment is not a question for this node: the budget cell could not
+	// exist on L1 unless its balance proof verified (R3.2).
+	opening, err := PaymentCommit(payment.Amount, payment.Random)
 	if err != nil {
 		return nil, fmt.Errorf("recomputing the allocation commitment: %w", err)
 	}
 	if opening != alloc.Commitment {
 		return nil, fmt.Errorf("%w: height %d commits to %s, but the declared amount opens to %s",
 			ErrCommitmentMismatch, height, alloc.Commitment, opening)
-	}
-
-	// An allocation that opens correctly can still be money the miner does not
-	// have: nothing so far ties it to the size of the prepayment it is drawn
-	// from. That is what the budget proof is for.
-	prepaid, err := verifier.FetchPrepayment(ctx, payment.TxHash, minerPubkey)
-	if err != nil {
-		return nil, err
-	}
-	if err := VerifyAllocationBudget(prepaid, payment.BudgetProof, payment); err != nil {
-		return nil, fmt.Errorf("allocation budget: %w", err)
 	}
 	return alloc, nil
 }
@@ -567,15 +545,7 @@ type MockL1PaymentVerifier struct {
 	mu sync.Mutex
 	// allocations maps (tx hash, miner, height) to the entry recorded on L1.
 	allocations map[string]*Allocation
-	// prepayments maps (tx hash, miner) to the plaintext prepaid total.
-	prepayments map[string]*big.Int
 }
-
-// mockDefaultPrepaid is what FetchPrepayment reports for a miner that has
-// allocations but no prepayment seeded: a total large enough that any
-// allocation a test sets up fits inside it, which is what such a test means
-// by leaving the prepayment unspecified.
-var mockDefaultPrepaid = new(big.Int).SetUint64(1 << 62)
 
 // allocationKey builds the lookup key for one on-L1 allocation.
 func allocationKey(txHash, minerPubkey string, height common.BlockNum) string {
@@ -586,7 +556,7 @@ func allocationKey(txHash, minerPubkey string, height common.BlockNum) string {
 // standing in for the miner having posted that allocation on L1 in block
 // `l1Block`. `randomHex` must be 64 hex chars.
 func (m *MockL1PaymentVerifier) Allocate(txHash, minerPubkey string, height common.BlockNum, amount *big.Int, randomHex string, l1Block uint64) error {
-	commitment, err := PoseidonCommit(amount, randomHex)
+	commitment, err := PaymentCommit(amount, randomHex)
 	if err != nil {
 		return err
 	}
@@ -600,41 +570,6 @@ func (m *MockL1PaymentVerifier) Allocate(txHash, minerPubkey string, height comm
 		L1BlockNumber: l1Block,
 	}
 	return nil
-}
-
-// Prepay records a miner's prepaid total, standing in for the miner having
-// transferred that much to the mining addr on L1. `total` must not be nil.
-func (m *MockL1PaymentVerifier) Prepay(txHash, minerPubkey string, total *big.Int) error {
-	if total == nil {
-		return errors.New("prepaid total is missing")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.prepayments == nil {
-		m.prepayments = make(map[string]*big.Int)
-	}
-	m.prepayments[txHash+"/"+minerPubkey] = new(big.Int).Set(total)
-	return nil
-}
-
-// FetchPrepayment returns the recorded prepaid total.
-//
-// A miner with allocations but no recorded prepayment falls back to
-// mockDefaultPrepaid, so a test that only cares about allocations need not
-// seed both. The fallback is deliberately large: it stands for "some total
-// this allocation fits inside", which is exactly what such a test assumes.
-func (m *MockL1PaymentVerifier) FetchPrepayment(_ context.Context, txHash, minerPubkey string) (*big.Int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if total, ok := m.prepayments[txHash+"/"+minerPubkey]; ok {
-		return new(big.Int).Set(total), nil
-	}
-	for key := range m.allocations {
-		if strings.HasPrefix(key, txHash+"/"+minerPubkey+"/") {
-			return new(big.Int).Set(mockDefaultPrepaid), nil
-		}
-	}
-	return nil, fmt.Errorf("%w: no prepayment in tx_hash=%s", ErrPaymentNotFound, txHash)
 }
 
 // FetchAllocation returns the recorded allocation, or ErrPaymentNotFound.
@@ -657,8 +592,9 @@ func (m *MockL1PaymentVerifier) FetchAllocation(_ context.Context, txHash, miner
 // which is the point: a miner that did not pay cannot win the height.
 // `amount` must not be nil.
 func MockL1Payment(amount *big.Int, minerPubkey string) *L1Payment {
-	buf := make([]byte, 64)
-	// best-effort random; ignore error for mock usage
+	buf := make([]byte, 32)
+	// best-effort random; ignore errors for mock usage
 	_, _ = rand.Read(buf)
-	return NewL1Payment(hex.EncodeToString(buf[:32]), amount, hex.EncodeToString(buf[32:]), minerPubkey, "")
+	random, _ := NewPaymentRandomHex(rand.Reader)
+	return NewL1Payment(hex.EncodeToString(buf), amount, random, minerPubkey)
 }
