@@ -182,10 +182,14 @@ network that "this table splits A exactly" while revealing no individual `a_h`.
 
 **Equality rather than "no more than".** The money is already spent; whatever goes
 unallocated is not refunded either, so demanding the table balance asks nothing extra
-of the miner — and it makes the circuit far cheaper, since an inequality has to
-simulate a size comparison by decomposing into bits while an equality is one linear
-constraint. The price is that a miner plans a whole cycle at once; topping up means
+of the miner, and it reads more cleanly: the table is the whole account of where the
+money went. The price is that a miner plans a whole cycle at once; topping up means
 opening another cycle and balancing another table.
+
+**Every amount must be proven in range.** A zero-knowledge proof computes over a finite
+field, where numbers wrap around: unconstrained, a miner could write a "negative"
+amount at one height to inflate the others, and simply never reveal that height. So
+besides "the sum equals A", the proof also bounds every `a_h` to a legal range.
 
 ### 7.3 Payment Must Come First
 

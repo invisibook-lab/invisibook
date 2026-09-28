@@ -77,13 +77,24 @@ lock    secp256k1_blake160_sighash_all，args = blake160(矿工出块公钥)（R
 type    budget_type_script
 data
     prepaid       u64                     预付总额，单位 shannon
-    allocations   [(u32, [32]byte)]       (L2 高度, Poseidon 支付承诺)
+    allocations   [(u32, [32]byte)]       (L2 高度, Poseidon2 支付承诺)
 witness
-    budget_proof  Groth16                 证明所有 amount 之和恰好等于 prepaid
+    budget_proof  STARK（Plonky3）         证明所有 amount 之和恰好等于 prepaid，
+                                          按 32 KB 切块放在连续的几个 witness 里
 ```
 
-承诺是 `Poseidon(amount, random)`，与 L2 侧 `consensus.PoseidonCommit` 同一参数化。
-链上不打开这个承诺——它是给 L2 节点核对用的——但链上**要验证那个 zk 证明**，见 R3.2。
+承诺是 KoalaBear 域上宽度 16 的 Poseidon2，截取输出的前 8 个域元素：
+
+```
+  Poseidon2( amount 的 4 个 16 位分段（小端）‖ random 的 8 个域元素 ‖ 0,0,0,0 )[0..8]
+```
+
+编码成 32 字节时，每个域元素写成一个 u32 小端。它与 L2 侧 `consensus.PaymentCommit`、
+证明电路 `lib/budget-stark` 逐字节一致。链上不打开这个承诺——它是给 L2 节点核对用的——
+但链上**要验证那个 zk 证明**，见 R3.2。
+
+承诺选 Poseidon2 而不是别的哈希，是因为它要进证明的电路：STARK 在 KoalaBear 这种 31 位
+小域上运算，Poseidon2 是这个域上的原生哈希，电路代价最低。
 
 ### data 的字节布局
 
@@ -95,7 +106,8 @@ witness
 
   一个条目（molecule struct，定长 36 字节）
   +0     4      height             u32 小端
-  +4     32     commitment         Poseidon 承诺
+  +4     32     commitment         Poseidon2 承诺，8 个 u32 小端，
+                                   每个都必须小于 KoalaBear 的模数
 ```
 
 **`prepaid` 在 molecule 之外，是刻意的。** `budget_type_script` 每创建一个预算 cell
@@ -125,15 +137,45 @@ Go 侧的编解码在 `chain/ckb/budget_data.go`。
 VRF；若矿工能在算完 VRF、发现 goal 不够高之后回头改大承诺，那个时序就失效了。链上
 只有这一处能强制它。
 
-**R3.2 分配必须配平：`Σ amount == prepaid`。** 创建时验证 witness 里的 Groth16 证明，
-公开输入是 `prepaid` 与 `allocations` 里的全部承诺。
+**R3.2 分配必须配平：`Σ amount == prepaid`。** 创建时，脚本从 witness 里取出证明并
+验证它，通不过这个 cell 就不能存在。证明对**表里的每一个承诺、它们的顺序和条目数**
+都有约束，任何一项被改动都验证不过。
 
-取等式而非"不超过"，一是电路便宜得多（不等式要做范围证明，等式只是一条线性约束），
-二是语义更干净：钱已经真的付给 mining addr 了，"没分配完的部分"并不会退回来，声明
-它的去向本就是矿工自己的事。
+取等式而非"不超过"，是因为语义更干净：钱已经真的付给 mining addr 了，"没分配完的
+部分"并不会退回来，声明它的去向本就是矿工自己的事。
 
-证明**不能**省掉对每个 `amount` 的范围约束：BN254 的标量域会回绕，不约束大小的话，
-一组巨大的 amount 完全可以模 p 之后恰好等于 `prepaid`，等式照样成立而钱凭空多出来。
+证明**不能**省掉对每个 `amount` 的范围约束：证明所在的域会回绕，不约束大小的话，一个
+"负数"额度（模 p 意义下）就能把别的高度撑大，而那个"负数"高度矿工永远不会去揭示，
+V3 也就查不到它。所以电路把每个 `amount` 拆成 64 个比特，保证它是真正的 u64。
+
+证明系统是 Plonky3 的单变量 STARK，建在 KoalaBear 域上，承诺方案是零知识的 FRI，
+Merkle 树与 Fiat-Shamir 用 Keccak。它是透明的：不需要任何可信设置，验证密钥由电路
+形状确定。安全参数为 FRI 扩展倍数 16、查询 24 次、查询前工作量证明 20 bit，按 Plonky3
+自带的估算，推测安全性 103 bit，可证明安全性 67 bit。
+
+电路（`lib/budget-stark/src/air.rs`）每行对应表里一个条目，约束三件事：
+
+- 该行的承诺确实是 `Poseidon2(amount, random)`，且 `amount` 是 u64；
+- 各行承诺依次串成一条哈希链 `acc_{i+1} = Poseidon2(acc_i ‖ c_i)`，最后一行的 `acc`
+  作为公开值。脚本用原生代码对链上那张表重算同一条链，两者相等，表就被逐项绑住了；
+- 各行金额的 4 个 16 位分段分别累加，最后一行带进位规整后等于 `prepaid` 的 4 个分段。
+
+表不足 128 条时补齐到 128 行（零知识要求 trace 至少这么高），补的行金额为 0、随机数
+为 0。一张表最多 1024 条。
+
+**证明放在哪里。** 证明约 110 KB，不能整块放进一个 witness：矿工自己的标准 sighash
+lock 签名时会把它覆盖的每个 witness 读进 32 KB 的缓冲区，更大的就报错。所以证明前面
+加上 4 字节的总长度（u32 小端），按每块不超过 32 KB 切开，从预算 cell 在交易中的
+output 下标开始，依次放进连续几个 witness 的 `WitnessArgs.output_type`。脚本先找到
+自己的 output 下标，再逐个读取、拼接，长度对不上就拒绝。格式定义在
+`lib/budget-stark/src/witness.rs`，Go 侧对应 `chain/ckb/budget.go` 的 `proofWitnesses`。
+
+这与第 0 节"witness 对出块者可见"并不冲突：证明是零知识的，读到它也得不到任何一个
+高度的额度。
+
+**代价。** 表不超过 128 条时，验证约 4900 万 cycle，约占一个区块上限（35 亿）的 1.4%；
+1024 条时约 8900 万。交易约 114 KB，手续费按体积计，最低费率下约 0.0012 CKB。脚本
+二进制去掉符号表后约 217 KB，部署时按字节锁定容量。
 
 **R3.3 `prepaid` 必须等于同一笔交易中转入 mining addr 的容量。** 创建预算 cell 的
 那笔交易里，要有一个 lock 等于 mining addr 的输出，其 capacity 恰好是 `prepaid`。
@@ -169,7 +211,7 @@ cell（见第 4 节）。少了这一条，第 4 节的整套标记形同虚设�
 
 ### 总额明文，每个高度的出价是承诺
 
-`prepaid` 是明文，`allocations` 里每个高度对应的只是一串 Poseidon 承诺。这与白皮书
+`prepaid` 是明文，`allocations` 里每个高度对应的只是一串 Poseidon2 承诺。这与白皮书
 §7.2 一致，也是 CKB 的形态使然：容量转移本就是公开的，一笔预付款有多少，链上谁都查
 得到，藏不住也不必藏。
 
@@ -267,13 +309,13 @@ data
 两遍。揭示时给出 `(l2_block_hash, random)` 就够：拿到区块的人先核对开启值与链上
 承诺相符，再核对区块与哈希相符。
 
-**用 SHA256 而不是 Poseidon。** 这个承诺不进任何电路：链上只记录、不验证，揭示由
-L2 节点把两个字节串拼起来哈希一次就能核对。Poseidon 的 zk 友好在这里没人用得上，
-代价却要照付——它的输入是 BN254 域元素，32 字节的哈希塞不进去，就得拆成两半，两边
+**用 SHA256 而不是 Poseidon2。** 这个承诺不进任何电路：链上只记录、不验证，揭示由
+L2 节点把两个字节串拼起来哈希一次就能核对。Poseidon2 的 zk 友好在这里没人用得上，
+代价却要照付——它的输入是 31 位的域元素，32 字节的哈希得拆成好几段才塞得进去，两边
 还要约定拆法一致、参数化一致。换成字节串哈希，这两个问题都不存在。
 
-预算 cell 里的支付承诺是另一回事，仍然用 Poseidon（第 3 节）：那些开启值确实要进
-预算上限证明的电路。
+预算 cell 里的支付承诺是另一回事，用的是 Poseidon2（第 3 节）：那些开启值确实要进
+配平证明的电路。
 
 ### 验证规则
 
@@ -354,7 +396,9 @@ L1 主链上，都判不通过），按 `tx_idx` 取出那笔交易，在它创�
 末尾的「分叉选择与终局」。
 
 **V3 支付承诺匹配。** 读该矿工预算 cell 在 `l2_height` 上的条目 `c`，要求
-`Poseidon(amount, payment_random) == c`。
+`Poseidon2(amount, payment_random) == c`（`consensus.PaymentCommit`）。
+
+表是否配平不用在这里查：配不平的预算 cell 根本上不了链（R3.2）。
 
 **V4 支付承诺写得够早。** 写入 `c` 的那笔 L1 交易，必须比**这个区块自己的承诺**所在
 的 L1 区块早至少 24 个 L1 区块。这是白皮书 §7.3 的支付前移，链上的 R3.1 只保证整张
@@ -374,7 +418,7 @@ args 是公钥的 blake160（20 字节），不是压缩公钥本身，与 `mine
 那两项直接比公钥不同。lock 的形式由 R3.1 那一节的 R3.5 定死，否则这一比无从下手。
 
 **这一项是整套支付校验的地基，不是补充。** 少了它，V3 拿来比对的那个承诺就是矿工自己
-给的：他编一个承诺，再配一套能打开它的 `(amount, payment_random)`，Poseidon 照样对得
+给的：他编一个承诺，再配一套能打开它的 `(amount, payment_random)`，Poseidon2 照样对得
 上，`amount` 随他写多大，`goal` 也就随之膨胀。V3 会退化成"自述与自述一致"。
 
 **V8 父链接属实。** `prev_hash` 必须是本节点认定的 `l2_height - 1` 的区块哈希。
@@ -447,24 +491,23 @@ L1 在这里堵的是另一条路：单看得分，"当时就存在的链"与"�
 ### L1PaymentVerifier
 
 ```go
-FetchPrepayment(ctx, txHash, minerPubkey) (prepaid *big.Int, err error)
 FetchAllocation(ctx, txHash, minerPubkey, height) (*Allocation, error)
 ```
 
-读该矿工由 `txHash` 创建的那个预算 cell，分别返回**明文**的 `prepaid` 与
-`allocations` 中 `height` 对应的 Poseidon 承诺，查不到返回 `ErrPaymentNotFound`。
+读该矿工由 `txHash` 创建的那个预算 cell，返回 `allocations` 中 `height` 对应的
+Poseidon2 承诺，以及写入这张表的 L1 区块高度（V4 从这里起算），查不到返回
+`ErrPaymentNotFound`。
 
-总额明文、每条出价是承诺，两者形态不同，见第 3 节：容量转移本就公开，`prepaid` 藏
-不住也不必藏；要藏的是每个高度的 `amount`。
+L2 节点不需要读 `prepaid`：表与总额是否配平，在 cell 上链时已由 R3.2 定死。
 
 **`txHash` 不能省。** 一个矿工可以有多个预算 cell——想追加预算就再建一个（第 3
 节）——只凭 `minerPubkey` 定位不唯一，`txHash` 指明用的是哪一笔预付。
 
-**V7 的第一项在这里落实。** `minerPubkey` 不只是查询用的键：两个方法都会读出预算
-cell 的 lock，确认它的 code hash 是标准 sighash lock（R3.5 给的前提），并比对 args
-是否等于 `blake160(minerPubkey)`，不符即 `ErrPaymentNotFound`。少了这一步，V3 比对
-的承诺就是矿工自己给的——他编一个承诺、配一套能打开它的 `(amount, payment_random)`，
-Poseidon 照样对得上，`amount` 随他写多大——整条支付校验退化成自证。
+**V7 的第一项在这里落实。** `minerPubkey` 不只是查询用的键：它会读出预算 cell 的
+lock，确认它的 code hash 是标准 sighash lock（R3.5 给的前提），并比对 args 是否等于
+`blake160(minerPubkey)`，不符即 `ErrPaymentNotFound`。少了这一步，V3 比对的承诺就是
+矿工自己给的——他编一个承诺、配一套能打开它的 `(amount, payment_random)`，Poseidon2
+照样对得上，`amount` 随他写多大——整条支付校验退化成自证。
 
 ### L1CommitmentSubmitter
 
@@ -525,9 +568,10 @@ BudgetOwner(ctx, txHash) (args []byte, err error)
 
 ### 已定
 
-**L1 只验预算配平，其余只存不验。** 预算 cell 创建时验证一个 Groth16 证明（R3.2）；
-除此之外链上没有 VRF 验证，没有 goal 验证，没有裁定。合约不做 Poseidon 计算：
-承诺的开启由 L2 节点核对，Poseidon 只出现在证明的电路内部。其余各项的理由见第 0 节与第 5 节。
+**L1 只验预算配平，其余只存不验。** 预算 cell 创建时验证一个 STARK 证明（R3.2）；
+除此之外链上没有 VRF 验证，没有 goal 验证，没有裁定。合约从不打开支付承诺：它只把表里
+的承诺串成哈希链交给证明去核对，承诺的开启由 L2 节点做（V3）。其余各项的理由见第 0 节
+与第 5 节。
 
 **容量占用是 O(1)。** 一个预算周期结束后，矿工把整个预算 cell 花掉取回容量；提交 cell
 同样由矿工自行回收。链上没有任何随高度累积的长期状态。
