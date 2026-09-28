@@ -17,7 +17,7 @@ require (
 	github.com/nervosnetwork/ckb-sdk-go/v2 v2.4.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/vechain/go-ecvrf v0.0.0-20251211112124-5d5a3ef70fc9
-	github.com/yu-org/yu v1.3.10
+	github.com/yu-org/yu v1.4.0
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.1
 )

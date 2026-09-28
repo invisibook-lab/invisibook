@@ -114,13 +114,8 @@ func main() {
 	mountMinerConsole(paymentServer, paymentBook, l1Verifier, pubkey, coreCfg)
 	paymentServer.Start(coreCfg.Consensus.PaymentListen)
 
-	// Registration order decides InitChain order, and that matters for one
-	// thing: the genesis block. yu's synchronizer writes its own — with a
-	// hash of all zeroes, since it builds one from HexToHash("genesis") and
-	// "genesis" is not hex — and the write is insert-if-absent, so whoever
-	// goes first owns it. PoB therefore registers ahead of the synchronizer
-	// and stores a real genesis block; see consensus.defineGenesis for what a
-	// zero-hash genesis does to the chain.
+	// PoB is the one tripod defining the genesis block (DefineGenesis); the
+	// kernel writes it before any InitChain runs.
 	startup.InitKernel(yuCfg).
 		WithTripods(pobTri, accountTri, orderBookTri, synchronizer.NewSynchronizer(yuCfg.SyncMode)).
 		Startup()

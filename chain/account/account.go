@@ -10,7 +10,6 @@ import (
 
 	"github.com/yu-org/yu/core/context"
 	"github.com/yu-org/yu/core/tripod"
-	"github.com/yu-org/yu/core/types"
 )
 
 // ────────────────────── Tripod ──────────────────────
@@ -58,7 +57,7 @@ func NewAccount(cfg *Config, db *gorm.DB, pending *store.Pending) *Account {
 // InitChain inserts genesis Cash records at chain startup.
 // Cash IDs are taken directly from the config — no derivation happens on-chain.
 // Idempotent: skips records that already exist so the chain can restart safely.
-func (a *Account) InitChain(block *types.Block) {
+func (a *Account) InitChain() {
 	for _, gc := range a.cfg.GenesisCash {
 		if a.CashExists(gc.ID) {
 			continue

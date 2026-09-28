@@ -70,12 +70,6 @@ type ProofOfBuy struct {
 	// on L1 to be treated as irreversible.
 	pending *store.Pending
 
-	// genesis is this node's own copy of the block it defined at startup —
-	// a copy, because the block the kernel passes round is shared and the
-	// synchronizer writes a zero hash over it. The finality worker needs a
-	// genesis that stays correct; see restoreFinalizedGenesis.
-	genesis *types.Block
-
 	// pendingFinalizations is a buffered channel for blocks awaiting L1 depth.
 	pendingFinalizations chan *pendingFinalization
 }
@@ -117,14 +111,14 @@ func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, 
 	return p
 }
 
-// InitChain reconciles the stores after a restart, then starts the block
-// listener, the reveal listener and the finality worker goroutines.
-func (p *ProofOfBuy) InitChain(genesis *types.Block) {
-	// Before anything else: the chain's first block has to have an identity,
-	// and yu leaves it without one. Every walk of the block tree starts from
-	// the last finalized block, which is genesis until something finalizes,
-	// so nothing below would ever get that far. See defineGenesis.
-	p.genesis = p.defineGenesis(genesis)
+// InitChain checks the stored genesis, reconciles the stores after a restart,
+// then starts the block listener, the reveal listener and the finality worker
+// goroutines. The kernel has written the genesis block by now: it asks
+// DefineGenesis for one before any tripod's InitChain runs.
+func (p *ProofOfBuy) InitChain() {
+	// A database carrying another chain's genesis cannot be run against:
+	// every block links back to genesis by hash.
+	p.checkGenesis()
 
 	p.reconcile()
 	// Ours is not one of yu's built-in topics, and both PubP2P and SubP2P
@@ -840,12 +834,6 @@ func (p *ProofOfBuy) revealAnchored(pending *[]*pendingFinalization) {
 // block adopted from another miner settles exactly as one of this node's own
 // would — the queue only ever held blocks this node produced.
 func (p *ProofOfBuy) promoteSettled() {
-	// The synchronizer's InitChain runs after this tripod's and caches a
-	// genesis block that never reached the block table. Undone here rather
-	// than at startup because the two are goroutines racing, and this costs a
-	// cached read.
-	p.restoreFinalizedGenesis(p.genesis)
-
 	started := time.Now()
 	forks, err := p.Chain.CandidateForks()
 	if err != nil {
