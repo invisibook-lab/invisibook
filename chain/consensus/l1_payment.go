@@ -17,11 +17,6 @@ import (
 	"github.com/yu-org/yu/core/keypair"
 )
 
-// mockPayerAddr stands in for the miner's L1 address until a real CKB client
-// derives it from the miner's public key.
-// TODO: derive the payer address from the miner pubkey once CKB is wired in.
-const mockPayerAddr = "0xMOCK_PAYER"
-
 // ErrPaymentNotFound reports that L1 holds no allocation for the height a
 // miner claims to have paid for. Callers wrap it with the offending details.
 var ErrPaymentNotFound = errors.New("no matching payment record on L1")
@@ -432,8 +427,6 @@ type L1Payment struct {
 	Amount *big.Int `json:"amount"`
 	// Random is the hex blinding factor opening the on-L1 commitment.
 	Random string `json:"random"`
-	// Payer is the miner's L1 address.
-	Payer string `json:"payer"`
 	// MinerPubkey identifies which miner made this payment.
 	MinerPubkey string `json:"miner_pubkey"`
 }
@@ -446,7 +439,6 @@ func NewL1Payment(txHash string, amount *big.Int, random, minerPubkey string) *L
 		TxHash:      txHash,
 		Amount:      new(big.Int).Set(amount),
 		Random:      random,
-		Payer:       mockPayerAddr,
 		MinerPubkey: minerPubkey,
 	}
 }
