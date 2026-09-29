@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/invisibook-lab/invisibook/account"
 
 	"github.com/yu-org/yu/core/context"
 )
@@ -38,7 +39,7 @@ type settle2pPublic struct {
 // the request plus on-chain state — the 2-party analogue of
 // buildSettleCoZkPublicSignals, carrying the same 15 signals in hex form.
 func buildSettleCoZk2pPublicJSON(
-	req *CoZkSettleRequest, orderA, orderB *Order, price uint64, aIsSeller bool, acc *Account,
+	req *CoZkSettleRequest, orderA, orderB *Order, price uint64, aIsSeller bool, acc *account.Account,
 ) ([]byte, error) {
 	lockedA, err := lockedInputHexesPadded(orderA, acc, 2, lockToken(orderA))
 	if err != nil {

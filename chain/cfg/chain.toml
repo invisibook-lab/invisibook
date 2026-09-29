@@ -11,6 +11,12 @@ log_output  = ""         # empty = stderr
 lei_limit   = 50000
 statedb_type = ""
 
+[chain_spec]
+chain_name = "Invisibook"
+author     = "invisibook-lab"
+version    = "v0.1.0"
+network    = "devnet"   # mainnet | testnet | devnet
+
 [kvdb]
 kv_type = "pebble"
 path    = "yu.db"

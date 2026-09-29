@@ -1,0 +1,16 @@
+[package]
+name = "budget-stark-ffi"
+version = "0.1.0"
+edition = "2024"
+
+# C ABI over budget-stark's prover, linked into the Go miner (pob-miner and
+# the node's miner console) with `-tags budgetstark`. A crate of its own
+# because a staticlib needs std, while budget-stark itself must stay no_std
+# for the CKB script.
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+budget-stark = { path = "../budget-stark", features = ["prover"] }
+p3-field = "=0.8.0"
+p3-koala-bear = "=0.8.0"

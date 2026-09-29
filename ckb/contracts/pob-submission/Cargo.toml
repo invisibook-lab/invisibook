@@ -1,0 +1,16 @@
+[package]
+name = "pob-submission"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# ckb-std and nothing else. The chain opens no commitment, verifies no VRF
+# proof and checks no zero-knowledge proof, so any crypto crate linked in here
+# would be compiled into the script and paid for in cell capacity, for nothing.
+ckb-std = "1.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

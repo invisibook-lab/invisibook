@@ -2,7 +2,6 @@ package test
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -16,35 +15,46 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/invisibook-lab/invisibook/core"
+	"github.com/yu-org/yu/core/keypair"
 )
 
 const (
 	httpURL = "http://localhost:7999"
 )
 
-// Pre-derived ed25519 seeds from BIP-39 mnemonics via SLIP-0010 at m/44'/60'/0'/0'/0'.
+// Pre-derived private keys from BIP-39 mnemonics at m/44'/60'/0'/0/0.
 // alice mnemonic: "test test test test test test test test test test test junk"
 // bob   mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 const (
-	aliceDerivedSeedHex = "0728a1a2b488fdfe677ebe6de2558f251d7263f311bc0a57cd02b32f69878c5a"
-	bobDerivedSeedHex   = "4e578ced277a96ec9507366a159f9ce5b70789bbe8f934d2bc8ef43c9c2bca77"
+	aliceDerivedSeedHex = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	bobDerivedSeedHex   = "1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727"
 )
 
-// deriveKeypair returns (privKey, pubkeyHex) from a 64-char hex seed string.
-func deriveKeypair(t *testing.T, seedHex string) (ed25519.PrivateKey, string) {
+// deriveKeypair returns (privKey, pubkeyHex) from a 64-char hex private key,
+// on the same secp256k1 curve the chain uses for ownership and block signing.
+func deriveKeypair(t *testing.T, seedHex string) (keypair.PrivKey, string) {
 	t.Helper()
 	seed, err := hex.DecodeString(seedHex)
 	if err != nil || len(seed) != 32 {
 		t.Fatalf("invalid seed hex: %s", seedHex)
 	}
-	priv := ed25519.NewKeyFromSeed(seed)
-	pubHex := hex.EncodeToString(priv.Public().(ed25519.PublicKey))
-	return priv, pubHex
+	priv := keypair.SecpPrivkeyFromBytes(seed)
+	return priv, hex.EncodeToString(priv.GenPubkey())
 }
 
 // signOrderID signs the order ID string with the given private key and returns a hex signature.
-func signOrderID(priv ed25519.PrivateKey, orderID string) string {
-	sig := ed25519.Sign(priv, []byte(orderID))
+func signOrderID(t *testing.T, priv keypair.PrivKey, orderID string) string {
+	t.Helper()
+	return signBytes(t, priv, []byte(orderID))
+}
+
+// signBytes signs `msg` with the given private key and returns a hex signature.
+func signBytes(t *testing.T, priv keypair.PrivKey, msg []byte) string {
+	t.Helper()
+	sig, err := priv.SignData(msg)
+	if err != nil {
+		t.Fatalf("signing message: %v", err)
+	}
 	return hex.EncodeToString(sig)
 }
 
@@ -106,7 +116,7 @@ func waitBlock() {
 // ────────────────────── Test ──────────────────────
 
 func TestFullOrderLifecycle(t *testing.T) {
-	// Derive keypairs from pre-computed BIP-39/SLIP-0010 seeds
+	// Derive keypairs from pre-computed BIP-32 private keys
 	alicePriv, alicePubkey := deriveKeypair(t, aliceDerivedSeedHex)
 	bobPriv, bobPubkey := deriveKeypair(t, bobDerivedSeedHex)
 	t.Logf("alice pubkey: %s", alicePubkey)
@@ -219,7 +229,7 @@ func TestFullOrderLifecycle(t *testing.T) {
 
 	sellOrderID := core.ComputeOrderID([]string{aliceETHCashID})
 	t.Logf("  sell order ID: %s", sellOrderID)
-	sellSig := signOrderID(alicePriv, string(sellOrderID))
+	sellSig := signOrderID(t, alicePriv, string(sellOrderID))
 
 	err = wrCall("orderbook", "SendOrder", map[string]any{
 		"id":             sellOrderID,
@@ -263,7 +273,7 @@ func TestFullOrderLifecycle(t *testing.T) {
 
 	buyOrderID := core.ComputeOrderID([]string{bobUSDTCashID})
 	t.Logf("  buy order ID: %s", buyOrderID)
-	buySig := signOrderID(bobPriv, string(buyOrderID))
+	buySig := signOrderID(t, bobPriv, string(buyOrderID))
 
 	err = wrCall("orderbook", "SendOrder", map[string]any{
 		"id":             buyOrderID,
@@ -625,18 +635,18 @@ func buildTestMpcShares(t *testing.T) (map[string]string, map[string]string) {
 	// r_smaller_mac_A + r_smaller_mac_B = delta * r_smaller = 18 * 42 = 756
 	// Let r_smaller_mac_A = 356, r_smaller_mac_B = 400
 	alice := map[string]string{
-		"cmp_share":        "0",
-		"cmp_mac":          "8",
-		"r_smaller_share":  "42",
-		"r_smaller_mac":    "356",
-		"mac_key_share":    "7",
+		"cmp_share":       "0",
+		"cmp_mac":         "8",
+		"r_smaller_share": "42",
+		"r_smaller_mac":   "356",
+		"mac_key_share":   "7",
 	}
 	bob := map[string]string{
-		"cmp_share":        "1",
-		"cmp_mac":          "10",
-		"r_smaller_share":  "0",
-		"r_smaller_mac":    "400",
-		"mac_key_share":    "11",
+		"cmp_share":       "1",
+		"cmp_mac":         "10",
+		"r_smaller_share": "0",
+		"r_smaller_mac":   "400",
+		"mac_key_share":   "11",
 	}
 	return alice, bob
 }

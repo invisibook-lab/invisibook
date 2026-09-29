@@ -18,7 +18,7 @@ import (
 // is the only place that knows the bridge's wire formats.
 
 // PlonkVK bundles the ark-compressed verifying-key bytes of a PLONK circuit
-// with its name for error reporting, mirroring CircuitVK for Groth16.
+// with its name for error reporting, mirroring account.CircuitVK for Groth16.
 type PlonkVK struct {
 	Name    string
 	VKBytes []byte
@@ -27,7 +27,7 @@ type PlonkVK struct {
 // LoadPlonkVK reads an ark-compressed PLONK verifying key from disk (the
 // output of `dump_settle2p_fixture --vk-out`). When `path` is empty, returns
 // nil — callers passing a nil VK to VerifyPlonkSettle2p skip verification
-// (test environments without circuit artifacts), matching LoadVK's contract.
+// (test environments without circuit artifacts), matching account.LoadVK's contract.
 func LoadPlonkVK(name, path string) (*PlonkVK, error) {
 	if path == "" {
 		log.Printf("[zk] PLONK VK %q: path empty, verification will be skipped", name)
@@ -46,7 +46,7 @@ func LoadPlonkVK(name, path string) (*PlonkVK, error) {
 // VerifyPlonkSettle2p verifies `proofHex` (hex of the ark-compressed PLONK
 // proof both traders revealed) against `vk` and `publicJSON`, the canonical
 // `SettlePublic` statement JSON the chain rebuilt from on-chain state.
-// Logs one line per call plus the verdict, like VerifyGroth16.
+// Logs one line per call plus the verdict, like account.VerifyGroth16.
 func VerifyPlonkSettle2p(vk *PlonkVK, proofHex string, publicJSON []byte) error {
 	// When no VK is loaded (path was empty in config), skip verification.
 	if vk == nil {
