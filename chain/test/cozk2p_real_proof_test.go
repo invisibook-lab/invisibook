@@ -3,7 +3,6 @@
 package test
 
 import (
-	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -123,7 +122,7 @@ amount = %q
 		"price":          fx.Price,
 		"amount":         fx.OrderACommitmentHex,
 		"pubkey":         alicePubkey,
-		"signature":      signOrderID(alicePriv, string(sellOrderID)),
+		"signature":      signOrderID(t, alicePriv, string(sellOrderID)),
 		"input_cash_ids": []string{aliceCashID},
 		"handling_fee":   []string{"0"},
 	}); err != nil {
@@ -139,7 +138,7 @@ amount = %q
 		"price":          fx.Price,
 		"amount":         fx.OrderBCommitmentHex,
 		"pubkey":         bobPubkey,
-		"signature":      signOrderID(bobPriv, string(buyOrderID)),
+		"signature":      signOrderID(t, bobPriv, string(buyOrderID)),
 		"input_cash_ids": []string{bobCashID},
 		"handling_fee":   []string{"0"},
 	}); err != nil {
@@ -170,8 +169,8 @@ amount = %q
 	badReq := *req
 	badReq.ZkProof = bumpHexByte(fx.ProofHex)
 	msg := core.CoZk2pSettleMessage(&badReq)
-	badReq.SigA = hex.EncodeToString(ed25519.Sign(alicePriv, msg))
-	badReq.SigB = hex.EncodeToString(ed25519.Sign(bobPriv, msg))
+	badReq.SigA = signBytes(t, alicePriv, msg)
+	badReq.SigB = signBytes(t, bobPriv, msg)
 	if err := wrCall("orderbook", "SettleOrdersCoZk2p", &badReq); err != nil {
 		t.Fatalf("submitting tampered-proof settle failed at HTTP level: %v", err)
 	}
@@ -182,8 +181,8 @@ amount = %q
 
 	// --- Happy path: the genuine collaborative proof settles ---
 	msg = core.CoZk2pSettleMessage(req)
-	req.SigA = hex.EncodeToString(ed25519.Sign(alicePriv, msg))
-	req.SigB = hex.EncodeToString(ed25519.Sign(bobPriv, msg))
+	req.SigA = signBytes(t, alicePriv, msg)
+	req.SigB = signBytes(t, bobPriv, msg)
 	if err := wrCall("orderbook", "SettleOrdersCoZk2p", req); err != nil {
 		t.Fatalf("SettleOrdersCoZk2p failed: %v", err)
 	}

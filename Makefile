@@ -1,4 +1,4 @@
-.PHONY: build build-desktop build-chain build-cozk2p-lib build-settle2p build-chain-cozk2p dump-cozk2p-fixture test-e2e-cozk2p run-chain run-test clean reset reset-chain reset-test
+.PHONY: build build-desktop build-chain build-budget-stark-lib build-pob-miner build-cozk2p-lib build-settle2p build-chain-cozk2p dump-cozk2p-fixture test-e2e-cozk2p run-chain run-test clean reset reset-chain reset-test
 
 # The settle2p_session prover ships alongside the desktop app.
 COZK2P_SETTLE2P_BIN := $(PWD)/cozk2p/target/release/settle2p_session
@@ -10,6 +10,20 @@ build-desktop:
 
 build-chain:
 	cd chain && go build -o invisibook .
+
+# ── PoB budget balance proof (R3.2) ──
+# The prover is Rust (lib/budget-stark, Plonky3), linked as a static library
+# via cgo behind the `budgetstark` build tag into pob-miner, the one program
+# that prepays (`pob-miner prepay`, or from the browser via `pob-miner
+# console`). The node never proves: the proof is checked on CKB by pob-budget.
+
+build-budget-stark-lib:
+	cd lib && cargo build --release -p budget-stark-ffi
+	mkdir -p chain/lib
+	cp lib/target/release/libbudget_stark_ffi.a chain/lib/
+
+build-pob-miner: build-budget-stark-lib
+	cd chain && go build -tags budgetstark -o pob-miner ./cmd/pob-miner
 
 # ── 2-party collaborative settlement (cozk2p) ──
 # The PLONK verifier lives in the cozk2p Rust staticlib, linked into the

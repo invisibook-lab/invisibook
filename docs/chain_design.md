@@ -56,11 +56,11 @@ Design invariants:
 │         ▼                       ▼                             ▼                    │
 │   ┌───────────┐        ┌────────────────┐            ┌──────────────────┐          │
 │   │consensus/ │        │ core/orderbook │            │  core/account    │          │
-│   │ PoA       │        │  tripod        │◀──────────▶│  tripod          │          │
-│   │ (yu poa)  │        │                │   uses     │                  │          │
-│   │ (VDF /    │        │ SendOrder      │            │ Deposit          │          │
-│   │  PoBuy    │        │ SettleOrder    │            │ Withdraw         │          │
-│   │  stubs)   │        │ QueryOrders    │            │ GetAccount       │          │
+│   │ PoBuy     │        │  tripod        │◀──────────▶│  tripod          │          │
+│   │           │        │                │   uses     │                  │          │
+│   │ VRF       │        │ SendOrder      │            │ Deposit          │          │
+│   │ L1 payment│        │ SettleOrder    │            │ Withdraw         │          │
+│   │ L1 finality        │ QueryOrders    │            │ GetAccount       │          │
 │   └───────────┘        │                │            │                  │          │
 │                        │ matchOrder     │            │ LockCash         │          │
 │                        │ InsertOrder    │            │ SpendCash        │          │
@@ -144,15 +144,101 @@ points plus internal helpers (`LockCash`, `SpendCash`, `CreateCash`,
 
 ### 2.5 Consensus — [chain/consensus/](../chain/consensus/)
 
-Currently the chain runs under yu's single-node PoA for development
-(`poa.SingleNodeCfg()`). Two future tripods are stubbed:
+The chain runs the Proof-of-Buy consensus tripod (`consensus.NewProofOfBuy`,
+wired in [main.go](../chain/main.go)). Each block a miner declares an L1
+payment, evaluates a VRF, and the highest `score = payment × vrf` wins the
+height; the block header is then submitted to L1 and the block is finalized
+only once that submission confirms.
 
-- [`proof_of_buying.go`](../chain/consensus/proof_of_buying.go) — a custom
-  consensus hook keyed off order-book activity (stub).
-- [`vdf.go`](../chain/consensus/vdf.go) — verifiable-delay-function step
-  (stub, used to resist front-running in the matching phase).
+- [`proof_of_buy.go`](../chain/consensus/proof_of_buy.go) — the tripod:
+  `StartBlock` (pay → VRF → score → produce → collect and compare rivals),
+  `EndBlock` (verify, execute, persist), and a `finalityWorker` goroutine
+  that finalizes blocks in height order behind L1 confirmation.
+- [`vrf.go`](../chain/consensus/vrf.go) — ECVRF-SECP256K1-SHA256-TAI
+  (suite `0xFE`, via [go-ecvrf](https://github.com/vechain/go-ecvrf)).
+- [`score.go`](../chain/consensus/score.go) — `CalcBlockScore`.
+- [`l1_payment.go`](../chain/consensus/l1_payment.go) — payment types, the
+  `L1PaymentVerifier` interface, the `PaymentBook` that holds declarations
+  keyed by L2 height, and a gin `POST /pay_l1_token` endpoint through which a
+  miner declares payments — `{block_height, amount, random, tx_hash}` — for any
+  number of future heights in one batch, and a batch is accepted or rejected as
+  a whole. The same listener answers `GET /payment_status` (the settled height
+  and how many declarations are queued), which `pob-miner console` reads.
 
-Swapping from PoA to PoBuy is a one-line change in `main.go`.
+  On L1 a miner makes **one large prepayment** and then allocates parts of it
+  to individual L2 heights. Each allocation is stored as a **Poseidon2
+  commitment**, so rivals cannot read how much a miner bid for an upcoming
+  height. The budget cell carrying the table cannot exist unless a
+  zero-knowledge proof that the table sums exactly to the prepayment verifies
+  on CKB (R3.2, [ckb_layout.md](ckb_layout.md) §3), so the node never checks the
+  balance itself. What the miner submits here is the plaintext *opening* of that
+  commitment: `amount` plus the blinding factor `random`. The endpoint
+  confirms it against L1 immediately, so a bad opening is reported in the HTTP
+  response rather than discovered blocks later.
+
+  `ConfirmPayment` is the single gate every payment claim passes through:
+  well-formed → bound to its block producer → L1 holds an allocation for that
+  height → `PaymentCommit(amount, random)` equals the commitment recorded there.
+  The endpoint applies it to the miner's own declarations, and `StartBlock`
+  applies it to each candidate block arriving over P2P, so both sides judge a
+  payment by exactly the same rules. Since the commitment is posted before the
+  miner can see anyone else's bid, revealing the opening later cannot be a lie
+  — a larger claimed amount simply hashes to something else and is rejected.
+
+  `StartBlock` then takes the declaration for its own height — no L1 round-trip
+  on the block path — and a height the miner declared nothing for falls back to
+  `min_payment`, a placeholder no L1 allocation backs, which peers will
+  therefore reject.
+- [`poseidon2.go`](../chain/consensus/poseidon2.go) — `PaymentCommit`, the
+  payment commitment in a budget cell: Poseidon2 over KoalaBear (width 16),
+  ported from Plonky3 and pinned to vectors dumped from the Rust prover, since
+  the balance proof on L1 is made over exactly these commitments; and
+  `NewPaymentRandomHex`, whose blinding factor is eight canonical field
+  elements.
+- [`commitment.go`](../chain/consensus/commitment.go) — `PoseidonCommit`, the
+  Go side of the commitment shape the wallet circuits use for L2 cash and
+  rewards (circom-parameterized Poseidon(2) over BN254, rendered as 64-char
+  hex); `CommitBlockHash`, the
+  commitment a block is posted under (`SHA256(block_hash || random)` — the
+  block hash alone, since it already determines height, goal, VRF output and
+  every transaction; a plain byte-string hash because nothing opens this
+  commitment inside a circuit, unlike the payment commitments above); and
+  `NewRandomHex` for the blinding factor.
+- [`l1_submitter.go`](../chain/consensus/l1_submitter.go) — the
+  `L1CommitmentSubmitter` interface plus its mock. Only a commitment reaches
+  L1: submitting the header and score in the clear would hand the L1 block
+  producer exactly what it needs to censor selectively.
+- [`bid_store.go`](../chain/consensus/bid_store.go) — the openings of those commitments,
+  written to disk *before* each submission goes out. L1 carries only the
+  commitment, so an opening lost to a crash would leave a commitment nobody can
+  ever open and tokens spent for nothing.
+
+**One key, three roles.** The miner keypair is **secp256k1** everywhere
+(`keypair.Secp256k1` in `main.go`), because that is the curve of CKB's
+default lock, `secp256k1_blake160_sighash_all`. The same key therefore
+
+1. signs L2 blocks (yu / tendermint ECDSA over SHA-256),
+2. evaluates the VRF (ECVRF on the same curve — so `VRFVerify` takes
+   `block.MinerPubkey` and there is no separate, grindable VRF key; this is
+   checked by L2 nodes only, never on chain), and
+3. owns the CKB address that pays on L1 — `lock.args` is
+   `blake160(block.MinerPubkey)`, the compressed 33-byte encoding, so
+   binding an L1 payment to a block producer is a byte comparison rather
+   than a registration protocol.
+
+The three hash domains never overlap (CKB blake2b with the
+`ckb-default-hash` personalization, yu's SHA-256, ECVRF's suite string
+`0xFE`), which keeps the shared key safe across the three protocols.
+
+Without a `[ckb]` section the node runs against in-memory stand-ins for L1
+(`MockL1PaymentVerifier`, `MockL1CommitmentSubmitter`); with one it reads and
+writes a real CKB chain through [`chain/ckb`](../chain/ckb).
+
+Finality follows from fork choice: which fork is canonical is decided by
+cumulative goal, irreversibility grows with the score gap, and L1's record of
+when each commitment appeared is what exposes a fork bought after the fact. The
+interfaces that read a verdict back from L1 are gone; staged writes are
+promoted once the commitment is on chain, pending fork choice.
 
 ## 3. Business-Scenario Walkthroughs
 
@@ -244,8 +330,72 @@ relayer, gated on the same `zk_proof`.
 | [chain/core/cash.go](../chain/core/cash.go) | `Cash`, `CashStatus`, `AccountRecord`, `ChangeOutput`, `generateCashID`, `verifyProof` (TODO) |
 | [chain/core/config.go](../chain/core/config.go) | TOML loader + `DefaultConfig` |
 | [chain/core/udt.go](../chain/core/udt.go) | `TokenID`, `UDT`, `NativeToken` |
-| [chain/consensus/proof_of_buying.go](../chain/consensus/proof_of_buying.go) | PoBuy tripod stub |
-| [chain/consensus/vdf.go](../chain/consensus/vdf.go) | VDF tripod stub |
+| [chain/consensus/proof_of_buy.go](../chain/consensus/proof_of_buy.go) | PoBuy tripod: block production, scoring, L1-gated finality |
+| [chain/consensus/genesis.go](../chain/consensus/genesis.go) | Defines the genesis block; yu leaves it with a zero hash, which makes it its own parent |
+| [chain/consensus/forkchoice.go](../chain/consensus/forkchoice.go) | Admission (anchored + revealed) then ranking (cumulative goal), in that order |
+| [chain/consensus/vrf.go](../chain/consensus/vrf.go) | ECVRF-SECP256K1-SHA256-TAI + secp256k1 key helpers |
+| [chain/consensus/score.go](../chain/consensus/score.go) | `CalcBlockScore` = payment × VRF factor |
+| [chain/consensus/l1_payment.go](../chain/consensus/l1_payment.go) | L1 payment types, verifier interface, `/pay_l1_token` endpoint |
+| [chain/consensus/l1_submitter.go](../chain/consensus/l1_submitter.go) | L2 header → L1 submission interface + mock |
+| [chain/ckb/client.go](../chain/ckb/client.go) | CKB client implementing all three L1 interfaces; narrow `nodeRPC` view of a node |
+| [chain/ckb/config.go](../chain/ckb/config.go) | `[ckb]` section; derives every script's args off the mining addr |
+| [chain/ckb/budget_data.go](../chain/ckb/budget_data.go) | Budget cell data: `prepaid` prefix + molecule fixvec allocation table |
+| [chain/ckb/reader.go](../chain/ckb/reader.go) | V1 (anchored commitment) and the budget cell lookup behind V7 |
+| [chain/ckb/payment_verifier.go](../chain/ckb/payment_verifier.go) | Per-height allocation, gated on budget cell ownership |
+| [chain/ckb/submitter.go](../chain/ckb/submitter.go) | Creates commit cells; reports where a submission landed |
+| [chain/ckb/budget.go](../chain/ckb/budget.go) | Miner side: prepay the mining addr, write the allocation table (R3.3), and cut the balance proof across witnesses (R3.2) |
+| [chain/ckb/tx.go](../chain/ckb/tx.go) | `wallet`: cell collection, fee, signing; skips cells carrying type scripts (R3.4) |
+| [chain/ckb/inflight.go](../chain/ckb/inflight.go) | Keeps this wallet's unconfirmed transactions from spending each other's inputs |
+| [chain/cmd/ckb-deploy](../chain/cmd/ckb-deploy) | Publishes the four PoB scripts and prints the `[ckb]` config |
+| [chain/miner](../chain/miner) | Miner console behind `pob-miner console`: prepay/allocation planning (even, random, manual), the openings store, declaration, the browser UI, and `NodeClient`, its view of the node |
+| [chain/cmd/pob-miner](../chain/cmd/pob-miner) | Miner side: address, prepay (budget cell), declare (openings), console |
+| [chain/budgetproof](../chain/budgetproof) | cgo bridge to the Rust balance prover (`lib/budget-stark`), linked into pob-miner only (`-tags budgetstark`) |
+| [scripts/devnet.sh](../scripts/devnet.sh) | Local CKB devnet + the whole PoB path end to end |
+
+#### Miner console
+
+The console runs in pob-miner, beside the node: build it with
+`make build-pob-miner` (it links the balance prover), start
+`pob-miner console -core-config <the node's core.toml>` and open
+`http://127.0.0.1:8082/`. It holds the miner's wallet and proves each table;
+from the node it needs only the payment listener, reading
+`GET /payment_status` and declaring through `POST /pay_l1_token`. The node
+itself never proves or pays.
+
+The page drives these endpoints, which answer loopback callers only unless
+`miner_api_token` is set (then every call needs
+`Authorization: Bearer <token>`); writes must be `application/json`. Amounts
+are decimal CKB.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /pob/status` | Miner address, spendable CKB, settled L2 height, and the earliest height a prepayment made now can be bid at |
+| `POST /pob/plan` | Divide a prepayment without paying: `{mode, from, count, total_ckb, spread_percent}` or, for `manual`, `{allocations: [{height, amount_ckb}]}`. `mode` is `random` (default), `even` or `manual` |
+| `POST /pob/prepay` | Same body plus `auto_declare` (default true). Saves the openings, then sends the budget cell in the background; answers 202 |
+| `POST /pob/declare` | `{prepayment_id, from}`: hands the not-yet-declared openings to the node |
+| `GET /pob/prepayments` | Every prepayment with per-height state; blinding factors are never returned |
+
+Every split sums exactly to the total, because the budget cell is balanced by
+equality (R3.2); the console proves this before paying, and at most 1024
+heights fit one prepayment, the most one proof covers. Openings live in
+`schedule_path` (mode 0600) and are written before the L1 transaction goes
+out.
+
+A prepayment is declared only once L1's tip reaches its budget cell's block +
+`PaymentLeadBlocks` (`matures_at`). The node produces a block as soon as a
+declaration for the waiting height arrives, so declaring earlier would yield a
+block whose anchor can never clear V4. Auto-declare waits for this; a manual
+`/pob/declare` before it is refused.
+
+The suggested start height continues from the miner's last allocation when
+that is still ahead, since a gap between prepayments is a height nobody
+produces for a solo miner. Otherwise it is the next height while the chain is
+waiting, or next + the lead converted to L2 heights at L1's measured pace
+while it is moving.
+
+`scripts/devnet.sh console` brings up a CKB devnet, the node and
+`pob-miner console` without prepaying, for driving the whole flow from the
+console.
 
 ### 4.2 Core types cheat sheet
 
@@ -292,4 +442,6 @@ type Cash struct {
 - **[yu-sdk (Rust)](https://github.com/yu-org/yu-sdk)** — Rust client SDK used by [lib/chain/src/chain.rs](../lib/chain/src/chain.rs) to drive `SendOrder` / `SettleOrder` / `QueryOrders`.
 - **[GORM](https://gorm.io/)** + **SQLite** — persistence for orders and cash (`chain/data/*.db`, paths in `core.toml`).
 - **[go-playground/validator](https://github.com/go-playground/validator)** — struct-tag validation on all request types.
+- **[go-ecvrf](https://github.com/vechain/go-ecvrf)** — ECVRF on secp256k1 (`Secp256k1Sha256Tai`), used by the PoBuy consensus.
+- **[dcrd/dcrec/secp256k1](https://github.com/decred/dcrd)** — secp256k1 key parsing / compression, bridging yu keys to `ecdsa.PrivateKey`.
 - **Related client-side crypto** — amount ciphertext is produced off-chain in [lib/chain/src/orderbook.rs](../lib/chain/src/orderbook.rs) via Poseidon (BN254) on desktop, SHA-256 on Android; ZK proofs for deposit / settle / withdraw are produced in [lib/zk/](../lib/zk/) and verified by the three TODOs in `Deposit`, `SettleOrder`, `Withdraw`.

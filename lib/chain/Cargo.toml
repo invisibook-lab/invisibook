@@ -11,7 +11,9 @@ rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-yu-sdk = "0.1.1"
+yu-sdk = "0.1.2"
+k256 = "0.13"
+thiserror = "1"
 toml = "0.8"
 dirs = "6"
 hex = "0.4"

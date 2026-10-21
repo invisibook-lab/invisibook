@@ -46,7 +46,7 @@ fn App() -> Element {
         let mnemonic = std::fs::read_to_string(cfg.mnemonic_path()).ok();
         if let Some(mnemonic) = mnemonic {
             let mnemonic = mnemonic.trim().to_string();
-            match hd::mnemonic_to_ed25519_key(&mnemonic, 60, 0) {
+            match hd::mnemonic_to_key(&mnemonic, 60, 0) {
                 Ok(seed) => {
                     let kp = ClientConfig::keypair_from_seed(&seed).unwrap();
                     let pubkey = hex::encode(kp.pubkey_bytes());
