@@ -2,7 +2,6 @@ package ckb
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"testing"
 
@@ -22,18 +21,15 @@ func fund(c *Client, node *fakeNode, capacity uint64) {
 	})
 }
 
-func TestSubmitCommitment(t *testing.T) {
+func TestSubmitHeader(t *testing.T) {
 	node := newFakeNode()
 	client := testClient(t, node)
 	fund(client, node, 10_000_00000000)
+	header := testHeader(t, 77)
 
-	commitment := hex.EncodeToString(bytes32(0xcd))
-	txHash, err := client.SubmitCommitment(context.Background(), &consensus.BlockCommitment{
-		L2BlockHeight: 77,
-		Commitment:    commitment,
-	})
+	txHash, err := client.SubmitHeader(context.Background(), header)
 	if err != nil {
-		t.Fatalf("submitting the commitment: %v", err)
+		t.Fatalf("submitting the header: %v", err)
 	}
 	if txHash == "" {
 		t.Fatal("submitted without a transaction hash")
@@ -43,8 +39,6 @@ func TestSubmitCommitment(t *testing.T) {
 	}
 	tx := node.sent[0]
 
-	// The one output this call is about, and what it carries. A commit cell
-	// holding anything but 32 bytes is refused on chain by R5.1.
 	var found int
 	for i, output := range tx.Outputs {
 		if output.Type == nil {
@@ -54,33 +48,28 @@ func TestSubmitCommitment(t *testing.T) {
 			t.Fatalf("output %d carries an unexpected type script", i)
 		}
 		found++
-		if got := hex.EncodeToString(tx.OutputsData[i]); got != commitment {
-			t.Fatalf("commit cell carries %s, want %s", got, commitment)
+		// What lands on L1 has to resolve back to the block it was
+		// submitted for, or no node can date that block by it.
+		got, err := consensus.DecodeAnchoredHeader(tx.OutputsData[i])
+		if err != nil {
+			t.Fatalf("decoding the submitted header: %v", err)
+		}
+		if got.Hash != header.Hash {
+			t.Fatalf("submit cell resolves to %s, want %s", got.Hash, header.Hash)
 		}
 		// Locked to the miner so the capacity comes back once the height is
 		// decided (R5.2).
 		if output.Lock.Hash() != client.minerLock().Hash() {
-			t.Fatal("commit cell is not locked to the miner that created it")
+			t.Fatal("submit cell is not locked to the miner that created it")
 		}
 	}
 	if found != 1 {
-		t.Fatalf("created %d commit cells, want 1", found)
-	}
-
-	// Nothing about the bid may reach L1 in the clear: whatever an L1 block
-	// producer can read, it can censor on (§9.6).
-	for i, data := range tx.OutputsData {
-		if i < len(tx.Outputs) && tx.Outputs[i].Type != nil {
-			continue
-		}
-		if len(data) != 0 {
-			t.Fatalf("output %d carries %d bytes beside the commitment", i, len(data))
-		}
+		t.Fatalf("created %d submit cells, want 1", found)
 	}
 
 	// The script has to be findable, or the node rejects the transaction.
 	if !hasDep(tx, client.set.commitDep) {
-		t.Fatal("the commit script's cell dep is missing")
+		t.Fatal("the submit script's cell dep is missing")
 	}
 	if !hasDep(tx, client.set.sighashDep) {
 		t.Fatal("the sighash lock's cell dep is missing")
@@ -92,84 +81,46 @@ func TestSubmitCommitment(t *testing.T) {
 	}
 }
 
-func TestSubmitCommitmentRejectsMalformedCommitment(t *testing.T) {
+// R5.1 caps the data length on chain; a header over it is refused before a
+// transaction is built.
+func TestSubmitHeaderRejectsAnOversizedHeader(t *testing.T) {
 	node := newFakeNode()
 	client := testClient(t, node)
 	fund(client, node, 10_000_00000000)
 
-	cases := map[string]string{
-		"not 32 bytes": "abcd",
-		"not hex":      "zz" + hex.EncodeToString(bytes32(0xcd))[2:],
+	header := testHeader(t, 1)
+	header.Extra = make([]byte, consensus.MaxHeaderLen)
+
+	if _, err := client.SubmitHeader(context.Background(), header); !errors.Is(err, consensus.ErrHeaderTooLarge) {
+		t.Fatalf("expected ErrHeaderTooLarge, got %v", err)
 	}
-	for name, commitment := range cases {
-		t.Run(name, func(t *testing.T) {
-			_, err := client.SubmitCommitment(context.Background(),
-				&consensus.BlockCommitment{L2BlockHeight: 1, Commitment: commitment})
-			if err == nil {
-				t.Fatal("submitted a commitment R5.1 would refuse")
-			}
-			if len(node.sent) != 0 {
-				t.Fatal("broadcast a transaction that could not be valid")
-			}
-		})
+	if len(node.sent) != 0 {
+		t.Fatal("broadcast a transaction that could not be valid")
 	}
 }
 
-func TestCommitmentOnChain(t *testing.T) {
+func TestHeaderOnChain(t *testing.T) {
 	node := newFakeNode()
 	client := testClient(t, node)
 
-	tx := commitTx(client, bytes32(0xab))
-	blockHash := ckbtypes.HexToHash(hashOf(0x7a))
-	node.addCommittedTx(tx, blockHash, 555, 3)
+	tx := submitTx(client, 0x55, []byte{1})
+	node.addCommittedTx(tx, ckbtypes.HexToHash(hashOf(0x7a)), 555, 3)
 
-	loc, err := client.CommitmentOnChain(context.Background(), tx.Hash.String())
+	onChain, err := client.HeaderOnChain(context.Background(), tx.Hash.String())
 	if err != nil {
 		t.Fatalf("checking the submission: %v", err)
 	}
-	if loc == nil {
+	if !onChain {
 		t.Fatal("a committed submission reported as not on chain")
-	}
-	if loc.BlockHash != blockHash.String() || loc.TxIdx != 3 {
-		t.Fatalf("located at %s/%d, want %s/3", loc.BlockHash, loc.TxIdx, blockHash)
-	}
-}
-
-// Without the index a verifier cannot find the commitment, so a node that
-// does not report one is worth a second round trip rather than a hard
-// requirement on its version.
-func TestCommitmentOnChainFallsBackToScanningTheBlock(t *testing.T) {
-	node := newFakeNode()
-	client := testClient(t, node)
-
-	tx := commitTx(client, bytes32(0xab))
-	other := &ckbtypes.Transaction{Hash: ckbtypes.HexToHash(hashOf(0x04))}
-	block := blockWith(556, 0x7b, other, tx)
-	blockHash := node.addBlock(block, true)
-
-	node.txs[tx.Hash] = &ckbtypes.TransactionWithStatus{
-		Transaction: tx,
-		TxStatus: &ckbtypes.TxStatus{
-			Status:    ckbtypes.TransactionStatusCommitted,
-			BlockHash: &blockHash,
-		},
-	}
-
-	loc, err := client.CommitmentOnChain(context.Background(), tx.Hash.String())
-	if err != nil {
-		t.Fatalf("checking the submission: %v", err)
-	}
-	if loc == nil || loc.TxIdx != 1 {
-		t.Fatalf("located at %+v, want index 1", loc)
 	}
 }
 
 // A submission waiting in the pool is not a lost one, and the difference
-// decides what the caller does. Re-sending a pending commitment rebuilds the
-// identical transaction — same opening, same inputs — which the node refuses
-// as a duplicate, so reporting "pending" as "absent" turns every block's
-// ordinary wait into a resubmission loop that can never succeed.
-func TestCommitmentOnChainDistinguishesPendingFromLost(t *testing.T) {
+// decides what the caller does. Re-sending a pending submission rebuilds the
+// identical transaction, which the node refuses as a duplicate, so reporting
+// "pending" as "absent" turns every block's ordinary wait into a resubmission
+// loop that can never succeed.
+func TestHeaderOnChainDistinguishesPendingFromLost(t *testing.T) {
 	node := newFakeNode()
 	client := testClient(t, node)
 
@@ -177,43 +128,42 @@ func TestCommitmentOnChainDistinguishesPendingFromLost(t *testing.T) {
 		ckbtypes.TransactionStatusPending,
 		ckbtypes.TransactionStatusProposed,
 	} {
-		tx := commitTx(client, bytes32(0xab))
+		tx := submitTx(client, 0x55, []byte{1})
 		node.txs[tx.Hash] = &ckbtypes.TransactionWithStatus{
 			Transaction: tx,
 			TxStatus:    &ckbtypes.TxStatus{Status: status},
 		}
 
-		loc, err := client.CommitmentOnChain(context.Background(), tx.Hash.String())
+		onChain, err := client.HeaderOnChain(context.Background(), tx.Hash.String())
 		if !errors.Is(err, consensus.ErrSubmissionPending) {
 			t.Fatalf("a %s submission gave %v, want ErrSubmissionPending", status, err)
 		}
-		if loc != nil {
-			t.Fatalf("a %s submission located at %+v, want nil", status, loc)
+		if onChain {
+			t.Fatalf("a %s submission reported as on chain", status)
 		}
 	}
 
 	// One L1 has never heard of really is lost, and has to be sent again.
-	loc, err := client.CommitmentOnChain(context.Background(), hashOf(0x98))
+	onChain, err := client.HeaderOnChain(context.Background(), hashOf(0x98))
 	if err != nil {
 		t.Fatalf("checking an unknown submission: %v", err)
 	}
-	if loc != nil {
-		t.Fatalf("an unknown submission located at %+v, want nil", loc)
+	if onChain {
+		t.Fatal("an unknown submission reported as on chain")
 	}
 
 	// So is one the node rejected.
-	rejected := commitTx(client, bytes32(0xac))
-	rejected.Hash = ckbtypes.HexToHash(hashOf(0x97))
+	rejected := submitTx(client, 0x97, []byte{1})
 	node.txs[rejected.Hash] = &ckbtypes.TransactionWithStatus{
 		Transaction: rejected,
 		TxStatus:    &ckbtypes.TxStatus{Status: ckbtypes.TransactionStatusRejected},
 	}
-	loc, err = client.CommitmentOnChain(context.Background(), rejected.Hash.String())
+	onChain, err = client.HeaderOnChain(context.Background(), rejected.Hash.String())
 	if err != nil {
 		t.Fatalf("checking a rejected submission: %v", err)
 	}
-	if loc != nil {
-		t.Fatalf("a rejected submission located at %+v, want nil", loc)
+	if onChain {
+		t.Fatal("a rejected submission reported as on chain")
 	}
 }
 

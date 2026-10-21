@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"encoding/binary"
 	"path/filepath"
 	"testing"
 
@@ -41,7 +42,8 @@ func openGenesisPoB(chainID uint64, dsn string) (*ProofOfBuy, *blockchain.BlockC
 	cfg.BlockChain.ChainDB.Dsn = dsn
 	chain := blockchain.NewBlockChain(common.FullNode, &cfg.BlockChain, noTxDB{})
 
-	p := &ProofOfBuy{Tripod: tripod.NewTripod()}
+	pobCfg := DefaultConsensusConfig()
+	p := &ProofOfBuy{Tripod: tripod.NewTripod(), cfg: &pobCfg}
 	p.SetChainEnv(&env.ChainEnv{Chain: chain})
 	return p, chain
 }
@@ -114,5 +116,57 @@ func TestCheckGenesisRefusesAnotherChain(t *testing.T) {
 	}()
 	if !exited {
 		t.Fatal("checkGenesis accepted another chain's genesis")
+	}
+}
+
+// n is part of the genesis block, so it is part of the genesis hash: nodes
+// that disagree on it define different chains, and checkGenesis turns that
+// into a refusal to start instead of a silent split over which L1 windows to
+// read.
+func TestGenesisCarriesTheL1Height(t *testing.T) {
+	p, _ := newGenesisPoB(t, 1926)
+	genesis := p.DefineGenesis()
+
+	want := p.cfg.AnchorGenesisL1Height
+	if got := binary.BigEndian.Uint64(genesis.Extra); got != want {
+		t.Fatalf("genesis carries L1 height %d, want %d", got, want)
+	}
+
+	other := *genesis.Header
+	other.Hash = common.Hash{}
+	other.Extra = encodeGenesisL1Height(want + 1)
+	encoded, err := (&types.Block{Header: &other}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if common.BytesToHash(common.Sha256(encoded)) == genesis.Hash {
+		t.Fatal("a different n produced the same genesis hash")
+	}
+}
+
+// The case n being in genesis exists for: a node whose config names another
+// n, pointed at an existing chain, must refuse to start rather than read
+// different L1 windows from everyone else.
+func TestCheckGenesisRefusesAnotherL1Height(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "chain.db")
+	first, chain := openGenesisPoB(1926, dsn)
+	if err := chain.SetGenesis(first.DefineGenesis()); err != nil {
+		t.Fatal(err)
+	}
+
+	logger := logrus.StandardLogger()
+	prev := logger.ExitFunc
+	logger.ExitFunc = func(int) { panic("exit") }
+	defer func() { logger.ExitFunc = prev }()
+
+	reconfigured, _ := openGenesisPoB(1926, dsn)
+	reconfigured.cfg.AnchorGenesisL1Height++
+	exited := func() (exited bool) {
+		defer func() { exited = recover() != nil }()
+		reconfigured.checkGenesis()
+		return false
+	}()
+	if !exited {
+		t.Fatal("checkGenesis accepted a genesis built with another n")
 	}
 }

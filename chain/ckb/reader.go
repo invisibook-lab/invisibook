@@ -2,81 +2,12 @@ package ckb
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 
 	ckbtypes "github.com/nervosnetwork/ckb-sdk-go/v2/types"
 
 	"github.com/invisibook-lab/invisibook/consensus"
 )
-
-// CommitmentAt returns the commitment anchored at `loc`, and the height of
-// the L1 block holding it.
-//
-// It implements V1 of ckb_layout.md §6: locate the L1 block by hash, take the
-// transaction at the given index, and read the 32 bytes out of the commit
-// cell it created.
-//
-// The block is named by hash and checked against L1's canonical chain, which
-// is the whole reason a reveal carries a hash rather than a height. A height
-// would still resolve after a reorg — to whatever block replaced the original
-// — and a commitment that went away with the old block would appear to stand.
-func (c *Client) CommitmentAt(ctx context.Context, loc *consensus.L1Location) (*consensus.AnchoredCommitment, error) {
-	if loc == nil {
-		return nil, fmt.Errorf("no location to read")
-	}
-	blockHash, err := parseHash(loc.BlockHash)
-	if err != nil {
-		return nil, fmt.Errorf("L1 block hash %q: %w", loc.BlockHash, err)
-	}
-
-	block, err := c.rpc.GetBlock(ctx, blockHash)
-	if err != nil {
-		return nil, fmt.Errorf("fetching L1 block %s: %w", loc.BlockHash, err)
-	}
-	if block == nil || block.Header == nil {
-		return nil, fmt.Errorf("%w: L1 does not know block %s", consensus.ErrNotOnChain, loc.BlockHash)
-	}
-
-	// Knowing a block is not the same as following it: a node keeps blocks
-	// from abandoned forks. Asking L1 which block it has at this height, and
-	// requiring the answer to be this one, is what turns "known" into "on the
-	// chain L1 currently follows".
-	canonical, err := c.rpc.GetBlockHash(ctx, block.Header.Number)
-	if err != nil {
-		return nil, fmt.Errorf("checking whether L1 block %s is canonical: %w", loc.BlockHash, err)
-	}
-	if canonical == nil || *canonical != blockHash {
-		return nil, fmt.Errorf("%w: block %s at height %d was replaced",
-			consensus.ErrNotOnChain, loc.BlockHash, block.Header.Number)
-	}
-
-	if int(loc.TxIdx) >= len(block.Transactions) {
-		return nil, fmt.Errorf("L1 block %s holds %d transactions, none at index %d",
-			loc.BlockHash, len(block.Transactions), loc.TxIdx)
-	}
-	tx := block.Transactions[loc.TxIdx]
-
-	// One transaction may create several commit cells, so locating the
-	// transaction is not the end of it — hence the scan over its outputs.
-	// It is a handful of comparisons, which is why §5 declines to spend a
-	// field on an output index.
-	idx := findCellByType(tx, c.set.commitScript)
-	if idx < 0 {
-		return nil, fmt.Errorf("transaction %d in L1 block %s creates no commit cell",
-			loc.TxIdx, loc.BlockHash)
-	}
-	data := tx.OutputsData[idx]
-	if len(data) != commitmentLen {
-		return nil, fmt.Errorf("commit cell in L1 block %s carries %d bytes, want %d",
-			loc.BlockHash, len(data), commitmentLen)
-	}
-
-	return &consensus.AnchoredCommitment{
-		Commitment: hex.EncodeToString(data),
-		L1Height:   block.Header.Number,
-	}, nil
-}
 
 // BudgetOwner returns the lock args of the budget cell `txHash` created.
 //

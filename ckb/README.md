@@ -18,7 +18,7 @@ tests/               合约的规则测试，独立 crate
 
 ## 链上做什么
 
-出价以承诺形式提交，L1 上没有明文可验：VRF、goal、身份一律由 L2 节点校验。链上唯一
+L2 区块头以明文提交，但 L1 只记录不裁定：VRF、goal、身份一律由 L2 节点校验。链上唯一
 验证的 zk 证明是预算 cell 的配平证明（R3.2），其余脚本都很轻：
 
 | 脚本 | 职责 | 规则 | 现状 |
@@ -26,15 +26,15 @@ tests/               合约的规则测试，独立 crate
 | `budget_type_script` | 预算 cell：一次写定的分配表，含预付总额；创建时验证配平证明 | R3.1~R3.5 | **已实现**（`contracts/pob-budget`） |
 | `mining_addr_type_script` | mining addr：钱流出时强制打标记 | R4.0 | **已实现**（`contracts/pob-vault`） |
 | `spent_type_script` | 已用代币 cell：标记只增不减，且回不去 mining addr | R4.1~R4.2 | **已实现**（`contracts/pob-spent`） |
-| `commit_type_script` | 提交 cell：只检查 data 是 32 字节 | R5.1~R5.2 | **已实现**（`contracts/pob-submission`） |
+| `commit_type_script` | 提交 cell：只检查 data 非空且不超过 4096 字节 | R5.1~R5.2 | **已实现**（`contracts/pob-submission`） |
 
 规则全文见 ckb_layout.md §3~§5，L2 侧要自己完成的校验清单见 §6。
 
 `contracts/pob-submission` 实现的就是 R5.1：遍历本脚本守护的 outputs，每个 cell 的
-data 必须恰好 32 字节。inputs 一律不管——提交 cell 由矿工用自己的 lock 花掉以回收
-容量，那是 lock 的事（R5.2）。
+data 必须非空且不超过 4096 字节。inputs 一律不管——提交 cell 由提交者用自己的 lock
+花掉以回收容量，那是 lock 的事（R5.2）。
 
-这个脚本里没有任何密码学代码，也不该有：它不打开承诺、不验 VRF，多一个密码学 crate
+这个脚本里没有任何密码学代码，也不该有：它不解码区块头、不验 VRF，多一个密码学 crate
 就多一份被编进去、按字节占 cell capacity 的开销，换不回任何东西。
 
 四个脚本里只有 `pob-budget` 带密码学：它链接 `lib/budget-stark` 的验证器（Plonky3

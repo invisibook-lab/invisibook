@@ -22,7 +22,19 @@ payment_listen        = ":8081"
 # so that the budget cell it creates on CKB is owned by the very key this node
 # produces blocks with — V7 compares the two.
 miner_secret          = "node1"
-l1_poll_interval      = 1000   # ms, how often to ask L1 whether a commitment landed
+l1_poll_interval      = 1000   # ms, how often to ask L1 whether a submitted header landed
+# Anchoring schedule. L2 genesis corresponds to L1 height n; L2 heights are
+# grouped in batches of b, and batch i only counts headers landing in L1 blocks
+# [n+i, n+i+k]. It is decided once L1 is d blocks past the window's end.
+#
+# n is fixed for the life of the chain. Do NOT change it on a running chain:
+# it is written into the genesis block, so a node with a different n refuses
+# to start on the existing database. Changing it means every node changes it
+# together, clears its database, and the chain starts over from genesis.
+anchor_genesis_l1_height = 200  # n
+anchor_batch_size        = 3    # b
+anchor_window            = 24   # k, chain quality in L1 blocks
+anchor_confirm_depth     = 24   # d
 # Where `pob-miner console` keeps its prepayments, openings included. Losing
 # this file forfeits every prepayment in it, so back it up like a key.
 schedule_path         = "data/prepayments.json"

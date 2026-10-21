@@ -34,9 +34,9 @@ type ProofOfBuy struct {
 	myPubkey   keypair.PubKey
 	myPrivKey  keypair.PrivKey
 	l1Verifier L1PaymentVerifier
-	// l1Reader reads back what was written to L1: whether a commitment is
-	// anchored, when, and who owns an allocation table. V1, V4 and V7's first
-	// item all rest on it.
+	// l1Reader reads back what was written to L1: when a block's header was
+	// anchored, and who owns an allocation table. V1, V4 and V7's first item
+	// all rest on it.
 	l1Reader L1Reader
 
 	// vrfPrivKey is the miner's secp256k1 key in ecdsa form. It is the same
@@ -53,38 +53,32 @@ type ProofOfBuy struct {
 	// rewards are minted as cash on it.
 	Account *account.Account `tripod:"account"`
 
-	// l1Submitter posts block commitments to L1 and reports their depth.
-	l1Submitter L1CommitmentSubmitter
-	// bids holds the opening of every commitment this node posted. L1 carries
-	// only the commitment, so losing an opening forfeits that bid outright.
-	bids *Bids
-	// reveals holds the openings the whole network has published, this node's
-	// own included. Fork choice reads them: without the opening, a block's
-	// goal cannot be tied to any commitment on L1.
-	reveals *Reveals
-	// revealSyncer catches up on the openings this node missed while it was
-	// down. Gossip cannot: a topic carries only what is published after you
-	// subscribe.
-	revealSyncer *RevealSyncer
-	// pending stages each block's writes until its commitment is deep enough
-	// on L1 to be treated as irreversible.
+	// l1Submitter posts block headers to L1 and reports whether they landed.
+	l1Submitter L1HeaderSubmitter
+	// schedule says which L1 window each batch of L2 heights is anchored in.
+	schedule AnchorSchedule
+	// pending stages each block's writes until its batch is decided.
 	pending *store.Pending
 
-	// pendingFinalizations is a buffered channel for blocks awaiting L1 depth.
+	// pendingFinalizations is a buffered channel for blocks whose header is
+	// yet to be submitted to L1.
 	pendingFinalizations chan *pendingFinalization
 }
 
 // NewProofOfBuy constructs a ProofOfBuy tripod with the given config, keypair,
-// L1 verifier, VRF private key, L1 commitment submitter, bid store and payment
-// book.
+// L1 verifier and reader, VRF private key, L1 header submitter, payment book
+// and staging layer.
 // `cfg` must not be nil; `pubkey`/`privkey` must be a secp256k1 keypair and
 // `vrfPrivKey` must be the same key in ecdsa form (see SecpPrivKeyToECDSA);
-// `paymentBook` must be the same instance the HTTP endpoint writes into;
-// `bids` must be backed by the chain database, since an opening that is lost
-// cannot be reconstructed.
-func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, l1Reader L1Reader, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1CommitmentSubmitter, bids *Bids, reveals *Reveals, paymentBook *PaymentBook, pending *store.Pending) *ProofOfBuy {
+// `paymentBook` must be the same instance the HTTP endpoint writes into.
+func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, l1Reader L1Reader, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1HeaderSubmitter, paymentBook *PaymentBook, pending *store.Pending) *ProofOfBuy {
+	schedule, err := NewAnchorSchedule(cfg)
+	if err != nil {
+		// A startup failure: without a schedule nothing can ever be finalized.
+		logrus.Fatalf("PoB: %v", err)
+	}
 	tri := tripod.NewTripod()
-	p := &ProofOfBuy{
+	return &ProofOfBuy{
 		Tripod:               tri,
 		cfg:                  cfg,
 		myPubkey:             pubkey,
@@ -95,63 +89,25 @@ func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, 
 		paymentBook:          paymentBook,
 		blockCh:              make(chan *types.Block, 16),
 		l1Submitter:          l1Submitter,
-		bids:                 bids,
-		reveals:              reveals,
 		pending:              pending,
+		schedule:             schedule,
 		pendingFinalizations: make(chan *pendingFinalization, 100),
 	}
-
-	// The handler is registered here, not in InitChain: the kernel collects
-	// every tripod's p2p handlers while it is being constructed, which is
-	// finished long before InitChain runs. Registering any later would leave
-	// RevealSyncCode unanswered for the whole life of the node.
-	p.revealSyncer = NewRevealSyncer(reveals)
-	p.SetP2pHandler(RevealSyncCode, p.revealSyncer.HandleRequest)
-
-	return p
 }
 
 // InitChain checks the stored genesis, reconciles the stores after a restart,
-// then starts the block listener, the reveal listener and the finality worker
-// goroutines. The kernel has written the genesis block by now: it asks
-// DefineGenesis for one before any tripod's InitChain runs.
+// then starts the block listener and the finality worker goroutines. The
+// kernel has written the genesis block by now: it asks DefineGenesis for one
+// before any tripod's InitChain runs.
 func (p *ProofOfBuy) InitChain() {
 	// A database carrying another chain's genesis cannot be run against:
 	// every block links back to genesis by hash.
 	p.checkGenesis()
 
 	p.reconcile()
-	// Ours is not one of yu's built-in topics, and both PubP2P and SubP2P
-	// refuse an unregistered one outright — without this call every reveal
-	// would fail to send and none would ever arrive.
-	p.P2pNetwork.AddTopic(RevealTopic)
-
-	// Catching up runs on its own rather than inside block sync: openings and
-	// blocks travel separately, and an opening whose block has not arrived
-	// yet simply waits in the store. Doing it here keeps this out of yu's
-	// sync path entirely. This is also the first point at which the kernel
-	// has given us a network to ask.
-	go p.catchUpReveals()
 
 	go p.blockListener()
-	go p.revealListener()
 	go p.finalityWorker()
-}
-
-// catchUpReveals pulls the openings this node missed, once, at startup.
-//
-// Failures are logged rather than retried: the gossip topic keeps this node
-// current from here on, and the next restart will ask again for whatever is
-// still missing.
-func (p *ProofOfBuy) catchUpReveals() {
-	stored, err := p.revealSyncer.CatchUp(p.P2pNetwork)
-	if err != nil {
-		logrus.Errorf("PoB: catching up on reveals: %v", err)
-		return
-	}
-	if stored > 0 {
-		logrus.Infof("PoB: caught up on %d reveals from peers", stored)
-	}
 }
 
 // reconcile brings the chain and the staged writes back into agreement after a
@@ -166,9 +122,9 @@ func (p *ProofOfBuy) catchUpReveals() {
 //
 //   - A block whose state was promoted but whose finalized marker was not
 //     written — the crash window between the two. Nothing is done about it
-//     here. The finality worker recomputes the canonical chain from the block
-//     tree, the openings and L1's record, and marks whatever that shows to be
-//     settled; a block missing its marker simply gets one on the next pass.
+//     here. The finality worker decides batches from L1's record starting
+//     after the last marker, so it decides that batch again; promotion finds
+//     its staged rows already gone, and the block gets its marker.
 //     Recovering it by height instead would mean picking one block out of a
 //     height that may hold several, and marking the wrong one would point
 //     `LastFinalized` at a branch this node does not follow — every later
@@ -461,7 +417,7 @@ func (p *ProofOfBuy) VerifyBlock(block *types.Block) error {
 func (p *ProofOfBuy) verifyCandidate(candidate *types.Block, vrfInput []byte) (*big.Int, bool) {
 	// First, and before anything that reads the candidate's claims: the block
 	// has to be the producer's own work. Both the VRF proof and the payment
-	// checked below are public once revealed, so a block that skips this
+	// checked below are public once broadcast, so a block that skips this
 	// could carry someone else's proof and payment over transactions the
 	// attacker chose.
 	if err := VerifyBlockIntegrity(candidate); err != nil {
@@ -676,10 +632,10 @@ func (p *ProofOfBuy) EndBlock(block *types.Block) {
 }
 
 // FinalizeBlock enqueues the block for asynchronous L1-driven finalization.
-// The actual finalization happens in the finalityWorker goroutine, once the
-// block's commitment has been buried deep enough on L1.
+// The finalityWorker goroutine submits the block's header to L1; the block is
+// finalized once its batch's L1 window has closed and decideBatch picks it.
 //
-// A block EndBlock failed to append must not be committed to L1, so the chain
+// A block EndBlock failed to append must not be submitted to L1, so the chain
 // tip is consulted rather than assumed.
 func (p *ProofOfBuy) FinalizeBlock(block *types.Block) {
 	tip, err := p.Chain.GetEndCompactBlock()
@@ -696,84 +652,112 @@ func (p *ProofOfBuy) FinalizeBlock(block *types.Block) {
 	p.pendingFinalizations <- &pendingFinalization{block: block}
 }
 
-// finalityWorker runs as a background goroutine. It receives blocks from
-// pendingFinalizations, posts each block's commitment to L1, and promotes the
-// block's staged writes once that commitment is on chain. Blocks are promoted
-// strictly in height order.
-//
-// Finality in PoB comes from fork choice — the heaviest continuous fork by
-// cumulative goal — with L1 holding a tamper-proof record of when each
-// commitment appeared, which is what exposes a fork bought after the fact.
+// finalityWorker runs as a background goroutine. It submits the header of
+// every block taken from pendingFinalizations to L1 once its batch's window
+// is open, follows each submission until it lands, and decides every batch
+// whose window has closed.
 func (p *ProofOfBuy) finalityWorker() {
 	pollInterval := time.Duration(p.cfg.L1PollInterval) * time.Millisecond
-	// pending holds blocks whose commitment has been sent but not yet seen on
-	// chain.
-	var pending []*pendingFinalization
+	// queued holds blocks whose window has not opened yet; pending holds
+	// blocks whose header has been sent but not yet seen on chain.
+	var queued, pending []*pendingFinalization
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	for {
-		// Submissions go out before anything else this loop does, and the
-		// priority is not a preference. A block whose commitment has not been
-		// sent is a bid that was never made: the L1 tokens behind it buy
-		// nothing, and nothing downstream — revealing, promoting — can happen
-		// for it either. The periodic work below reads the whole unfinalized
-		// chain and talks to L1 about every block on it, so a pass that runs
-		// long would otherwise keep the queue waiting behind it indefinitely.
-		p.submitQueued(&pending)
+		// Submissions go out before anything else this loop does. A header
+		// has to land inside its batch's window to count, and the periodic
+		// work below talks to L1 at length, so a pass that runs long would
+		// otherwise keep the queue waiting behind it.
+		p.drainFinalizations(&queued)
+		p.submitOpen(&queued, &pending)
 
 		select {
 		case pf := <-p.pendingFinalizations:
-			if err := p.submitCommitment(pf); err != nil {
-				logrus.Errorf("PoB: committing block height=%d to L1: %v", pf.block.Height, err)
-				continue
-			}
-			pending = append(pending, pf)
-			logrus.Infof("PoB: committed block to L1 height=%d, l1_tx=%s", pf.block.Height, pf.l1TxHash)
+			queued = append(queued, pf)
 
 		case <-ticker.C:
-			// Two separate jobs, deliberately not one loop. Revealing is about
-			// this node's own blocks and follows each commitment to L1.
-			// Promoting is about the canonical chain, whoever produced it.
-			p.revealAnchored(&pending)
-			p.promoteSettled()
+			// Two separate jobs. Following submissions is about the headers
+			// this node sent. Deciding is about the canonical chain, whoever
+			// produced or submitted it.
+			p.followSubmissions(&pending)
+			p.decideBatches()
 		}
 	}
 }
 
-// submitQueued sends the commitment for every block already waiting, without
-// blocking when none is.
-//
-// It is what gives submissions priority over the loop's periodic work; see
-// finalityWorker. A failed submission is logged and dropped from the queue
-// exactly as the main path does it — the block stays unanchored, and the
-// height is simply lost to this miner.
-func (p *ProofOfBuy) submitQueued(pending *[]*pendingFinalization) {
+// drainFinalizations moves every block already waiting on the channel into
+// `queued`, without blocking when none is.
+func (p *ProofOfBuy) drainFinalizations(queued *[]*pendingFinalization) {
 	for {
 		select {
 		case pf := <-p.pendingFinalizations:
-			if err := p.submitCommitment(pf); err != nil {
-				logrus.Errorf("PoB: committing block height=%d to L1: %v", pf.block.Height, err)
-				continue
-			}
-			*pending = append(*pending, pf)
-			logrus.Infof("PoB: committed block to L1 height=%d, l1_tx=%s", pf.block.Height, pf.l1TxHash)
+			*queued = append(*queued, pf)
 		default:
 			return
 		}
 	}
 }
 
-// revealAnchored publishes the opening for every submitted commitment that
-// has reached an L1 block, and drops those entries from `pending`.
+// submitOpen submits the header of every queued block whose window is open,
+// moving it to `pending`, and drops those whose window has already closed.
 //
-// The wait is not incidental. An opening published before its commitment is
-// packed would show the L1 miner currently building a block exactly which L2
-// blocks to drop (proof_of_buy.md §9.6). Entries are handled in height order
-// and the run stops at the first one not yet on chain, so a commitment that
-// is lagging does not let later ones overtake it.
-func (p *ProofOfBuy) revealAnchored(pending *[]*pendingFinalization) {
+// A header sent before its window opens would land before n+i, where no node
+// looks, and the batch could then never be decided — so an L2 running ahead
+// of L1 waits here rather than submitting early. A header whose window has
+// closed would land after it, equally unseen, and is not worth the L1 fee.
+// A failed submission stays queued and is tried again next pass.
+func (p *ProofOfBuy) submitOpen(queued, pending *[]*pendingFinalization) {
+	if len(*queued) == 0 {
+		return
+	}
+	tip, err := p.l1Reader.Tip(context.Background())
+	if err != nil {
+		logrus.Warnf("PoB: reading L1's tip: %v", err)
+		return
+	}
+
+	kept := (*queued)[:0]
+	for _, pf := range *queued {
+		batch := p.schedule.BatchOf(pf.block.Height)
+		switch {
+		case p.schedule.WindowClosed(batch, tip):
+			logrus.Warnf("PoB: window for height=%d has closed, not submitting its header", pf.block.Height)
+		case !p.schedule.WindowOpen(batch, tip):
+			kept = append(kept, pf)
+		default:
+			if err := p.submitHeader(pf); err != nil {
+				logrus.Errorf("PoB: submitting header of height=%d to L1: %v", pf.block.Height, err)
+				kept = append(kept, pf)
+				continue
+			}
+			logrus.Infof("PoB: submitted header to L1 height=%d, l1_tx=%s", pf.block.Height, pf.l1TxHash)
+			*pending = append(*pending, pf)
+		}
+	}
+	*queued = kept
+}
+
+// windowClosed reports whether the L1 window for `height`'s batch has
+// closed. An L1 that cannot be reached is treated as open, so a transient
+// error does not cost a submission.
+func (p *ProofOfBuy) windowClosed(height common.BlockNum) bool {
+	tip, err := p.l1Reader.Tip(context.Background())
+	if err != nil {
+		logrus.Warnf("PoB: reading L1's tip: %v", err)
+		return false
+	}
+	return p.schedule.WindowClosed(p.schedule.BatchOf(height), tip)
+}
+
+// followSubmissions checks every submitted header against L1, drops those
+// that landed from `pending`, and resubmits those L1 has lost while their
+// window is still open.
+//
+// Entries are handled in height order and the run stops at the first one
+// still waiting, so the per-tick cost stays bounded by what is in flight.
+func (p *ProofOfBuy) followSubmissions(pending *[]*pendingFinalization) {
 	if len(*pending) == 0 {
 		return
 	}
@@ -781,244 +765,166 @@ func (p *ProofOfBuy) revealAnchored(pending *[]*pendingFinalization) {
 		return (*pending)[i].block.Height < (*pending)[j].block.Height
 	})
 
-	revealed := 0
+	done := 0
 	for _, pf := range *pending {
-		loc, err := p.l1Submitter.CommitmentOnChain(context.Background(), pf.l1TxHash)
+		onChain, err := p.l1Submitter.HeaderOnChain(context.Background(), pf.l1TxHash)
 		if errors.Is(err, ErrSubmissionPending) {
-			// Sent and accepted, just not mined yet. Nothing to do but wait:
-			// this entry and every later one stay in the queue, and the
-			// openings stay unpublished until L1 has packed the commitment
-			// (§9.6).
+			// Sent and accepted, just not mined yet. Nothing to do but wait.
 			break
 		}
 		if err != nil {
 			logrus.Errorf("PoB: checking L1 for height=%d: %v", pf.block.Height, err)
 			break
 		}
-		if loc == nil {
+		if !onChain {
 			// Not on chain at all — dropped from the mempool, or lost with an
-			// L1 reorg. Waiting cannot fix that, so send the same commitment
-			// again.
-			logrus.Warnf("PoB: commitment for height=%d is not on L1 (l1_tx=%s), resubmitting",
+			// L1 reorg. Send it again while it can still land in its window.
+			if p.windowClosed(pf.block.Height) {
+				logrus.Warnf("PoB: header of height=%d was lost and its window has closed", pf.block.Height)
+				done++
+				continue
+			}
+			logrus.Warnf("PoB: header of height=%d is not on L1 (l1_tx=%s), resubmitting",
 				pf.block.Height, pf.l1TxHash)
-			if err := p.resubmitCommitment(pf); err != nil {
-				logrus.Errorf("PoB: resubmitting the commitment for height=%d: %v",
-					pf.block.Height, err)
+			if err := p.submitHeader(pf); err != nil {
+				logrus.Errorf("PoB: resubmitting the header of height=%d: %v", pf.block.Height, err)
 			}
 			break
 		}
-
-		// Where it landed is what lets a verifier find this commitment later
-		// without scanning L1, and what dates the anchoring. Failing to note
-		// it costs only that, so it is logged rather than treated as fatal.
-		if err := p.bids.RecordLocation(pf.block.Hash.String(), loc.BlockHash, loc.TxIdx); err != nil {
-			logrus.Errorf("PoB: recording the L1 location of height=%d: %v",
-				pf.block.Height, err)
-		}
-		p.revealOnce(pf, loc)
-		revealed++
+		done++
 	}
-	*pending = (*pending)[revealed:]
+	*pending = (*pending)[done:]
 }
 
-// promoteSettled writes down whatever fork choice and the openings have
-// settled between them.
+// decideBatches decides, in order, every batch whose L1 window has closed
+// and been buried deep enough, and finalizes the winning blocks.
 //
-// This is where a block stops being provisional, and the two halves of that
-// decision come from different places. Which branch to follow is a matter of
-// cumulative goal (ChooseFork). When following it becomes irreversible is a
-// matter of L1's record: a block is settled once its commitment is anchored
-// there and its opening is out (FinalizableCount).
-//
-// It works from the candidate tree rather than this node's own queue, so a
-// block adopted from another miner settles exactly as one of this node's own
-// would — the queue only ever held blocks this node produced.
-func (p *ProofOfBuy) promoteSettled() {
-	started := time.Now()
-	forks, err := p.Chain.CandidateForks()
+// The decision is made from the headers on L1, not from this node's block
+// tree. Every node reads the same window, so every honest node picks the same
+// run — including a node that was following another fork locally. The blocks
+// themselves are only needed to apply their state; when the winner has not
+// reached this node yet, deciding waits for it.
+func (p *ProofOfBuy) decideBatches() {
+	ctx := context.Background()
+	tip, err := p.l1Reader.Tip(ctx)
 	if err != nil {
-		logrus.Errorf("PoB: enumerating candidate forks: %v", err)
+		logrus.Errorf("PoB: reading L1's tip: %v", err)
 		return
 	}
-	// The cost grows with how far finality is behind, so this is also the
-	// early warning for the worker falling behind: nothing settles, the span
-	// to walk grows, and walking it gets slower again.
-	if elapsed := time.Since(started); elapsed > candidateForksSlow {
-		logrus.Warnf("PoB: enumerating %d candidate forks took %s", len(forks), elapsed)
-	}
-	// Finality is two steps, in this order. First, which blocks are in the
-	// record: those whose commitment reached an L1 block and whose opening
-	// has gone out. Then, among the branches those leave standing, the
-	// largest cumulative goal.
-	//
-	// The order is the whole defence. A branch bought after the fact cannot
-	// produce commitments anchored at the time, so filtering first keeps it
-	// out of the comparison entirely; comparing first would let it win on a
-	// total made of blocks L1 can vouch for none of.
-	ctx := context.Background()
-	opened := make(map[string]bool)
-	for _, fork := range forks {
-		if fork != nil {
-			p.verifiedOpenings(ctx, fork.Blocks, opened)
+	for {
+		decided, err := p.decideBatch(ctx, tip)
+		if err != nil {
+			logrus.Errorf("PoB: %v", err)
+			return
+		}
+		if !decided {
+			return
 		}
 	}
+}
 
-	best := ChooseFork(eligibleForks(forks, opened))
-	if best == nil || len(best.Blocks) == 0 {
-		return
+// decideBatch decides the batch right after the last finalized block, if its
+// window is decidable at L1 height `l1Tip`. It reports whether a batch was
+// finalized.
+func (p *ProofOfBuy) decideBatch(ctx context.Context, l1Tip uint64) (bool, error) {
+	last, err := p.Chain.LastFinalized()
+	if err != nil {
+		return false, fmt.Errorf("reading the last finalized block: %w", err)
+	}
+	size := p.schedule.BatchSize
+	// Batches are finalized whole, so the last finalized height is always a
+	// batch boundary. Anything else means anchor_batch_size changed under an
+	// existing chain.
+	if uint64(last.Height)%size != 0 {
+		return false, fmt.Errorf("last finalized height %d is not a multiple of anchor_batch_size %d",
+			last.Height, size)
+	}
+	batch := uint64(last.Height) / size
+	if !p.schedule.Decidable(batch, l1Tip) {
+		return false, nil
 	}
 
-	settled, staged := settledBlocks(best, opened)
-	if len(settled) == 0 {
-		return
+	from, to := p.schedule.WindowOf(batch)
+	anchored, err := p.l1Reader.AnchoredIn(ctx, from, to)
+	if err != nil {
+		return false, fmt.Errorf("reading batch %d's window [%d, %d]: %w", batch, from, to, err)
 	}
-	through := settled[len(settled)-1]
+	first := p.schedule.FirstHeight(batch)
+	candidates := p.scoreAnchored(ctx, anchored, first, first+common.BlockNum(size)-1)
+
+	winner := ChooseBatch(last.Hash, first, size, candidates)
+	if winner == nil {
+		return false, fmt.Errorf("batch %d: no complete run of %d headers off %s in L1 [%d, %d]",
+			batch, size, last.Hash, from, to)
+	}
+
+	blocks := make([]*types.Block, len(winner))
+	staged := make([]store.Block, len(winner))
+	for i, header := range winner {
+		block, err := p.Chain.GetBlock(header.Hash)
+		if err != nil || block == nil {
+			logrus.Warnf("PoB: batch %d chose block %s at height=%d, waiting for it to arrive",
+				batch, header.Hash, header.Height)
+			return false, nil
+		}
+		blocks[i] = block
+		staged[i] = store.Block{Height: block.Height, Hash: block.Hash.String()}
+	}
+	through := blocks[len(blocks)-1]
 
 	// The state goes in first: it is the part that matters and it records how
 	// far it got, so a crash before the markers below costs nothing that
 	// startup cannot rebuild from that record.
 	if err := p.pending.ApplyBlocks(staged); err != nil {
-		logrus.Errorf("PoB: promoting staged writes through height=%d: %v", through.Height, err)
-		return
+		return false, fmt.Errorf("promoting staged writes through height=%d: %w", through.Height, err)
 	}
-	if err := p.Chain.FinalizeFork(&types.Fork{Blocks: settled}); err != nil {
-		logrus.Errorf("PoB: finalizing the settled fork through height=%d: %v", through.Height, err)
-		return
+	if err := p.Chain.FinalizeFork(&types.Fork{Blocks: blocks}); err != nil {
+		return false, fmt.Errorf("finalizing batch %d through height=%d: %w", batch, through.Height, err)
 	}
 	p.State.FinalizeBlock(through)
-	logrus.Infof("PoB: settled %d block(s) through height=%d", len(settled), through.Height)
+	logrus.Infof("PoB: decided batch %d, settled through height=%d", batch, through.Height)
+	return true, nil
 }
 
-// verifiedOpenings records, into `opened`, the blocks at the front of
-// `blocks` that are backed by L1 — commitment anchored where the opening says
-// (V1), allocation table owned by the producer (V7's first item), and that
-// allocation written far enough ahead (V4).
+// scoreAnchored verifies the headers in `anchored` whose heights fall in
+// [lo, hi] and returns the ones that pass, with their goals.
 //
-// It stops at the first block that is not, instead of checking the rest.
-// Finality is a run from the front, so nothing past a gap can settle anyway,
-// and every block examined costs reads against L1.
-//
-// `opened` accumulates across the branches of one pass, and a block already
-// in it is stepped over rather than re-examined. Candidate branches share a
-// prefix — often most of their length — so without this the same blocks would
-// be re-verified against L1 once per branch.
-//
-// Nothing is remembered between passes, and the caller must start each one
-// with an empty map. V1 asks whether the anchoring block is still on L1's
-// canonical chain, and a reorg can turn that yes into a no — a cached yes
-// would be a stale answer driving a write that cannot be undone. Within a
-// single pass the answers are one consistent view of L1, which is what makes
-// reusing them safe.
-func (p *ProofOfBuy) verifiedOpenings(ctx context.Context, blocks []*types.Block, opened map[string]bool) {
-	for _, block := range blocks {
-		if block == nil || block.Header == nil {
-			break
-		}
-		hash := block.Hash.String()
-		if opened[hash] {
+// A header submitted more than once is judged at its earliest landing in the
+// window: that is when it was demonstrably there, and V4 measures the payment
+// against it. A header that fails is dropped with a warning — anyone may
+// write a submit cell, so failures are expected and decide nothing.
+func (p *ProofOfBuy) scoreAnchored(ctx context.Context, anchored []*AnchoredHeader, lo, hi common.BlockNum) []*ScoredHeader {
+	earliest := make(map[common.Hash]*AnchoredHeader)
+	for _, a := range anchored {
+		if a == nil || a.Header == nil || a.Header.Height < lo || a.Header.Height > hi {
 			continue
 		}
+		if prev, ok := earliest[a.Header.Hash]; !ok || a.L1Height < prev.L1Height {
+			earliest[a.Header.Hash] = a
+		}
+	}
 
-		row, err := p.reveals.Get(hash)
+	scored := make([]*ScoredHeader, 0, len(earliest))
+	for _, a := range earliest {
+		goal, err := VerifyAnchoredHeader(ctx, p.l1Reader, p.l1Verifier, a)
 		if err != nil {
-			logrus.Errorf("PoB: reading the opening of %s: %v", hash, err)
-			break
+			logrus.Warnf("PoB: discarding anchored header at height=%d: %v", a.Header.Height, err)
+			continue
 		}
-		if row == nil {
-			// Not revealed yet, which is the ordinary state: an opening
-			// cannot go out before its commitment is in an L1 block.
-			break
-		}
-		if err := VerifyAgainstL1(ctx, p.l1Reader, p.l1Verifier, block, RevealFromRow(row)); err != nil {
-			logrus.Warnf("PoB: holding at %s, not backed by L1: %v", hash, err)
-			break
-		}
-		opened[hash] = true
+		scored = append(scored, &ScoredHeader{Header: a.Header, Goal: goal})
 	}
+	return scored
 }
 
-// submitCommitment draws a blinding factor, records the opening, and posts the
-// commitment for `pf`'s block to L1.
-//
-// The opening is written to disk *before* the submission goes out. Only the
-// commitment reaches L1, so an opening lost to a crash would leave a
-// commitment that nobody — this node included — can ever open: the L1 tokens
-// spent on it would buy nothing. Writing first costs one row; getting the
-// order wrong costs the bid.
-func (p *ProofOfBuy) submitCommitment(pf *pendingFinalization) error {
-	// The score is recorded alongside the opening for diagnostics; the block
-	// hash already commits to it, so it takes no part in the commitment.
-	cdata, err := DecodeConsensusData(pf.block.Extra)
+// submitHeader posts `pf`'s block header to L1 and records the transaction
+// carrying it. Used both for the first submission and for resubmitting a
+// header L1 lost: the header is fixed by the block, so there is nothing to
+// keep between the two.
+func (p *ProofOfBuy) submitHeader(pf *pendingFinalization) error {
+	l1TxHash, err := p.l1Submitter.SubmitHeader(context.Background(), pf.block.Header)
 	if err != nil {
-		return fmt.Errorf("decoding consensus data: %w", err)
+		return fmt.Errorf("submitting the header: %w", err)
 	}
-
-	random, err := NewRandomHex()
-	if err != nil {
-		return err
-	}
-	commitment, err := CommitBlockHash(pf.block.Hash, random)
-	if err != nil {
-		return fmt.Errorf("committing to the block hash: %w", err)
-	}
-
-	blockHash := pf.block.Hash.String()
-	if err := p.bids.Save(&BlockBid{
-		BlockHash:  blockHash,
-		Height:     pf.block.Height,
-		Goal:       cdata.BlockScore,
-		Random:     random,
-		Commitment: commitment,
-	}); err != nil {
-		return err
-	}
-
-	l1TxHash, err := p.l1Submitter.SubmitCommitment(context.Background(), &BlockCommitment{
-		L2BlockHeight: pf.block.Height,
-		Commitment:    commitment,
-	})
-	if err != nil {
-		return fmt.Errorf("submitting the commitment: %w", err)
-	}
-
-	// The opening is already safe; failing to note which transaction carried
-	// it only costs the ability to look the submission up later.
-	if err := p.bids.RecordSubmission(blockHash, l1TxHash); err != nil {
-		logrus.Errorf("PoB: recording the L1 submission of height=%d: %v", pf.block.Height, err)
-	}
-
-	pf.l1TxHash = l1TxHash
-	pf.submittedAt = time.Now()
-	return nil
-}
-
-// resubmitCommitment posts the recorded commitment for `pf`'s block again,
-// after an earlier submission failed to stay on chain.
-//
-// It deliberately reuses the stored opening rather than drawing a fresh one: a
-// new blinding factor would produce a different commitment, and the opening
-// already on disk would then match nothing.
-func (p *ProofOfBuy) resubmitCommitment(pf *pendingFinalization) error {
-	blockHash := pf.block.Hash.String()
-	bid, err := p.bids.Get(blockHash)
-	if err != nil {
-		return err
-	}
-	if bid == nil {
-		return fmt.Errorf("no opening recorded for block %s", blockHash)
-	}
-
-	l1TxHash, err := p.l1Submitter.SubmitCommitment(context.Background(), &BlockCommitment{
-		L2BlockHeight: bid.Height,
-		Commitment:    bid.Commitment,
-	})
-	if err != nil {
-		return fmt.Errorf("submitting the commitment: %w", err)
-	}
-	if err := p.bids.RecordSubmission(blockHash, l1TxHash); err != nil {
-		logrus.Errorf("PoB: recording the L1 resubmission of height=%d: %v", pf.block.Height, err)
-	}
-
 	pf.l1TxHash = l1TxHash
 	pf.submittedAt = time.Now()
 	return nil

@@ -6,9 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"sync"
 
-	"github.com/yu-org/yu/common"
 	"github.com/yu-org/yu/core/types"
 )
 
@@ -24,10 +24,6 @@ import (
 const PaymentLeadBlocks = 24
 
 var (
-	// ErrNotOnChain reports an L1 block that is not on L1's canonical chain —
-	// either it never was, or a reorg took it away. A commitment anchored
-	// there counts for nothing.
-	ErrNotOnChain = errors.New("the L1 block is not on L1's canonical chain")
 	// ErrPaymentTooLate reports an allocation written too close to the block
 	// that spends it.
 	ErrPaymentTooLate = errors.New("the payment commitment was written too late")
@@ -36,34 +32,29 @@ var (
 	ErrBudgetNotOwned = errors.New("the budget cell does not belong to the block's producer")
 )
 
-// AnchoredCommitment is a block commitment as found on L1, together with the
+// AnchoredHeader is an L2 header found in a submit cell on L1, with the
 // height of the L1 block holding it.
-type AnchoredCommitment struct {
-	// Commitment is the value the commit cell carries, hex-encoded.
-	Commitment string
-	// L1Height dates the anchoring. §8.2 rests on this number: a branch
-	// bought after the fact can only carry commitments anchored recently, and
-	// that is what distinguishes it from a branch that was really there at
-	// the time.
+type AnchoredHeader struct {
+	// Header is the decoded L2 header, not yet verified.
+	Header *types.Header
+	// L1Height is the L1 block the submit cell was created in.
 	L1Height uint64
 }
 
 // L1Reader reads back what PoB wrote to L1.
 //
 // Deliberately not a CKB client: nothing here mentions cells, scripts or
-// transactions. The consensus code needs three facts out of L1 — what a
-// commitment says, when it was anchored, and who owns an allocation table —
-// and the rest belongs behind the implementation, where a different L1 could
-// answer the same questions differently.
+// transactions. The consensus code needs three facts out of L1 — which
+// headers landed in a range of L1 blocks, how far L1 has got, and who owns an
+// allocation table — and the rest belongs behind the implementation.
 type L1Reader interface {
-	// CommitmentAt returns the commitment recorded at `loc`.
-	//
-	// It returns an error wrapping ErrNotOnChain when the block named by
-	// loc.BlockHash is not on L1's canonical chain. This is why a reveal
-	// names that block by hash and not by height: a height would still
-	// resolve after a reorg replaced the block, and a commitment that went
-	// away with it would appear to stand.
-	CommitmentAt(ctx context.Context, loc *L1Location) (*AnchoredCommitment, error)
+	// AnchoredIn returns every decodable header in submit cells created in
+	// L1's canonical blocks `from` through `to`, inclusive. Cells that do not
+	// decode are skipped: anyone can write one.
+	AnchoredIn(ctx context.Context, from, to uint64) ([]*AnchoredHeader, error)
+
+	// Tip returns the height of L1's canonical tip.
+	Tip(ctx context.Context) (uint64, error)
 
 	// BudgetOwner returns the lock args of the budget cell that `txHash`
 	// created — the key that owns the allocation table inside it.
@@ -74,47 +65,11 @@ type L1Reader interface {
 	BudgetOwner(ctx context.Context, txHash string) ([]byte, error)
 }
 
-// VerifyAnchor checks V1: that the opening in `reveal` really opens a
-// commitment sitting on L1 where the reveal says it is, and returns the
-// height of the L1 block holding it.
-//
-// The height is the point of the exercise as much as the check is. It dates
-// the block's anchoring, and V4 measures the payment against it.
-//
-// `reveal` must have passed Validate.
-func VerifyAnchor(ctx context.Context, reader L1Reader, reveal *BlockReveal) (uint64, error) {
-	if reveal == nil {
-		return 0, errors.New("no reveal to verify")
-	}
-
-	anchored, err := reader.CommitmentAt(ctx, &L1Location{
-		BlockHash: reveal.L1BlockHash,
-		TxIdx:     reveal.TxIdx,
-	})
-	if err != nil {
-		return 0, fmt.Errorf("reading the commitment for %s: %w", reveal.L2BlockHash, err)
-	}
-
-	// The reveal carries the block hash as text, the way Hash.String() wrote
-	// it. A hash that does not parse decodes to the zero hash, which simply
-	// commits to something else and fails the comparison below — no separate
-	// guard needed.
-	want, err := CommitBlockHash(common.HexToHash(reveal.L2BlockHash), reveal.Random)
-	if err != nil {
-		return 0, fmt.Errorf("recomputing the commitment for %s: %w", reveal.L2BlockHash, err)
-	}
-	if anchored.Commitment != want {
-		return 0, fmt.Errorf("%w: L1 holds %s, the opening gives %s",
-			ErrCommitmentMismatch, anchored.Commitment, want)
-	}
-	return anchored.L1Height, nil
-}
-
 // VerifyPaymentLead checks V4: that the allocation a block spends was written
 // on L1 far enough ahead of the block's own anchor.
 //
 // Both arguments are L1 block heights: where the allocation entry was
-// written, and where this block's commitment landed. R3.1 on chain only makes
+// written, and where this block's header landed. R3.1 on chain only makes
 // the allocation table immutable once written; that it was written early
 // enough can only be checked here, off chain.
 func VerifyPaymentLead(allocationHeight, anchorHeight uint64) error {
@@ -152,98 +107,82 @@ func VerifyBudgetOwner(ctx context.Context, reader L1Reader, txHash string, mine
 	return nil
 }
 
-// VerifyAgainstL1 runs the three checks a revealed block needs L1 for: V1
-// (its commitment is anchored where the reveal says it is), V7's first item
-// (the allocation table it draws on belongs to its producer) and V4 (that
-// allocation was written far enough ahead of the anchor).
+// VerifyAnchoredHeader runs every check a header read off L1 needs before it
+// may take part in fork choice, and returns its goal.
 //
-// They run together because they are not independent. V4 needs what V1
-// returns — the height the commitment was anchored at — and V7's first item
-// guards the very lookup V4's other half comes from: read the allocation
-// before establishing who owns the table, and the number that comes back is
-// one the producer chose. Run apart, each would also read L1 again for what
-// the previous one already knew.
+// The header arrives without its block, so this is everything that can be
+// judged from the header alone: it is sealed by its producer (hash and
+// signature), its VRF proof stands against its parent (V5), its payment opens
+// an allocation on L1 bound to the producer (V3), the allocation table belongs
+// to the producer (V7's first item), and that allocation was written far
+// enough ahead of the anchor (V4). The transactions are bound later, through
+// the transaction root, when the block itself is checked on arrival.
 //
-// `block` must carry decodable consensus data, and `reveal` must be the
-// opening for that block.
-func VerifyAgainstL1(
+// `anchored` must carry a non-nil header.
+func VerifyAnchoredHeader(
 	ctx context.Context,
 	reader L1Reader,
 	verifier L1PaymentVerifier,
-	block *types.Block,
-	reveal *BlockReveal,
-) error {
-	if block == nil || block.Header == nil {
-		return errors.New("block has no header")
+	anchored *AnchoredHeader,
+) (*big.Int, error) {
+	header := anchored.Header
+	if err := VerifyHeaderSeal(header); err != nil {
+		return nil, err
 	}
 
-	anchorHeight, err := VerifyAnchor(ctx, reader, reveal)
+	cdata, err := DecodeConsensusData(header.Extra)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("header %s: decoding consensus data: %w", header.Hash, err)
 	}
-
-	cdata, err := DecodeConsensusData(block.Extra)
-	if err != nil {
-		return fmt.Errorf("block %s: decoding consensus data: %w", block.Hash, err)
+	if cdata.VRFResult == nil || len(cdata.VRFResult.Output) < vrfGoalBytes {
+		return nil, fmt.Errorf("header %s carries no usable VRF output", header.Hash)
+	}
+	if !VRFVerify(header.MinerPubkey, header.PrevHash.Bytes(), cdata.VRFResult) {
+		return nil, fmt.Errorf("header %s: VRF proof does not verify against its parent", header.Hash)
 	}
 	if cdata.L1Payment == nil {
-		return fmt.Errorf("block %s carries no payment", block.Hash)
+		return nil, fmt.Errorf("header %s carries no payment", header.Hash)
 	}
-	txHash := cdata.L1Payment.TxHash
 
 	// Ownership first: everything read out of that budget cell afterwards is
 	// only worth what this check establishes.
-	if err := VerifyBudgetOwner(ctx, reader, txHash, block.MinerPubkey); err != nil {
-		return fmt.Errorf("block %s: %w", block.Hash, err)
+	if err := VerifyBudgetOwner(ctx, reader, cdata.L1Payment.TxHash, header.MinerPubkey); err != nil {
+		return nil, fmt.Errorf("header %s: %w", header.Hash, err)
 	}
-
-	alloc, err := verifier.FetchAllocation(ctx, txHash,
-		hex.EncodeToString(block.MinerPubkey), block.Height)
+	alloc, err := ConfirmPayment(ctx, verifier, cdata.L1Payment,
+		hex.EncodeToString(header.MinerPubkey), header.Height)
 	if err != nil {
-		return fmt.Errorf("block %s: reading its allocation: %w", block.Hash, err)
+		return nil, fmt.Errorf("header %s: %w", header.Hash, err)
 	}
-	if err := VerifyPaymentLead(alloc.L1BlockNumber, anchorHeight); err != nil {
-		return fmt.Errorf("block %s: %w", block.Hash, err)
+	if err := VerifyPaymentLead(alloc.L1BlockNumber, anchored.L1Height); err != nil {
+		return nil, fmt.Errorf("header %s: %w", header.Hash, err)
 	}
-	return nil
+	return CalcBlockScore(cdata.L1Payment.Amount, cdata.VRFResult.Output), nil
 }
 
-// MockL1Reader stands in for a CKB client until one exists.
+// MockL1Reader stands in for a CKB client in tests and in mock-L1 mode.
 type MockL1Reader struct {
 	mu sync.Mutex
-	// anchored maps a spot on L1 to what was recorded there.
-	anchored map[string]*AnchoredCommitment
-	// orphaned holds L1 block hashes treated as no longer canonical — how a
-	// test reproduces a reorg carrying a commitment away.
-	orphaned map[string]bool
+	// anchored is every header recorded as landed on L1.
+	anchored []*AnchoredHeader
+	// tip is what Tip reports.
+	tip uint64
 	// owners maps a budget cell's creating transaction to its lock args.
 	owners map[string][]byte
 }
 
-// locationKey identifies one spot on L1.
-func locationKey(loc *L1Location) string {
-	return fmt.Sprintf("%s/%d", loc.BlockHash, loc.TxIdx)
-}
-
-// Anchor records a commitment at a location, standing in for a submission
-// that made it into the L1 block at `l1Height`.
-func (m *MockL1Reader) Anchor(loc *L1Location, commitment string, l1Height uint64) {
+// Anchor records `header` as having landed in the L1 block at `l1Height`.
+func (m *MockL1Reader) Anchor(header *types.Header, l1Height uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.anchored == nil {
-		m.anchored = make(map[string]*AnchoredCommitment)
-	}
-	m.anchored[locationKey(loc)] = &AnchoredCommitment{Commitment: commitment, L1Height: l1Height}
+	m.anchored = append(m.anchored, &AnchoredHeader{Header: header, L1Height: l1Height})
 }
 
-// Orphan marks an L1 block as no longer on the canonical chain.
-func (m *MockL1Reader) Orphan(blockHash string) {
+// SetTip sets the L1 tip height the mock reports.
+func (m *MockL1Reader) SetTip(tip uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.orphaned == nil {
-		m.orphaned = make(map[string]bool)
-	}
-	m.orphaned[blockHash] = true
+	m.tip = tip
 }
 
 // SetBudgetOwner records the lock args of the budget cell `txHash` created.
@@ -256,20 +195,24 @@ func (m *MockL1Reader) SetBudgetOwner(txHash string, args []byte) {
 	m.owners[txHash] = append([]byte(nil), args...)
 }
 
-// CommitmentAt returns what was recorded at `loc`.
-func (m *MockL1Reader) CommitmentAt(_ context.Context, loc *L1Location) (*AnchoredCommitment, error) {
+// AnchoredIn returns the recorded headers that landed in [from, to].
+func (m *MockL1Reader) AnchoredIn(_ context.Context, from, to uint64) ([]*AnchoredHeader, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.orphaned[loc.BlockHash] {
-		return nil, fmt.Errorf("%w: %s", ErrNotOnChain, loc.BlockHash)
+	var out []*AnchoredHeader
+	for _, a := range m.anchored {
+		if a.L1Height >= from && a.L1Height <= to {
+			out = append(out, a)
+		}
 	}
-	anchored, ok := m.anchored[locationKey(loc)]
-	if !ok {
-		return nil, fmt.Errorf("%w: nothing recorded at %s", ErrPaymentNotFound, locationKey(loc))
-	}
-	// Copied, so a caller cannot reach back into the mock's own table.
-	copied := *anchored
-	return &copied, nil
+	return out, nil
+}
+
+// Tip returns the recorded tip.
+func (m *MockL1Reader) Tip(context.Context) (uint64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.tip, nil
 }
 
 // BudgetOwner returns the recorded lock args.

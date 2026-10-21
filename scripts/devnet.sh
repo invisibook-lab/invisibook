@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Stands up a local CKB devnet and runs the Invisibook L2 against it, so that
-# the whole Proof-of-Buy path — prepay, commit, anchor, reveal, settle — runs
+# the whole Proof-of-Buy path — prepay, produce, anchor, settle — runs
 # against a real chain instead of the in-memory mock.
 #
 #   scripts/devnet.sh up       build, deploy, prepay and start everything
@@ -256,6 +256,21 @@ wait_for_lead() {
 }
 
 start_l2() {
+    # L2 genesis is fixed to L1 height n (anchor_genesis_l1_height), and
+    # batch i only counts headers landing in L1 [n+i, n+i+k]. Starting once
+    # L1 is already at n+k would leave the first windows closed and nothing
+    # could ever finalize, so refuse instead of starting a dead chain. Being
+    # below n is fine: the node holds its headers until each window opens.
+    local n k now
+    n="$(sed -n 's/^anchor_genesis_l1_height *= *\([0-9]*\).*/\1/p' "$DEV/core.toml")"
+    k="$(sed -n 's/^anchor_window *= *\([0-9]*\).*/\1/p' "$DEV/core.toml")"
+    [ -n "$n" ] && [ -n "$k" ] || die "could not read anchor_genesis_l1_height or anchor_window"
+    now="$(tip)"
+    if [ ! -e "$DEV/chain.db" ] && [ "$now" -ge "$((n + k))" ]; then
+        die "L1 is at block $now, past L2 genesis's first window [$n, $((n + k))]; run \`clean\` and start again, or raise anchor_genesis_l1_height"
+    fi
+    say "L2 genesis is L1 block $n; L1 is at $now"
+
     say "starting the Invisibook L2 node"
     (cd "$CHAIN" && exec go run . -config "$DEV/chain.toml" -core-config "$DEV/core.toml") \
         >"$DEV/logs/l2.log" 2>&1 &
@@ -298,9 +313,12 @@ up() {
     say "mining addr $mining_addr"
 
     init_devnet "$lock_args"
-    start_l1
+    # Built before L1 starts: compiling takes minutes, and every second L1
+    # runs before the L2 starts brings it closer to L2 genesis's first window
+    # closing (see start_l2).
     build_contracts
     build_prover
+    start_l1
     write_configs "$(genesis_dep_tx)" "$mining_addr"
     prepay
     wait_for_lead
@@ -341,9 +359,12 @@ console() {
         | awk '/^address/ {print $2}')"
 
     init_devnet "$lock_args"
-    start_l1
+    # Built before L1 starts: compiling takes minutes, and every second L1
+    # runs before the L2 starts brings it closer to L2 genesis's first window
+    # closing (see start_l2).
     build_contracts
     build_prover
+    start_l1
     write_configs "$(genesis_dep_tx)" "$mining_addr"
     start_l2
     start_console
@@ -354,7 +375,7 @@ console() {
 status() {
     printf 'L1 tip      %s\n' "$(tip 2>/dev/null || echo 'not running')"
     if [ -f "$DEV/logs/l2.log" ]; then
-        printf 'L2 blocks   %s\n' "$(grep -c 'PoB: committed block to L1' "$DEV/logs/l2.log" || echo 0)"
+        printf 'L2 blocks   %s\n' "$(grep -c 'PoB: submitted header to L1' "$DEV/logs/l2.log" || echo 0)"
         printf 'settled     %s\n' "$(grep -c 'PoB: settled' "$DEV/logs/l2.log" || echo 0)"
         printf '\nlast lines of the L2 log:\n'
         tail -15 "$DEV/logs/l2.log"

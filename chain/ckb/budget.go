@@ -15,8 +15,8 @@ import (
 //
 // `amount` is what this miner is willing to spend on `height`, in shannon;
 // `randomHex` is the 64-character blinding factor that opens the commitment
-// later (consensus.NewPaymentRandomHex). The caller must keep both: the L2 network is shown the opening when
-// the block is revealed, and an opening that is lost makes the allocation
+// later (consensus.NewPaymentRandomHex). The caller must keep both: the block
+// bidding on `height` carries the opening, and an opening that is lost makes the allocation
 // unusable — the money is spent and the height cannot be bid on with it.
 func Allocate(height uint32, amount *big.Int, randomHex string) (BudgetEntry, error) {
 	commitment, err := consensus.PaymentCommit(amount, randomHex)

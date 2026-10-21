@@ -24,7 +24,7 @@ import (
 // This carries more weight in PoB than in a chain with a fixed producer. A
 // block's VRF proof is bound to `prev_hash` and its payment to
 // `(amount, random)` — neither says anything about which transactions the
-// block carries, and both become public at reveal time. Without the chain
+// block carries, and both become public once the block is broadcast. Without the chain
 // below, anyone could take a miner's published proof and payment, attach
 // whatever transactions they liked, and get a block that clears every other
 // check with the same `goal` as the original. Whoever buys a height would
@@ -158,14 +158,24 @@ func VerifyBlockIntegrity(block *types.Block) error {
 			ErrTxnRootMismatch, root.String(), block.TxnRoot.String())
 	}
 
+	return VerifyHeaderSeal(block.Header)
+}
+
+// VerifyHeaderSeal checks ② and ③ of VerifyBlockIntegrity: the header's hash
+// is the one its contents produce, and its producer signed that hash.
+//
+// Split out because a header read off L1 arrives without its transactions,
+// so ① cannot be checked on it; everything the header says about itself can.
+// `header` must not be nil.
+func VerifyHeaderSeal(header *types.Header) error {
 	// ② The hash must be the one those contents produce.
-	computed, err := ComputeBlockHash(block)
+	computed, err := ComputeBlockHash(&types.Block{Header: header})
 	if err != nil {
 		return fmt.Errorf("recomputing the block hash: %w", err)
 	}
-	if computed != block.Hash {
+	if computed != header.Hash {
 		return fmt.Errorf("%w: the contents give %s, the header claims %s",
-			ErrBlockHashMismatch, computed.String(), block.Hash.String())
+			ErrBlockHashMismatch, computed.String(), header.Hash.String())
 	}
 
 	// ③ The only step that ties an identity to the block's contents at all.
@@ -178,9 +188,9 @@ func VerifyBlockIntegrity(block *types.Block) error {
 	// Malformed keys need no separate guard. VerifySignature parses the point
 	// itself and reports false when it cannot, so a key of the wrong length
 	// is refused here like any other key that does not verify.
-	pubkey := keypair.SecpPubkeyFromBytes(block.MinerPubkey)
-	if !pubkey.VerifySignature(block.Hash.Bytes(), block.MinerSignature) {
-		return fmt.Errorf("%w: producer %x", ErrBlockUnsigned, block.MinerPubkey)
+	pubkey := keypair.SecpPubkeyFromBytes(header.MinerPubkey)
+	if !pubkey.VerifySignature(header.Hash.Bytes(), header.MinerSignature) {
+		return fmt.Errorf("%w: producer %x", ErrBlockUnsigned, header.MinerPubkey)
 	}
 	return nil
 }

@@ -20,9 +20,8 @@ const minerSecret = "01010101010101010101010101010101010101010101010101010101010
 // else. It stands in for nodeRPC so the read paths can be exercised without a
 // chain behind them.
 type fakeNode struct {
-	// blocks and canonical are separate on purpose. A node keeps blocks from
-	// forks it no longer follows, and the difference between the two maps is
-	// exactly the case CommitmentAt has to catch.
+	// blocks and canonical are separate on purpose: a node keeps blocks from
+	// forks it no longer follows.
 	blocks    map[ckbtypes.Hash]*ckbtypes.Block
 	canonical map[uint64]ckbtypes.Hash
 	txs       map[ckbtypes.Hash]*ckbtypes.TransactionWithStatus
@@ -31,6 +30,8 @@ type fakeNode struct {
 	sent []*ckbtypes.Transaction
 	// cells is what the indexer hands cell collection.
 	cells []*indexer.LiveCell
+	// listed is what the indexer reports for the submit script's query.
+	listed []*indexer.TxWithCell
 	// tip is the block number GetTipBlockNumber reports.
 	tip uint64
 }
@@ -64,6 +65,25 @@ func (f *fakeNode) GetCells(_ context.Context, _ *indexer.SearchKey, _ indexer.S
 		return &indexer.LiveCells{Objects: nil, LastCursor: ""}, nil
 	}
 	return &indexer.LiveCells{Objects: f.cells, LastCursor: "end"}, nil
+}
+
+// GetTransactions returns the listed entries inside the search key's block
+// range, all in one page.
+func (f *fakeNode) GetTransactions(_ context.Context, key *indexer.SearchKey, _ indexer.SearchOrder, _ uint64, cursor string) (*indexer.TxsWithCell, error) {
+	if cursor != "" {
+		return &indexer.TxsWithCell{}, nil
+	}
+	var out []*indexer.TxWithCell
+	for _, entry := range f.listed {
+		if key.Filter != nil && key.Filter.BlockRange != nil {
+			r := key.Filter.BlockRange
+			if entry.BlockNumber < r[0] || entry.BlockNumber >= r[1] {
+				continue
+			}
+		}
+		out = append(out, entry)
+	}
+	return &indexer.TxsWithCell{Objects: out, LastCursor: "end"}, nil
 }
 
 func (f *fakeNode) SendTransaction(_ context.Context, tx *ckbtypes.Transaction) (*ckbtypes.Hash, error) {

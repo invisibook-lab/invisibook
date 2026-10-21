@@ -16,7 +16,7 @@ import (
 // Client is the CKB node this chain reads and writes L1 through.
 //
 // One type implements all three of the consensus package's L1 interfaces —
-// L1Reader, L1PaymentVerifier and L1CommitmentSubmitter — because on CKB they
+// L1Reader, L1PaymentVerifier and L1HeaderSubmitter — because on CKB they
 // are three views of the same two cells. Splitting them would mean three
 // connections, three copies of the script configuration, and three chances
 // for those copies to disagree about which chain this node is on.
@@ -33,17 +33,16 @@ type Client struct {
 // asks for. Getting a method signature subtly wrong would otherwise surface
 // as main.go failing to wire up, far from the method itself.
 var (
-	_ consensus.L1Reader              = (*Client)(nil)
-	_ consensus.L1PaymentVerifier     = (*Client)(nil)
-	_ consensus.L1CommitmentSubmitter = (*Client)(nil)
+	_ consensus.L1Reader          = (*Client)(nil)
+	_ consensus.L1PaymentVerifier = (*Client)(nil)
+	_ consensus.L1HeaderSubmitter = (*Client)(nil)
 )
 
 // nodeRPC is the slice of a CKB node this package actually uses.
 //
-// Narrow on purpose, and for the same reason the reveal syncer takes a narrow
-// store: rpc.Client is a hundred-odd methods wide, and depending on all of it
-// would mean the only way to exercise a read path is to run a CKB node.
-// Against six methods, a test supplies a struct.
+// Narrow on purpose: rpc.Client is a hundred-odd methods wide, and depending
+// on all of it would mean the only way to exercise a read path is to run a
+// CKB node. Against seven methods, a test supplies a struct.
 type nodeRPC interface {
 	// GetBlock returns a block by hash, or nil when the node does not know it.
 	GetBlock(ctx context.Context, hash ckbtypes.Hash) (*ckbtypes.Block, error)
@@ -53,6 +52,8 @@ type nodeRPC interface {
 	GetTransaction(ctx context.Context, hash ckbtypes.Hash, verbosity *uint32, onlyCommitted *bool) (*ckbtypes.TransactionWithStatus, error)
 	// GetCells is the indexer query cell collection runs on.
 	GetCells(ctx context.Context, searchKey *indexer.SearchKey, order indexer.SearchOrder, limit uint64, afterCursor string) (*indexer.LiveCells, error)
+	// GetTransactions is the indexer query reading a batch's window runs on.
+	GetTransactions(ctx context.Context, searchKey *indexer.SearchKey, order indexer.SearchOrder, limit uint64, afterCursor string) (*indexer.TxsWithCell, error)
 	// SendTransaction broadcasts a signed transaction.
 	SendTransaction(ctx context.Context, tx *ckbtypes.Transaction) (*ckbtypes.Hash, error)
 	// GetTipBlockNumber returns the number of the canonical chain's tip.

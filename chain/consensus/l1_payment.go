@@ -456,7 +456,7 @@ type Allocation struct {
 	// L1BlockNumber is the L1 block the entry was written in.
 	//
 	// V4 compares it: an allocation must be at least 24 L1 blocks older than
-	// the L1 block holding the commitment of the L2 block that spends it.
+	// the L1 block holding the header of the L2 block that spends it.
 	// Without that gap a miner could post the allocation on an L1 fork that
 	// has not converged yet, and L1's uncertainty would spread to L2. R3.1 on
 	// chain only makes the table immutable once written — that it was written

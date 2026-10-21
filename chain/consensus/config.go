@@ -20,8 +20,30 @@ type Config struct {
 	// PaymentListen is the listen address for the gin payment HTTP server.
 	PaymentListen string `toml:"payment_listen"`
 	// L1PollInterval is the interval in milliseconds at which the finality
-	// worker asks L1 whether a commitment has landed.
+	// worker asks L1 whether a submitted header has landed.
 	L1PollInterval int `toml:"l1_poll_interval"`
+	// AnchorGenesisL1Height is n: the L1 height L2 genesis corresponds to.
+	// Batch i of L2 heights only counts headers landing in L1 blocks
+	// [n+i, n+i+AnchorWindow]. L1 has to be below n+k when the L2 starts, or
+	// the first windows are already closed.
+	//
+	// Fixed for the life of the chain and identical on every node. It is
+	// written into the genesis block, so a node with a different value refuses
+	// to start on an existing database: changing it means every node changes
+	// it together, clears its database, and the chain starts over.
+	AnchorGenesisL1Height uint64 `toml:"anchor_genesis_l1_height"`
+	// AnchorBatchSize is b: how many consecutive L2 heights form one batch.
+	// Batch i covers heights [i*b+1, i*b+b]. Chosen from the L1 and L2 block
+	// rates so that one batch is produced per L1 block on average.
+	AnchorBatchSize uint64 `toml:"anchor_batch_size"`
+	// AnchorWindow is k, in L1 blocks: a chain-quality parameter such that
+	// any k consecutive L1 blocks include one from an honest producer, who
+	// packs the batch's headers.
+	AnchorWindow uint64 `toml:"anchor_window"`
+	// AnchorConfirmDepth is how many L1 blocks past a window's end must exist
+	// before the batch is decided, so an L1 reorg cannot change the
+	// window's contents after the decision.
+	AnchorConfirmDepth uint64 `toml:"anchor_confirm_depth"`
 	// MinerSecret is the seed the node's miner keypair is derived from.
 	//
 	// One key wears three hats — it signs L2 blocks, evaluates the VRF, and
@@ -54,6 +76,10 @@ func DefaultConsensusConfig() Config {
 		PackNum:                30000,
 		PaymentListen:          ":8081",
 		L1PollInterval:         1000,
+		AnchorGenesisL1Height:  200,
+		AnchorBatchSize:        3,
+		AnchorWindow:           24,
+		AnchorConfirmDepth:     24,
 		MinerSecret:            "node1",
 		SchedulePath:           "data/prepayments.json",
 	}

@@ -258,10 +258,10 @@ Key code:
 | `lib/budget-stark/` | Balance proof: circuit (`src/air.rs`), commitments (`src/hash.rs`), STARK parameters (`src/config.rs`), witness layout (`src/witness.rs`) |
 | `lib/budget-stark-ffi/` | Static library exposing the prover to Go |
 | `ckb/contracts/pob-budget/` | Budget cell script, R3.1–R3.5 (R3.2 verifies the proof) |
-| `ckb/contracts/pob-vault/`, `pob-spent/`, `pob-submission/` | Mining addr, spent-token marking, block commitments |
-| `chain/consensus/` | PoB consensus: VRF, scoring, payment checks, anchoring, reveal, fork choice |
+| `ckb/contracts/pob-vault/`, `pob-spent/`, `pob-submission/` | Mining addr, spent-token marking, block header submission |
+| `chain/consensus/` | PoB consensus: VRF, scoring, payment checks, header anchoring, fork choice |
 | `chain/consensus/poseidon2.go` | Payment commitment (Go port of the prover's Poseidon2) |
-| `chain/ckb/` | CKB client: budget cell transaction, reading allocations and anchors |
+| `chain/ckb/` | CKB client: budget cell transaction, reading allocations, submitting and indexing headers |
 | `chain/cmd/pob-miner/`, `chain/miner/` | Miner CLI and browser console; the only place that proves and pays |
 | `scripts/devnet.sh` | Local end-to-end run |
 
@@ -272,9 +272,9 @@ Key code:
 - **Compensation for losing miners** (whitepaper §10.2) is not implemented: only the
   winning block's miner is rewarded.
 - The items under "待确认" in [ckb_layout.md](../ckb_layout.md) §8 are open design
-  questions: retention of openings and treating a commitment that is never revealed as
-  an abstention, re-submission after an L1 reorg, bounds of weak subjectivity, and the
-  cost of spam commit cells.
+  questions: re-submission after an L1 reorg, choosing the window `k` and confirmation
+  depth `d` for CKB, fetching the decided blocks on a node that followed another fork,
+  and the cost of spam commit cells.
 - `pob-miner` must be built with `make build-pob-miner` (it links the Rust prover). A
   build without the `budgetstark` tag still runs but refuses to prepay with a message
   saying so. The node is built as usual (`go build -o invisibook .`) and does not link

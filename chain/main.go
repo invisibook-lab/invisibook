@@ -83,25 +83,13 @@ func main() {
 	if err := store.MigrateStagedTable(db); err != nil {
 		logrus.Fatal("migrating staging table: ", err)
 	}
-	// Only the commitment goes to L1; its opening lives here. A lost opening
-	// forfeits the bid, so it is persisted rather than kept in memory.
-	if err := consensus.MigrateBidTable(db); err != nil {
-		logrus.Fatal("migrating bid table: ", err)
-	}
-	bids := consensus.NewBids(db)
-	// Openings collected from the whole network. Fork choice reads them, so
-	// they are consensus input rather than bookkeeping.
-	if err := consensus.MigrateRevealTable(db); err != nil {
-		logrus.Fatal("migrating reveal table: ", err)
-	}
-	reveals := consensus.NewReveals(db)
 	pending := store.NewPending(db)
 	pending.Register(account.CashApplier{})
 	pending.Register(core.Appliers()...)
 
 	accountTri := account.NewAccount(&coreCfg.Account, db, pending)
 	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook, db, pending)
-	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, l1Reader, vrfPrivKey, l1Submitter, bids, reveals, paymentBook, pending)
+	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, l1Reader, vrfPrivKey, l1Submitter, paymentBook, pending)
 
 	// The payment endpoint confirms each declaration against L1 before it
 	// reaches the book, so it needs the same verifier and miner identity the
@@ -130,11 +118,11 @@ func main() {
 // `privKey` is the miner's block key, which is also the key that owns its CKB
 // address — the identity binding of proof_of_buy.md §6.2 is that they are the
 // same scalar.
-func connectL1(cfg *ckb.Config, privKey keypair.PrivKey) (consensus.L1PaymentVerifier, consensus.L1Reader, consensus.L1CommitmentSubmitter) {
+func connectL1(cfg *ckb.Config, privKey keypair.PrivKey) (consensus.L1PaymentVerifier, consensus.L1Reader, consensus.L1HeaderSubmitter) {
 	if !cfg.Enabled {
 		logrus.Warn("PoB: no [ckb] section, running against the in-memory mock L1: " +
-			"payments are not real and commitments are not anchored")
-		return &consensus.MockL1PaymentVerifier{}, &consensus.MockL1Reader{}, consensus.NewMockL1CommitmentSubmitter()
+			"payments are not real and headers are not anchored")
+		return &consensus.MockL1PaymentVerifier{}, &consensus.MockL1Reader{}, consensus.NewMockL1HeaderSubmitter()
 	}
 
 	client, err := ckb.New(cfg, privKey.Bytes())

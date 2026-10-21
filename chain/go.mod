@@ -8,6 +8,7 @@ require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
 	github.com/gin-gonic/gin v1.9.1
 	github.com/go-playground/validator/v10 v10.30.1
+	github.com/golang/protobuf v1.5.4
 	github.com/gorilla/websocket v1.5.3
 	github.com/iden3/go-iden3-crypto v0.0.15
 	github.com/iden3/go-rapidsnark/types v0.0.3
@@ -67,7 +68,6 @@ require (
 	github.com/goccy/go-json v0.10.4 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v0.0.5-0.20220116011046-fa5810519dcb // indirect
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/google/pprof v0.0.0-20240727154555-813a5fbdbec8 // indirect

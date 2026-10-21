@@ -2,119 +2,130 @@ package ckb
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
 
+	"github.com/nervosnetwork/ckb-sdk-go/v2/indexer"
 	ckbtypes "github.com/nervosnetwork/ckb-sdk-go/v2/types"
+
+	"github.com/yu-org/yu/common"
+	"github.com/yu-org/yu/core/types"
 
 	"github.com/invisibook-lab/invisibook/consensus"
 )
 
-// commitTx builds a transaction whose output `idx` is a commit cell holding
-// `commitment`, with a decoy cell in front of it so that locating the
-// transaction is visibly not the same as locating the cell.
-func commitTx(c *Client, commitment []byte) *ckbtypes.Transaction {
+// testHeader returns an L2 header at `height` whose Hash is the one its
+// contents imply, the way a sealed block's would be.
+func testHeader(t *testing.T, height common.BlockNum) *types.Header {
+	t.Helper()
+
+	header := &types.Header{
+		Height:   height,
+		PrevHash: common.BytesToHash([]byte("parent")),
+		Extra:    []byte(`{"block_score":"1"}`),
+	}
+	hash, err := consensus.ComputeBlockHash(&types.Block{Header: header})
+	if err != nil {
+		t.Fatalf("hashing the test header: %v", err)
+	}
+	header.Hash = hash
+	return header
+}
+
+// submitTx builds a transaction whose second output is a submit cell holding
+// `data`, with a decoy cell in front of it so that locating the transaction
+// is visibly not the same as locating the cell.
+func submitTx(c *Client, fill byte, data []byte) *ckbtypes.Transaction {
 	return &ckbtypes.Transaction{
-		Hash: ckbtypes.HexToHash(hashOf(0x55)),
+		Hash: ckbtypes.HexToHash(hashOf(fill)),
 		Outputs: []*ckbtypes.CellOutput{
 			{Capacity: 100, Lock: c.minerLock()},
 			{Capacity: 200, Lock: c.minerLock(), Type: c.set.commitScript},
 		},
-		OutputsData: [][]byte{nil, commitment},
+		OutputsData: [][]byte{nil, data},
 	}
 }
 
-// blockWith wraps transactions in a block at `number`.
-func blockWith(number uint64, fill byte, txs ...*ckbtypes.Transaction) *ckbtypes.Block {
-	return &ckbtypes.Block{
-		Header:       &ckbtypes.Header{Hash: ckbtypes.HexToHash(hashOf(fill)), Number: number},
-		Transactions: txs,
+// landSubmission records `tx` as committed at L1 height `number` and lists
+// its submit cell for the indexer.
+func landSubmission(node *fakeNode, tx *ckbtypes.Transaction, number uint64) {
+	node.addCommittedTx(tx, ckbtypes.HexToHash(hashOf(byte(number))), number, 0)
+	node.listed = append(node.listed, &indexer.TxWithCell{
+		BlockNumber: number,
+		IoIndex:     1,
+		IoType:      indexer.IOTypeOut,
+		TxHash:      tx.Hash,
+	})
+	if number > node.tip {
+		node.tip = number
 	}
 }
 
-func TestCommitmentAt(t *testing.T) {
-	node := newFakeNode()
-	client := testClient(t, node)
-
-	commitment := bytes32(0xab)
-	block := blockWith(4200, 0x71, &ckbtypes.Transaction{Hash: ckbtypes.HexToHash(hashOf(0x01))}, commitTx(client, commitment))
-	hash := node.addBlock(block, true)
-
-	got, err := client.CommitmentAt(context.Background(), &consensus.L1Location{BlockHash: hash.String(), TxIdx: 1})
+// encodedHeader encodes `header` the way SubmitHeader does.
+func encodedHeader(t *testing.T, header *types.Header) []byte {
+	t.Helper()
+	raw, err := consensus.EncodeHeader(header)
 	if err != nil {
-		t.Fatalf("reading the anchored commitment: %v", err)
+		t.Fatalf("encoding the test header: %v", err)
 	}
-	if got.Commitment != hex.EncodeToString(commitment) {
-		t.Fatalf("commitment reads back as %s, want %s", got.Commitment, hex.EncodeToString(commitment))
-	}
-	// The height is as much the point as the commitment: §8.2 tells a fork
-	// that was really there from one bought later by when it was anchored.
-	if got.L1Height != 4200 {
-		t.Fatalf("anchored at L1 height %d, want 4200", got.L1Height)
-	}
+	return raw
 }
 
-// A node keeps blocks from forks it no longer follows. This is why a reveal
-// names the L1 block by hash: a height would resolve to whatever replaced it
-// and the commitment would appear to stand.
-func TestCommitmentAtRejectsOrphanedBlock(t *testing.T) {
+// A window read returns every header submitted inside it, each dated by the
+// L1 block it landed in, and nothing from outside it.
+func TestAnchoredInReadsTheWindow(t *testing.T) {
 	node := newFakeNode()
 	client := testClient(t, node)
+	early, inside, late := testHeader(t, 6), testHeader(t, 7), testHeader(t, 8)
 
-	orphan := blockWith(4200, 0x71, commitTx(client, bytes32(0xab)))
-	hash := node.addBlock(orphan, false)
-	// Something else is what L1 follows at that height now.
-	node.canonical[4200] = ckbtypes.HexToHash(hashOf(0x72))
+	landSubmission(node, submitTx(client, 0x51, encodedHeader(t, early)), 4199)
+	landSubmission(node, submitTx(client, 0x52, encodedHeader(t, inside)), 4200)
+	landSubmission(node, submitTx(client, 0x53, encodedHeader(t, late)), 4225)
 
-	_, err := client.CommitmentAt(context.Background(), &consensus.L1Location{BlockHash: hash.String(), TxIdx: 0})
-	if !errors.Is(err, consensus.ErrNotOnChain) {
-		t.Fatalf("orphaned block gave %v, want ErrNotOnChain", err)
+	got, err := client.AnchoredIn(context.Background(), 4200, 4224)
+	if err != nil {
+		t.Fatalf("AnchoredIn: %v", err)
+	}
+	if len(got) != 1 || got[0].Header.Hash != inside.Hash || got[0].L1Height != 4200 {
+		t.Fatalf("window read %+v, want only height 7 at L1 4200", got)
 	}
 }
 
-func TestCommitmentAtRejectsUnknownBlock(t *testing.T) {
-	client := testClient(t, newFakeNode())
-
-	_, err := client.CommitmentAt(context.Background(), &consensus.L1Location{BlockHash: hashOf(0x99), TxIdx: 0})
-	if !errors.Is(err, consensus.ErrNotOnChain) {
-		t.Fatalf("unknown block gave %v, want ErrNotOnChain", err)
-	}
-}
-
-func TestCommitmentAtRejectsMalformedAnchor(t *testing.T) {
+// The indexer may still list a submission a reorg took away. It is re-read
+// with the committed-only filter, and left out when L1 no longer has it.
+func TestAnchoredInSkipsASubmissionLostToAReorg(t *testing.T) {
 	node := newFakeNode()
 	client := testClient(t, node)
+	tx := submitTx(client, 0x51, encodedHeader(t, testHeader(t, 7)))
+	landSubmission(node, tx, 4200)
+	delete(node.txs, tx.Hash)
 
-	plain := &ckbtypes.Transaction{
-		Hash:        ckbtypes.HexToHash(hashOf(0x02)),
-		Outputs:     []*ckbtypes.CellOutput{{Capacity: 100, Lock: client.minerLock()}},
-		OutputsData: [][]byte{nil},
+	got, err := client.AnchoredIn(context.Background(), 4200, 4224)
+	if err != nil {
+		t.Fatalf("AnchoredIn: %v", err)
 	}
-	short := &ckbtypes.Transaction{
-		Hash:        ckbtypes.HexToHash(hashOf(0x03)),
-		Outputs:     []*ckbtypes.CellOutput{{Capacity: 100, Lock: client.minerLock(), Type: client.set.commitScript}},
-		OutputsData: [][]byte{{1, 2, 3}},
+	if len(got) != 0 {
+		t.Fatalf("read %d headers from a reorged-away submission, want 0", len(got))
 	}
-	hash := node.addBlock(blockWith(7, 0x73, plain, short), true)
+}
 
-	cases := map[string]uint32{
-		"no commit cell in the transaction": 0,
-		"commit cell is not 32 bytes":       1,
-		"no transaction at that index":      9,
+// Submit cells only have their length checked on chain, so anyone can fill
+// one with garbage. It is skipped, not an error that stops the window read.
+func TestAnchoredInSkipsCellsThatHoldNoHeader(t *testing.T) {
+	node := newFakeNode()
+	client := testClient(t, node)
+	header := testHeader(t, 7)
+
+	landSubmission(node, submitTx(client, 0x51, []byte{0xff, 0xff}), 4200)
+	landSubmission(node, submitTx(client, 0x52, encodedHeader(t, header)), 4201)
+
+	got, err := client.AnchoredIn(context.Background(), 4200, 4224)
+	if err != nil {
+		t.Fatalf("AnchoredIn: %v", err)
 	}
-	for name, idx := range cases {
-		t.Run(name, func(t *testing.T) {
-			_, err := client.CommitmentAt(context.Background(),
-				&consensus.L1Location{BlockHash: hash.String(), TxIdx: idx})
-			if err == nil {
-				t.Fatal("accepted an anchor that is not there")
-			}
-			if errors.Is(err, consensus.ErrNotOnChain) {
-				t.Fatalf("reported a present-but-malformed anchor as off chain: %v", err)
-			}
-		})
+	if len(got) != 1 || got[0].Header.Hash != header.Hash {
+		t.Fatalf("read %+v, want only the real header", got)
 	}
 }
 
@@ -136,7 +147,7 @@ func TestBudgetOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hashing the miner key: %v", err)
 	}
-	if hex.EncodeToString(args) != hex.EncodeToString(want) {
+	if string(args) != string(want) {
 		t.Fatalf("lock args are %x, want %x", args, want)
 	}
 }
@@ -145,7 +156,7 @@ func TestBudgetOwnerRejectsTransactionWithoutBudgetCell(t *testing.T) {
 	node := newFakeNode()
 	client := testClient(t, node)
 
-	tx := commitTx(client, bytes32(0xab))
+	tx := submitTx(client, 0x55, []byte{1})
 	node.addCommittedTx(tx, ckbtypes.HexToHash(hashOf(0x75)), 901, 0)
 
 	_, err := client.BudgetOwner(context.Background(), tx.Hash.String())
@@ -157,7 +168,7 @@ func TestBudgetOwnerRejectsTransactionWithoutBudgetCell(t *testing.T) {
 	}
 }
 
-// bytes32 renders 32 bytes of one value, standing in for a commitment.
+// bytes32 renders 32 bytes of one value.
 func bytes32(fill byte) []byte {
 	out := make([]byte, commitmentLen)
 	for i := range out {

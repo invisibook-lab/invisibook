@@ -29,7 +29,10 @@ const SCRIPT_BIN: &str =
     "../contracts/pob-submission/target/riscv64imac-unknown-none-elf/release/pob-submission";
 
 /// Exit code the script returns, mirroring `contracts/pob-submission`.
-const ERR_BAD_COMMITMENT_LEN: i8 = 1;
+const ERR_BAD_HEADER_LEN: i8 = 1;
+
+/// Largest header the script accepts, mirroring `contracts/pob-submission`.
+const MAX_HEADER_LEN: usize = 4096;
 
 /// Asserts the transaction was refused by the script with exactly `code`.
 ///
@@ -101,34 +104,37 @@ fn tx_creating_commit_cell(context: &mut Context, data: Bytes) -> TransactionVie
     context.complete_tx(tx)
 }
 
-// R5.1: a commit cell carries exactly 32 bytes.
+// R5.1: a commit cell carries a non-empty header of at most MAX_HEADER_LEN
+// bytes. Both ends of the range must be accepted.
 //
 // The cycle count is reported rather than discarded: on CKB it is the figure
 // that decides whether a script is affordable at all, and `verify_tx` hands it
 // over for free. Run with `--nocapture` to read it.
 #[test]
-fn accepts_a_32_byte_commitment() {
-    let mut context = Context::default();
-    let tx = tx_creating_commit_cell(&mut context, Bytes::from(vec![0xab; 32]));
+fn accepts_a_header_within_the_limit() {
+    for len in [1usize, 700, MAX_HEADER_LEN] {
+        let mut context = Context::default();
+        let tx = tx_creating_commit_cell(&mut context, Bytes::from(vec![0xab; len]));
 
-    let cycles = context
-        .verify_tx(&tx, MAX_CYCLES)
-        .expect("a 32-byte commitment must be accepted");
-    println!("commit_type_script accepted a commitment in {cycles} cycles");
+        let cycles = context
+            .verify_tx(&tx, MAX_CYCLES)
+            .unwrap_or_else(|e| panic!("a {len}-byte header must be accepted: {e}"));
+        println!("commit_type_script accepted {len} bytes in {cycles} cycles");
+    }
 }
 
-// The other half of R5.1, and the half that matters: anything that is not a
-// commitment has to be refused. A script that returned success unconditionally
-// would pass the test above and fail every one of these.
+// The other half of R5.1, and the half that matters: an empty cell, or one
+// over the cap, has to be refused. A script that returned success
+// unconditionally would pass the test above and fail every one of these.
 #[test]
-fn rejects_a_commitment_of_the_wrong_length() {
-    for len in [0usize, 1, 31, 33, 64] {
+fn rejects_data_outside_the_limit() {
+    for len in [0usize, MAX_HEADER_LEN + 1] {
         let mut context = Context::default();
         let tx = tx_creating_commit_cell(&mut context, Bytes::from(vec![0xab; len]));
 
         assert_refused_with(
             context.verify_tx(&tx, MAX_CYCLES),
-            ERR_BAD_COMMITMENT_LEN,
+            ERR_BAD_HEADER_LEN,
             &format!("data of {len} bytes"),
         );
     }
