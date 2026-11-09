@@ -753,14 +753,16 @@ mod tests {
         note::{asset_id, empty_roots, npk_from_sk},
         note_tree::NoteTree,
     };
-    use std::sync::Mutex;
+    use std::sync::{Mutex, PoisonError};
     use zk::setup::{DevSetup, dev_setup_snarkjs};
 
     /// `dev_setup_snarkjs` writes shared cache files; two tests racing on
     /// the same circuit can read a half-written zkey. Serialize all setups.
+    /// The lock holds no data, so a poisoned lock is safe to use again.
+    /// Each test then shows its own setup error, not a `PoisonError`.
     fn locked_setup(name: &str) -> DevSetup {
         static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         dev_setup_snarkjs(name).expect("snarkjs setup")
     }
 

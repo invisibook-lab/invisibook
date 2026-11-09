@@ -212,7 +212,9 @@ spec/golden.json  cross-language golden vectors
   primitives, provers, stores, the `model_gate` grep-gate) and
   `cargo test -p zk` (Poseidon parity, setup smoke, `settle_cozk`
   round-trip). Note-circuit round-trips through rapidsnark live in
-  `lib/chain`'s `note_prover` tests.
+  `lib/chain`'s `note_prover` tests. Thus both commands need `circom`,
+  `snarkjs` and `rapidsnark` on `PATH`. CI installs them before all lib
+  tests.
 - **Go fixtures:** `make dump-pool-fixture` regenerates
   `/tmp/pool_fixture.json` + the committed VKs;
   `chain/core/pool_verify_test.go` pins signal-rebuild lockstep and

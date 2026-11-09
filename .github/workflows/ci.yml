@@ -93,31 +93,21 @@ jobs:
             lib/target
           key: ${{ runner.os }}-cargo-lib-${{ hashFiles('lib/Cargo.lock') }}
 
-      - name: Build lib
-        working-directory: lib
-        run: cargo build
-
-      - name: Test lib (exclude zk)
-        working-directory: lib
-        run: cargo test --workspace --exclude zk
-
-      # ZK tests only when lib/zk/** changed — they need the
-      # circom/snarkjs/rapidsnark toolchain installed below.
+      # Both test steps below need the circom/snarkjs/rapidsnark toolchain:
+      # the note_prover tests in lib/chain prove the note circuits with
+      # rapidsnark. Thus install the toolchain before all tests.
       - name: Cache circuit build (ptau + zkey)
-        if: needs.changes.outputs.zk == 'true'
         uses: actions/cache@v4
         with:
           path: lib/target/circuit-build
           key: ${{ runner.os }}-circuit-build-${{ hashFiles('lib/zk/templates/**/*.circom') }}
 
       - name: Set up Node.js
-        if: needs.changes.outputs.zk == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Install circom
-        if: needs.changes.outputs.zk == 'true'
         run: |
           rustup toolchain install stable
           git clone https://github.com/iden3/circom.git /tmp/circom
@@ -126,11 +116,9 @@ jobs:
           sudo cp target/release/circom /usr/local/bin/
 
       - name: Install snarkjs
-        if: needs.changes.outputs.zk == 'true'
         run: npm install -g snarkjs
 
       - name: Install rapidsnark
-        if: needs.changes.outputs.zk == 'true'
         run: |
           sudo apt-get install -y nasm libsodium-dev
           git clone https://github.com/iden3/rapidsnark.git /tmp/rapidsnark
@@ -140,6 +128,15 @@ jobs:
           make host -j$(nproc)
           sudo cp /tmp/rapidsnark/package/bin/prover /usr/local/bin/rapidsnark
 
+      - name: Build lib
+        working-directory: lib
+        run: cargo build
+
+      - name: Test lib (exclude zk)
+        working-directory: lib
+        run: cargo test --workspace --exclude zk
+
+      # The lib/zk tests run only when lib/zk/** changed.
       - name: Test lib/zk
         if: needs.changes.outputs.zk == 'true'
         working-directory: lib
