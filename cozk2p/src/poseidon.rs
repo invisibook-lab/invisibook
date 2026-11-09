@@ -2,9 +2,8 @@
 //!
 //! Mirrors `light_poseidon::Poseidon::new_circom(2)` exactly (state width
 //! t=3, domain tag 0, 8 full + 57 partial rounds, x^5 S-box), which is the
-//! commitment hash used across the chain (`Cash.Amount`, order commitments).
-//! Golden vector: `hash2(0, 0)` must equal the chain's
-//! `PoseidonZeroCommitmentHex` constant.
+//! commitment hash used across the chain (collateral and note commitments).
+//! Golden vector: `hash2(0, 0)` — see the unit test below.
 
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, Field, PrimeField};
@@ -72,8 +71,8 @@ pub fn fr_to_hex(f: &Fr) -> String {
 mod tests {
     use super::*;
 
-    /// The chain's hardcoded `PoseidonZeroCommitmentHex` — proves this
-    /// implementation matches light-poseidon/circom exactly.
+    /// Golden vector of the circom parameterization: `Poseidon(2)([0, 0])`.
+    /// Proves this implementation matches light-poseidon/circom exactly.
     #[test]
     fn zero_commitment_matches_chain_constant() {
         let zero = hash2(Fr::from(0u64), Fr::from(0u64));
@@ -82,4 +81,33 @@ mod tests {
             "2098f5fb9e239eab3ceac3f27b81e481dc3124d55ffed523a839ee8446b64864"
         );
     }
+}
+
+// ────────────────────── Shielded-pool note helpers ──────────────────────
+
+/// Domain tag of the note commitment chain (spec/golden.json).
+pub const TAG_CM: u64 = 3;
+
+/// assetID of a token symbol: its UTF-8 bytes read big-endian into Fr.
+/// The chain validates symbols are 1..=31 bytes; mirror that here.
+pub fn asset_fr(token: &str) -> anyhow::Result<Fr> {
+    use ark_ff::PrimeField;
+    let bytes = token.as_bytes();
+    anyhow::ensure!(
+        !bytes.is_empty() && bytes.len() <= 31,
+        "token symbol must be 1..=31 bytes, got {}",
+        bytes.len()
+    );
+    Ok(Fr::from_be_bytes_mod_order(bytes))
+}
+
+/// The pool's note commitment as the tagged nested 2-input chain
+/// `P2(P2(P2(P2(TAG_CM, npk), asset), v), r)` — byte-identical to
+/// `lib/chain/src/note.rs::note_commit` and `note.circom`'s NoteCommit.
+pub fn note_commit(npk: Fr, asset: Fr, v: u64, r: &[u8; 32]) -> Fr {
+    use ark_ff::PrimeField;
+    let c = hash2(Fr::from(TAG_CM), npk);
+    let c = hash2(c, asset);
+    let c = hash2(c, Fr::from(v));
+    hash2(c, Fr::from_be_bytes_mod_order(r))
 }

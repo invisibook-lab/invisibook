@@ -5,6 +5,9 @@ use dioxus::prelude::*;
 use invisibook_lib::{orderbook, types::*};
 
 /// The order book panel: table header + scrollable order rows.
+/// `own_order_ids` maps this wallet's order IDs to the plaintext LOCKED
+/// collateral the wallet knows (the "Locked" column shows every other order's
+/// collateral commitment, so both renderings mean the same quantity).
 /// `settling_ids` tracks order IDs currently being settled (for disabling button).
 /// `on_settle` is called with the order ID when the user clicks "Settle".
 #[component]
@@ -29,7 +32,7 @@ pub fn OrderBook(
                         span { "Side" }
                         span { "Pair" }
                         span { "Price" }
-                        span { class: "col-amount", "Amount" }
+                        span { class: "col-amount", "Locked" }
                         span { class: "col-status", "Status" }
                     }
                     {render_rows(&orders.read(), &own_order_ids.read(), &selected.read(), &expanded.read(), &settling_ids.read(), selected, expanded, on_settle)}
@@ -70,16 +73,24 @@ fn render_rows(
                     OrderStatus::Frozen => "status-frozen",
                     OrderStatus::Settling => "status-settling",
                 };
-                let price_str = match order.price {
-                    Some(p) => p.to_string(),
-                    None => "-".into(),
+                let price_str = match order.kind {
+                    OrderKind::Limit => order.price.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+                    OrderKind::Market => match (order.trade_type, order.protection_price) {
+                        (TradeType::Buy, Some(p)) => format!("MKT ≤ {p}"),
+                        (TradeType::Sell, Some(p)) => format!("MKT ≥ {p}"),
+                        (_, None) => "MKT".into(),
+                    },
                 };
                 let row_class = if is_selected { "order-row selected" } else { "order-row" };
 
+                // Locked-only model: the row shows the order's single
+                // collateral commitment cipher; own orders show the locally
+                // known plaintext LOCKED collateral instead — same value,
+                // opened, so the "Locked" heading holds for both.
                 let (amt_text, is_own) = if let Some(plain) = own_ids.get(&order.id) {
                     (plain.clone(), true)
                 } else {
-                    let a = &order.amount;
+                    let a = &order.locked_commitment;
                     let t = if a.len() > 14 { format!("{}…", &a[..14]) } else { a.clone() };
                     (t, false)
                 };
@@ -88,7 +99,7 @@ fn render_rows(
                 let full_amount = if let Some(plain) = own_ids.get(&order.id) {
                     plain.clone()
                 } else {
-                    order.amount.clone()
+                    order.locked_commitment.clone()
                 };
 
                 // Determine whether this matched order can be settled.
@@ -104,6 +115,10 @@ fn render_rows(
                 let pair_str = order.subject.to_string();
                 let status_str = order.status.to_string();
                 let price_str2 = price_str.clone();
+                let execution_str = order
+                    .execution_price
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".into());
 
                 rsx! {
                     div {
@@ -140,7 +155,10 @@ fn render_rows(
                             span { class: "detail-label", "Price" }
                             span { class: "detail-value", "{price_str2}" }
 
-                            span { class: "detail-label", "Amount" }
+                            span { class: "detail-label", "Execution" }
+                            span { class: "detail-value", "{execution_str}" }
+
+                            span { class: "detail-label", "Locked" }
                             span { class: "detail-value", "{full_amount}" }
 
                             span { class: "detail-label", "Status" }

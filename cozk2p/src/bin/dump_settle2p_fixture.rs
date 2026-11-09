@@ -18,9 +18,9 @@ use ark_mpc::{PARTY0, test_helpers::execute_mock_mpc};
 use ark_serialize::CanonicalSerialize;
 use clap::Parser;
 use cozk2p::{
-    SidePrivate, compute_public,
+    SidePrivate, combine_compare_proof_shares, compute_public,
     poseidon::fr_to_hex,
-    prove_collaborative,
+    prove_collaborative_share_timed, serialize_compare_proof_share,
     setup::{default_cache_dir, dev_keys, sample_trade},
     verify_settle,
 };
@@ -72,10 +72,10 @@ async fn main() -> Result<()> {
         return Ok(());
     };
 
-    // Same sample trade as keygen and the 3-party fixture: A (maker) sells 80
-    // token1 at price 3, B buys 60 → cmp = 1, A keeps 20 on the book.
-    let (a, b, price, a_is_seller) = sample_trade();
-    let public = compute_public(&a, &b, price, a_is_seller)?;
+    // Same sample trade as keygen: A (maker) SELLS 80 at price 3, B BUYS
+    // 60 → cmp = 1 (locked-only model: A locks 80, B locks 180).
+    let (a, b, price_a, price_b, a_is_seller) = sample_trade();
+    let public = compute_public(&a, &b, price_a, price_b, a_is_seller)?;
 
     // Two in-process SPDZ parties, each holding only its own side.
     let (r0, r1) = execute_mock_mpc(|fabric| {
@@ -83,38 +83,37 @@ async fn main() -> Result<()> {
         async move {
             let party = fabric.party_id();
             let my: SidePrivate = if party == PARTY0 { a } else { b };
-            prove_collaborative(fabric.clone(), party, &my, &public, &pk)
+            prove_collaborative_share_timed(fabric.clone(), party, &my, &public, &pk)
                 .await
                 .expect("collaborative proving must succeed")
+                .0
         }
     })
     .await;
-    let mut p0 = Vec::new();
-    r0.serialize_compressed(&mut p0)?;
-    let mut p1 = Vec::new();
-    r1.serialize_compressed(&mut p1)?;
-    ensure!(p0 == p1, "the two parties revealed different proofs");
-    verify_settle(&vk, &public, &r0).context("locally verifying the collaborative proof")?;
+    let share_a = serialize_compare_proof_share(&r0)?;
+    let share_b = serialize_compare_proof_share(&r1)?;
+    ensure!(
+        share_a != share_b,
+        "the two parties emitted identical proof shares"
+    );
+    let proof = combine_compare_proof_shares(&r0, &r1)?;
+    verify_settle(&vk, &public, &proof).context("locally verifying the reconstructed proof")?;
+    let mut proof_bytes = Vec::new();
+    proof.serialize_compressed(&mut proof_bytes)?;
 
-    // The commitment hexes below are exactly what the chain sees on-chain
-    // (order/locked state) or in the settlement request (new/recv), so the
-    // Go test can rebuild the statement the way the writing does and check
-    // it against `public`.
+    // The commitment hexes are what the chain reads from its own order rows
+    // (`Order.LockedCommitment`), so the Go test can rebuild the statement
+    // the way the writing does and check it against `public`.
     let fixture = json!({
-        "price": public.price,
-        "a_is_seller": public.a_is_seller,
         "cmp": public.cmp,
-        "order_a_commitment_hex": fr_to_hex(&public.order_a),
-        "order_b_commitment_hex": fr_to_hex(&public.order_b),
-        "locked_a_hashes_hex": [fr_to_hex(&public.locked_a[0]), fr_to_hex(&public.locked_a[1])],
-        "locked_b_hashes_hex": [fr_to_hex(&public.locked_b[0]), fr_to_hex(&public.locked_b[1])],
-        "new_order_a_commitment_hex": fr_to_hex(&public.new_order_a),
-        "new_order_b_commitment_hex": fr_to_hex(&public.new_order_b),
-        "new_locked_a_commitment_hex": fr_to_hex(&public.new_locked_a),
-        "new_locked_b_commitment_hex": fr_to_hex(&public.new_locked_b),
-        "recv_a_commitment_hex": fr_to_hex(&public.recv_a),
-        "recv_b_commitment_hex": fr_to_hex(&public.recv_b),
-        "proof_hex": hex::encode(&p0),
+        "locked_a_hex": fr_to_hex(&public.locked_a),
+        "locked_b_hex": fr_to_hex(&public.locked_b),
+        "price_a": price_a,
+        "price_b": price_b,
+        "a_is_seller": a_is_seller,
+        "proof_hex": hex::encode(&proof_bytes),
+        "proof_share_a_hex": hex::encode(&share_a),
+        "proof_share_b_hex": hex::encode(&share_b),
         "public": serde_json::to_value(&public)?,
         "vk_path": vk_path.as_ref().map(|p| p.display().to_string()),
     });

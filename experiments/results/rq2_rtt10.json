@@ -1,0 +1,352 @@
+{
+  "baseline_single_prover": {
+    "prove_ms": [],
+    "verify_ms": []
+  },
+  "bench_process_peak_rss_bytes": 27226112,
+  "circuit_gates": 2048,
+  "comparison_share_size_bytes_compressed": 771,
+  "cozk2p_mock_inprocess": [],
+  "cozk2p_quic_2process": [
+    {
+      "per_party": [
+        {
+          "build_ms": 1201.876405,
+          "cmp": 1,
+          "compare_onchain_wait_ms": 0.278129,
+          "leg_exchange_ms": 0.0,
+          "open_ms": 10485.745613,
+          "peak_rss_bytes": 1807159296,
+          "proof_size_bytes_compressed": 771,
+          "protocol_version": "native-final-kzg-spdz-share-v1",
+          "prove_ms": 1215.996232,
+          "role": "trader-a",
+          "share_export_ms": 10485.745613,
+          "steps": [
+            [
+              "1 preamble fingerprint",
+              13.935959
+            ],
+            [
+              "2 share inputs + collateral binding",
+              1188.096947
+            ],
+            [
+              "3 three-way compare",
+              412.966045
+            ],
+            [
+              "4 signature ferry + exchange",
+              11.623056
+            ],
+            [
+              "5 collaborative prove + native share export",
+              12903.784953
+            ],
+            [
+              "6 on-chain compare anchor (host wait)",
+              0.359738
+            ],
+            [
+              "7 payout-note keys + pre-reveal WAL",
+              20.186508
+            ],
+            [
+              "8 smaller-side reveal",
+              0.134043
+            ],
+            [
+              "9 outputs + complete WAL",
+              0.274506
+            ]
+          ],
+          "total_ms": 14649.797748,
+          "verify_ms": 0.0
+        },
+        {
+          "build_ms": 1201.429051,
+          "cmp": 1,
+          "compare_onchain_wait_ms": 0.206261,
+          "leg_exchange_ms": 0.0,
+          "open_ms": 10545.14799,
+          "peak_rss_bytes": 1796980736,
+          "proof_size_bytes_compressed": 771,
+          "protocol_version": "native-final-kzg-spdz-share-v1",
+          "prove_ms": 1176.48518,
+          "role": "trader-b",
+          "share_export_ms": 10545.14799,
+          "steps": [
+            [
+              "1 preamble fingerprint",
+              0.34103900000000004
+            ],
+            [
+              "2 share inputs + collateral binding",
+              1187.424126
+            ],
+            [
+              "3 three-way compare",
+              425.117792
+            ],
+            [
+              "4 signature ferry + exchange",
+              0.379859
+            ],
+            [
+              "5 collaborative prove + native share export",
+              12923.232266
+            ],
+            [
+              "6 on-chain compare anchor (host wait)",
+              0.258199
+            ],
+            [
+              "7 payout-note keys + pre-reveal WAL",
+              0.488447
+            ],
+            [
+              "8 smaller-side reveal",
+              0.13600600000000002
+            ],
+            [
+              "9 outputs + complete WAL",
+              0.335051
+            ]
+          ],
+          "total_ms": 14644.131613,
+          "verify_ms": 0.0
+        }
+      ],
+      "total_ms": 14712.512587
+    },
+    {
+      "per_party": [
+        {
+          "build_ms": 1226.7772,
+          "cmp": 1,
+          "compare_onchain_wait_ms": 0.207009,
+          "leg_exchange_ms": 0.0,
+          "open_ms": 9352.385474,
+          "peak_rss_bytes": 1813184512,
+          "proof_size_bytes_compressed": 771,
+          "protocol_version": "native-final-kzg-spdz-share-v1",
+          "prove_ms": 1207.846555,
+          "role": "trader-a",
+          "share_export_ms": 9352.385474,
+          "steps": [
+            [
+              "1 preamble fingerprint",
+              13.058086
+            ],
+            [
+              "2 share inputs + collateral binding",
+              1208.50125
+            ],
+            [
+              "3 three-way compare",
+              413.121659
+            ],
+            [
+              "4 signature ferry + exchange",
+              11.817869
+            ],
+            [
+              "5 collaborative prove + native share export",
+              11787.131351
+            ],
+            [
+              "6 on-chain compare anchor (host wait)",
+              0.26936
+            ],
+            [
+              "7 payout-note keys + pre-reveal WAL",
+              12.202898
+            ],
+            [
+              "8 smaller-side reveal",
+              0.153749
+            ],
+            [
+              "9 outputs + complete WAL",
+              0.330664
+            ]
+          ],
+          "total_ms": 13546.761349,
+          "verify_ms": 0.0
+        },
+        {
+          "build_ms": 1226.356408,
+          "cmp": 1,
+          "compare_onchain_wait_ms": 0.27368,
+          "leg_exchange_ms": 0.0,
+          "open_ms": 9370.146559,
+          "peak_rss_bytes": 1786343424,
+          "proof_size_bytes_compressed": 771,
+          "protocol_version": "native-final-kzg-spdz-share-v1",
+          "prove_ms": 1182.839155,
+          "role": "trader-b",
+          "share_export_ms": 9370.146559,
+          "steps": [
+            [
+              "1 preamble fingerprint",
+              0.24939500000000003
+            ],
+            [
+              "2 share inputs + collateral binding",
+              1208.390221
+            ],
+            [
+              "3 three-way compare",
+              424.925875
+            ],
+            [
+              "4 signature ferry + exchange",
+              0.401542
+            ],
+            [
+              "5 collaborative prove + native share export",
+              11779.454584
+            ],
+            [
+              "6 on-chain compare anchor (host wait)",
+              0.357418
+            ],
+            [
+              "7 payout-note keys + pre-reveal WAL",
+              19.405567
+            ],
+            [
+              "8 smaller-side reveal",
+              0.177313
+            ],
+            [
+              "9 outputs + complete WAL",
+              0.264686
+            ]
+          ],
+          "total_ms": 13541.637843,
+          "verify_ms": 0.0
+        }
+      ],
+      "total_ms": 13610.793389999999
+    },
+    {
+      "per_party": [
+        {
+          "build_ms": 1209.935509,
+          "cmp": 1,
+          "compare_onchain_wait_ms": 0.283599,
+          "leg_exchange_ms": 0.0,
+          "open_ms": 10520.214792,
+          "peak_rss_bytes": 1786265600,
+          "proof_size_bytes_compressed": 771,
+          "protocol_version": "native-final-kzg-spdz-share-v1",
+          "prove_ms": 1252.82193,
+          "role": "trader-a",
+          "share_export_ms": 10520.214792,
+          "steps": [
+            [
+              "1 preamble fingerprint",
+              13.383714
+            ],
+            [
+              "2 share inputs + collateral binding",
+              1179.3119430000002
+            ],
+            [
+              "3 three-way compare",
+              410.50638
+            ],
+            [
+              "4 signature ferry + exchange",
+              12.466323
+            ],
+            [
+              "5 collaborative prove + native share export",
+              12983.215629
+            ],
+            [
+              "6 on-chain compare anchor (host wait)",
+              0.351896
+            ],
+            [
+              "7 payout-note keys + pre-reveal WAL",
+              12.371958
+            ],
+            [
+              "8 smaller-side reveal",
+              0.17623000000000005
+            ],
+            [
+              "9 outputs + complete WAL",
+              0.275942
+            ]
+          ],
+          "total_ms": 14722.701848,
+          "verify_ms": 0.0
+        },
+        {
+          "build_ms": 1210.101905,
+          "cmp": 1,
+          "compare_onchain_wait_ms": 0.216696,
+          "leg_exchange_ms": 0.0,
+          "open_ms": 10495.331863,
+          "peak_rss_bytes": 1794437120,
+          "proof_size_bytes_compressed": 771,
+          "protocol_version": "native-final-kzg-spdz-share-v1",
+          "prove_ms": 1286.018057,
+          "role": "trader-b",
+          "share_export_ms": 10495.331863,
+          "steps": [
+            [
+              "1 preamble fingerprint",
+              0.29544800000000004
+            ],
+            [
+              "2 share inputs + collateral binding",
+              1179.777284
+            ],
+            [
+              "3 three-way compare",
+              422.213911
+            ],
+            [
+              "4 signature ferry + exchange",
+              0.6278670000000001
+            ],
+            [
+              "5 collaborative prove + native share export",
+              12991.624834
+            ],
+            [
+              "6 on-chain compare anchor (host wait)",
+              0.249205
+            ],
+            [
+              "7 payout-note keys + pre-reveal WAL",
+              4.144511
+            ],
+            [
+              "8 smaller-side reveal",
+              0.178818
+            ],
+            [
+              "9 outputs + complete WAL",
+              0.332206
+            ]
+          ],
+          "total_ms": 14717.510611,
+          "verify_ms": 0.0
+        }
+      ],
+      "total_ms": 14791.646998999999
+    }
+  ],
+  "proof_size_bytes": {
+    "compressed": 769,
+    "uncompressed": 1185
+  },
+  "protocol_version": "native-final-kzg-spdz-share-v1",
+  "public_signals": 6,
+  "vk_size_bytes_compressed": 938
+}

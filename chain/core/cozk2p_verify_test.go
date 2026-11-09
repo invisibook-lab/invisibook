@@ -26,42 +26,82 @@ func loadCoZk2pVK(t *testing.T, fx cozk2pFixture) *PlonkVK {
 	return vk
 }
 
-func TestVerifyPlonkAcceptsCollaborativeSettle2pProof(t *testing.T) {
-	fx := loadCoZk2pFixture(t)
-	vk := loadCoZk2pVK(t, fx)
-	public := marshalPublic(t, rebuildCoZk2pPublic(fx))
-	if err := VerifyPlonkSettle2p(vk, fx.ProofHex, public); err != nil {
-		t.Fatalf("verify on a valid collaborative settle2p proof must succeed, got: %v", err)
+// rebuildComparePublic assembles the comparison statement from the fixture
+// the same way proof-share assembly does from a request + order rows.
+func rebuildComparePublic(fx cozk2pFixture) settle2pPublic {
+	return settle2pPublic{
+		Cmp:       fx.Cmp,
+		LockedA:   fx.LockedAHex,
+		LockedB:   fx.LockedBHex,
+		PriceA:    fx.PriceA,
+		PriceB:    fx.PriceB,
+		AIsSeller: fx.AIsSeller,
 	}
 }
 
-func TestVerifyPlonkRejectsTamperedSettle2pCmp(t *testing.T) {
+func TestVerifyPlonkAcceptsCollaborativeCompareProof(t *testing.T) {
 	fx := loadCoZk2pFixture(t)
 	vk := loadCoZk2pVK(t, fx)
-	tampered := rebuildCoZk2pPublic(fx)
+	public := marshalPublic(t, rebuildComparePublic(fx))
+	if err := VerifyPlonkSettle2p(vk, fx.ProofHex, public); err != nil {
+		t.Fatalf("verify on a valid collaborative compare proof must succeed, got: %v", err)
+	}
+}
+
+func TestVerifyPlonkAcceptsNativeCollaborativeCompareShares(t *testing.T) {
+	fx := loadCoZk2pFixture(t)
+	if fx.ShareAHex == "" || fx.ShareBHex == "" {
+		t.Skip("fixture predates native proof shares; regenerate it")
+	}
+	vk := loadCoZk2pVK(t, fx)
+	public := marshalPublic(t, rebuildComparePublic(fx))
+	if err := VerifyPlonkSettle2pShares(vk, fx.ShareAHex, fx.ShareBHex, public); err != nil {
+		t.Fatalf("verify on valid native collaborative shares must succeed, got: %v", err)
+	}
+}
+
+func TestVerifyPlonkRejectsTamperedNativeCollaborativeCompareShare(t *testing.T) {
+	fx := loadCoZk2pFixture(t)
+	if fx.ShareAHex == "" || fx.ShareBHex == "" {
+		t.Skip("fixture predates native proof shares; regenerate it")
+	}
+	vk := loadCoZk2pVK(t, fx)
+	public := marshalPublic(t, rebuildComparePublic(fx))
+	tamperedB := fx.ShareBHex[:len(fx.ShareBHex)-1] + "0"
+	if fx.ShareBHex[len(fx.ShareBHex)-1] == '0' {
+		tamperedB = fx.ShareBHex[:len(fx.ShareBHex)-1] + "1"
+	}
+	if err := VerifyPlonkSettle2pShares(vk, fx.ShareAHex, tamperedB, public); err == nil {
+		t.Fatal("verify must reject a tampered native collaborative share")
+	}
+}
+
+func TestVerifyPlonkRejectsTamperedCompareCmp(t *testing.T) {
+	fx := loadCoZk2pFixture(t)
+	vk := loadCoZk2pVK(t, fx)
+	tampered := rebuildComparePublic(fx)
 	// Flipping the public comparison result must break verification — a
-	// submitter cannot lie about which order fully filled.
+	// submitter cannot lie about which order is smaller.
 	tampered.Cmp = -tampered.Cmp
 	if err := VerifyPlonkSettle2p(vk, fx.ProofHex, marshalPublic(t, tampered)); err == nil {
 		t.Fatal("verify must reject when the cmp public signal is altered")
 	}
 }
 
-func TestVerifyPlonkRejectsTamperedSettle2pRemainder(t *testing.T) {
+func TestVerifyPlonkRejectsTamperedCompareCommitment(t *testing.T) {
 	fx := loadCoZk2pFixture(t)
 	vk := loadCoZk2pVK(t, fx)
-	tampered := rebuildCoZk2pPublic(fx)
-	// new_order_a is the surviving order's remainder commitment.
-	tampered.NewOrderA = bumpLastDigit(tampered.NewOrderA)
+	tampered := rebuildComparePublic(fx)
+	tampered.LockedA = bumpLastDigit(tampered.LockedA)
 	if err := VerifyPlonkSettle2p(vk, fx.ProofHex, marshalPublic(t, tampered)); err == nil {
-		t.Fatal("verify must reject when the remainder commitment is altered")
+		t.Fatal("verify must reject when an order commitment is altered")
 	}
 }
 
-func TestVerifyPlonkRejectsTruncatedSettle2pProof(t *testing.T) {
+func TestVerifyPlonkRejectsTruncatedCompareProof(t *testing.T) {
 	fx := loadCoZk2pFixture(t)
 	vk := loadCoZk2pVK(t, fx)
-	public := marshalPublic(t, rebuildCoZk2pPublic(fx))
+	public := marshalPublic(t, rebuildComparePublic(fx))
 	if err := VerifyPlonkSettle2p(vk, fx.ProofHex[:len(fx.ProofHex)/2], public); err == nil {
 		t.Fatal("verify must reject a truncated proof")
 	}

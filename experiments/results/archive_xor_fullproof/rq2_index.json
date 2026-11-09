@@ -1,0 +1,7 @@
+{"rate_mbit": 1000, "runs": 3, "points": [
+  {"rtt_ms": 0, "one_way_delay_ms": 0.0, "status": "ok", "bench": "rq2_rtt0.json", "traffic": "rq2_rtt0_traffic.json"},
+  {"rtt_ms": 10, "one_way_delay_ms": 5.0, "status": "ok", "bench": "rq2_rtt10.json", "traffic": "rq2_rtt10_traffic.json"},
+  {"rtt_ms": 30, "one_way_delay_ms": 15.0, "status": "ok", "bench": "rq2_rtt30.json", "traffic": "rq2_rtt30_traffic.json"},
+  {"rtt_ms": 60, "one_way_delay_ms": 30.0, "status": "ok", "bench": "rq2_rtt60.json", "traffic": "rq2_rtt60_traffic.json"},
+  {"rtt_ms": 100, "one_way_delay_ms": 50.0, "status": "ok", "bench": "rq2_rtt100.json", "traffic": "rq2_rtt100_traffic.json"}
+]}

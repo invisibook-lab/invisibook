@@ -6,7 +6,7 @@
 //! ceremony coordination.
 
 use std::{
-    fs::create_dir_all,
+    fs::{create_dir_all, remove_file, rename},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -64,7 +64,7 @@ pub fn dev_setup_snarkjs(circuit_name: &str) -> Result<DevSetup> {
         });
     }
 
-    let ptau = ensure_dev_ptau(&circuit_dir)?;
+    let ptau = ensure_dev_ptau(&circuit_dir, DEV_PTAU_POWER)?;
 
     // groth16 setup: r1cs + ptau → zkey
     snarkjs(&[
@@ -95,52 +95,66 @@ pub fn dev_setup_snarkjs(circuit_name: &str) -> Result<DevSetup> {
     })
 }
 
-/// Generate a Powers of Tau file with 2^13 = 8192 constraint capacity (the
-/// largest wallet circuit is ~4200 constraints) and cache it under
-/// `lib/target/circuit-build/_ptau/`. Reused across all dev setups.
-fn ensure_dev_ptau(circuit_dir: &Path) -> Result<PathBuf> {
+/// The largest current O2 circuit is dual-asset send_order at 31,799
+/// constraints, just under the 2^15 ceremony capacity.
+const DEV_PTAU_POWER: &str = "15";
+
+/// Generate a Powers of Tau file with `2^power` constraint capacity and
+/// cache it under `lib/target/circuit-build/_ptau/`.
+fn ensure_dev_ptau(circuit_dir: &Path, power: &str) -> Result<PathBuf> {
     let ptau_dir = circuit_dir
         .parent()
         .context("circuit dir has no parent")?
         .join("_ptau");
     create_dir_all(&ptau_dir)?;
-    let final_ptau = ptau_dir.join("pot13_final.ptau");
+    let final_ptau = ptau_dir.join(format!("pot{power}_final.ptau"));
     if final_ptau.exists() {
         return Ok(final_ptau);
     }
 
-    // 1) new — empty ceremony at curve bn128, log2(constraints)=13
-    let p0 = ptau_dir.join("pot13_0000.ptau");
-    snarkjs(&[
-        "powersoftau",
-        "new",
-        "bn128",
-        "13",
-        p0.to_str().unwrap(),
-        "-v",
-    ])?;
+    // 1) new — empty ceremony at curve bn128
+    let p0 = ptau_dir.join(format!("pot{power}_0000.ptau"));
+    if !p0.exists() {
+        snarkjs(&[
+            "powersoftau",
+            "new",
+            "bn128",
+            power,
+            p0.to_str().unwrap(),
+            "-v",
+        ])?;
+    }
 
     // 2) contribute — single (insecure) entropy injection
-    let p1 = ptau_dir.join("pot13_0001.ptau");
-    snarkjs(&[
-        "powersoftau",
-        "contribute",
-        p0.to_str().unwrap(),
-        p1.to_str().unwrap(),
-        "--name=dev",
-        "-v",
-        "-e=invisibook-dev-only",
-    ])?;
+    let p1 = ptau_dir.join(format!("pot{power}_0001.ptau"));
+    if !p1.exists() {
+        snarkjs(&[
+            "powersoftau",
+            "contribute",
+            p0.to_str().unwrap(),
+            p1.to_str().unwrap(),
+            "--name=dev",
+            "-v",
+            "-e=invisibook-dev-only",
+        ])?;
+    }
 
-    // 3) prepare phase 2 — must run before any circuit-specific groth16 setup
+    // 3) prepare phase 2 — write to a temporary path and rename only after
+    // snarkjs exits successfully. An interrupted test must never leave a
+    // truncated file that a later run mistakes for a valid cache hit.
+    let temporary = ptau_dir.join(format!("pot{power}_final.ptau.tmp"));
+    if temporary.exists() {
+        remove_file(&temporary)?;
+    }
     snarkjs(&[
         "powersoftau",
         "prepare",
         "phase2",
         p1.to_str().unwrap(),
-        final_ptau.to_str().unwrap(),
+        temporary.to_str().unwrap(),
         "-v",
     ])?;
+    rename(&temporary, &final_ptau)?;
 
     Ok(final_ptau)
 }
@@ -171,8 +185,8 @@ fn snarkjs(args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn deposit_dev_setup_produces_zkey_and_vk() {
-        let setup = super::dev_setup_snarkjs("deposit").expect("snarkjs setup must succeed");
+    fn note_deposit_dev_setup_produces_zkey_and_vk() {
+        let setup = super::dev_setup_snarkjs("note_deposit").expect("snarkjs setup must succeed");
         assert!(setup.zkey.exists(), "zkey should exist at {:?}", setup.zkey);
         assert!(
             setup.vk_json.exists(),
@@ -185,8 +199,9 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&setup.vk_json).unwrap()).unwrap();
         assert_eq!(vk["protocol"], "groth16");
         assert_eq!(vk["curve"], "bn128");
-        // deposit.circom has 3 public signals (bridge_commitment + 2 output_hashes)
-        assert_eq!(vk["nPublic"].as_u64(), Some(3));
+        // note_deposit.circom has 4 public signals:
+        // [bridge_commitment, asset_id, cm_out, bind].
+        assert_eq!(vk["nPublic"].as_u64(), Some(4));
         assert!(vk["IC"].is_array(), "IC array required for verification");
     }
 }

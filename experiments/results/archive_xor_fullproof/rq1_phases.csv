@@ -1,0 +1,4 @@
+configuration,build_ms,prove_ms,open_ms,verify_ms,proof_core_ms,session_total_ms
+single prover,0.0,418.8,0.0,6.2,425.1,425.1
+in-process two-party,14.9,1384.9,2268.7,8.1,3941.7,3962.3
+two-process QUIC,73.6,1300.5,3160.5,6.5,4865.8,5150.1

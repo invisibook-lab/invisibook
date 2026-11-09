@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"time"
 
 	"github.com/iden3/go-rapidsnark/types"
 	"github.com/iden3/go-rapidsnark/verifier"
@@ -18,20 +19,6 @@ import (
 // `proof.json` plus a `public.json` array of decimal-string public signals.
 // chain side calls go-rapidsnark to verify; this file is the only place that
 // knows the snarkjs JSON wire format so business code stays clean.
-
-// PoseidonZeroCommitment is `Poseidon(2)([0, 0])` for the BN254 scalar field
-// using circom's parameterization. Wallet circuits with M=2 inputs/outputs
-// pad an unused slot with `(amount=0, random=0)`, which the chain rebuilds as
-// this constant when assembling the verifier's public-input vector.
-//
-// Source of truth: `lib/zk/examples/show_zero_commit.rs` — re-run that example
-// to regenerate this constant if the Poseidon parameters ever change.
-const PoseidonZeroCommitment = "14744269619966411208579211824598458697587494354926760081771325075741142829156"
-
-// PoseidonZeroCommitmentHex is the same value rendered as a 64-char lowercase
-// hex string (the on-wire format for `Cash.Amount`). Useful when chain code
-// needs to detect "this slot is the zero pad" before doing further work.
-const PoseidonZeroCommitmentHex = "2098f5fb9e239eab3ceac3f27b81e481dc3124d55ffed523a839ee8446b64864"
 
 // CircuitVK bundles a verifier's verification-key bytes (snarkjs JSON format)
 // with the circuit's name for error reporting. Chain components hold one of
@@ -97,11 +84,15 @@ func VerifyGroth16(vk *CircuitVK, proofJSON string, publicSignals []string) erro
 	}
 
 	zk := types.ZKProof{Proof: &proof, PubSignals: publicSignals}
+	// The verification wall-clock goes into the log line: the experiment
+	// harness (experiments/rq3_end_to_end.sh) reads the on-chain
+	// verification cost from these lines.
+	start := time.Now()
 	if err := verifier.VerifyGroth16(zk, vk.VKBytes); err != nil {
 		log.Printf("[zk] %s REJECTED: %v", vk.Name, err)
 		return fmt.Errorf("groth16 verification failed for %s: %w", vk.Name, err)
 	}
-	log.Printf("[zk] %s ok", vk.Name)
+	log.Printf("[zk] %s ok in %.3f ms", vk.Name, float64(time.Since(start).Microseconds())/1e3)
 	return nil
 }
 

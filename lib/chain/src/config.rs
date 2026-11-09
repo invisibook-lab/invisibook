@@ -18,7 +18,7 @@ pub struct ClientConfig {
     pub chain: ChainConfig,
     #[serde(default)]
     pub keypair: KeypairConfig,
-    /// Local data directory for mnemonic, cash.json, etc.
+    /// Local data directory for mnemonic, notes.json, orders.json, etc.
     /// Defaults to `~/.invisibook`.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
@@ -93,7 +93,7 @@ pub struct CliArgs {
     #[arg(long)]
     pub mnemonic: Option<String>,
 
-    /// Local data directory (mnemonic, cash.json, etc.)
+    /// Local data directory (mnemonic, notes.json, etc.)
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
 }
@@ -146,9 +146,15 @@ impl ClientConfig {
         self.data_dir.join("mnemonic")
     }
 
-    /// Path to the cash store file inside the data directory.
-    pub fn cash_path(&self) -> PathBuf {
-        self.data_dir.join("cash.json")
+    /// Path to the note ledger inside the data directory (this file IS the
+    /// wallet's money — see `note_store`).
+    pub fn notes_path(&self) -> PathBuf {
+        self.data_dir.join("notes.json")
+    }
+
+    /// Path to the order-opening ledger inside the data directory.
+    pub fn orders_path(&self) -> PathBuf {
+        self.data_dir.join("orders.json")
     }
 
     /// Resolves the 2-party settlement helper binary path, in order:

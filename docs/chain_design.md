@@ -1,295 +1,366 @@
 # Chain Design
 
+> **Status:** Current (2026-08-19, crossing prices + native fees +
+> identity-bound proof submissions). For every place
+> this design differs from the paper, see
+> [paper_deviations.md](paper_deviations.md).
+
 ## 1. Overview
 
 The `chain/` component is Invisibook's L2 chain. It is built on the
-[yu](https://github.com/yu-org/yu) framework and runs as a standalone Go
-binary. Its goal is to host a **privacy-preserving order book** whose on-chain
-state reveals *who* is trading *which* pair at *what* price, but never the
-plaintext *amount*: every amount stored on-chain is a ciphertext committed at
-creation time and can only be consumed by supplying a ZK proof that the
-ciphertext-preserving arithmetic (deposit = mint, inputs = outputs,
-balance ≥ withdraw) is correct.
+[yu](https://github.com/yu-org/yu) framework and runs as one Go binary.
+It hosts a **privacy-preserving order book**: the chain publishes each
+order's trading pair, side, limit price, and fee in plaintext, and never
+publishes a quantity or a balance. Value exists only in a shielded note
+pool; an order carries its collateral as one Poseidon commitment, and
+its hidden quantity is implied by that commitment; every state
+transition that touches hidden value must come with a Groth16 or PLONK
+proof that the chain verifies.
 
-The chain exposes its functionality through two yu *tripods* — `orderbook`
-and `account` — plus a pluggable consensus tripod. A tripod is yu's unit of
-business logic: it bundles persistent state, writing entry points (txs), and
-reading entry points (read-only RPCs). Clients interact with the chain via
-the standard yu endpoints:
+The chain exposes two yu *tripods* — `orderbook` and `account` — plus a
+pluggable consensus tripod. A tripod bundles persistent state, writings
+(transactions), and readings (read-only RPCs). Standard yu endpoints:
 
 - **HTTP** `localhost:7999` — RPC reading / writing
 - **WebSocket** `localhost:8999` — subscriptions
 - **P2P** `localhost:8887` — inter-node gossip
 
-Two TOML files under [chain/cfg/](../chain/cfg/) drive startup:
+Startup reads two TOML files under [chain/cfg/](../chain/cfg/):
 [`chain.toml`](../chain/cfg/chain.toml) configures the yu kernel (ports,
-consensus, chain_id); [`core.toml`](../chain/cfg/core.toml) configures the
-tripods (DB paths, genesis accounts).
+consensus, chain id); [`core.toml`](../chain/cfg/core.toml) configures
+the tripods (DB paths, verifying keys, genesis pool notes).
 
 Design invariants:
 
-1. **Amount privacy** — `Cash.Amount` is always a `CipherText`. The chain
-   never reads or compares plaintext amounts.
-2. **UTXO-style cash** — balances are not scalars but sets of `Cash` outputs,
-   each tracked by a lifecycle (`Active → Locked → Spent`). Spending always
-   consumes whole cash records; residual value is returned as a change output.
-3. **Deterministic order IDs** — an order ID is `SHA-256(input_cash_ids)`
-   and is checked on `SendOrder`, so a client cannot forge IDs that collide
-   with unrelated orders.
-4. **Matching is authoritative on-chain** — matching happens inside
-   `SendOrder`; settlement is a *separate* transaction that requires a ZK
-   proof of value conservation.
+1. **No plaintext value.** An order carries its collateral as ONE
+   Poseidon commitment (`Order.LockedCommitment`); the hidden quantity
+   is implied by the side-dependent collateral equation
+   `needed = q·price + side·(q − q·price)`
+   ([paper_deviations.md](paper_deviations.md) D17). Balances are pool
+   notes: only commitments and nullifiers appear on chain.
+2. **Full collateral at admission.** `SendOrder` verifies the
+   `send_order` proof, which shows the spent notes cover
+   collateral-asset conservation and native-`invis` fee conservation
+   independently. The book never holds an
+   uncollateralized order.
+3. **Deterministic order ids.** `order_id = SHA-256(coll_nf_0 ‖ coll_nf_1
+   ‖ fee_nf_0 ‖ fee_nf_1)`; the chain recomputes and rejects mismatches.
+4. **Matching is public, on-chain, and crossing-price.** `matchOrder`
+   applies market flag → best price → block height → fee → intra-block
+   index → id, persists one common execution price, and never pairs two
+   market orders because neither supplies an execution price.
+   Matching is strictly pairwise. Every match/rematch refreshes a per-round
+   `MatchHeight`; the original `BlockHeight` stays unchanged for time
+   priority. All quantity work is deferred to settlement.
+5. **Anchored disclosure.** Each owner uploads its identity-, round-, and
+   deadline-bound comparison proof payload: the same canonical
+   Fiat–Shamir-common template
+   plus its own native SPDZ value shares of the two final KZG G1 points. The
+   smaller opening is released only after Rust checks template equality,
+   group-adds those two point-share pairs, constructs the standard proof, and
+   verifies π_cmp on chain. Comparison shares must arrive by
+   `MatchHeight + 10`. An incomplete comparison round releases both orders
+   without punishment.
+6. **Independent proof submission, atomic settlement.** Each owner uploads
+   only its own settlement proof. Comparison verification itself creates the
+   absolute settlement deadline `verification_height + 10`, before payout
+   keys or quantities are exchanged. The second leg triggers one atomic
+   payout/update. At expiry, only a non-equal round with a lone valid
+   large-side leg is punitive: the proof requires the smaller opening, so the
+   missing small owner is frozen. Zero-leg, only-small, and incomplete
+   `cmp = 0` rounds release both without blame. This is conservative but
+   asymmetric attribution.
 
 ## 2. Main Components
 
 ```
-┌────────────────────────────────────── chain/ ──────────────────────────────────────┐
-│                                                                                    │
-│   cfg/chain.toml  cfg/core.toml                                                    │
-│         │               │                                                          │
-│         ▼               ▼                                                          │
-│   ┌─────────────────────────────┐                                                  │
-│   │          main.go            │  InitKernel → WithTripods(...) → Startup        │
-│   └──────────────┬──────────────┘                                                  │
-│                  │                                                                 │
-│         ┌────────┴────────────────────────────────────────────┐                    │
-│         ▼                       ▼                             ▼                    │
-│   ┌───────────┐        ┌────────────────┐            ┌──────────────────┐          │
-│   │consensus/ │        │ core/orderbook │            │  core/account    │          │
-│   │ PoA       │        │  tripod        │◀──────────▶│  tripod          │          │
-│   │ (yu poa)  │        │                │   uses     │                  │          │
-│   │ (VDF /    │        │ SendOrder      │            │ Deposit          │          │
-│   │  PoBuy    │        │ SettleOrder    │            │ Withdraw         │          │
-│   │  stubs)   │        │ QueryOrders    │            │ GetAccount       │          │
-│   └───────────┘        │                │            │                  │          │
-│                        │ matchOrder     │            │ LockCash         │          │
-│                        │ InsertOrder    │            │ SpendCash        │          │
-│                        │ UpdateStatus   │            │ CreateCash       │          │
-│                        └──────┬─────────┘            │ FindActiveCash   │          │
-│                               │ GORM                 └────────┬─────────┘          │
-│                               ▼                               ▼ GORM               │
-│                        ┌─────────────┐                  ┌─────────────┐            │
-│                        │ orders.db   │                  │ accounts.db │            │
-│                        │ (SQLite)    │                  │ (SQLite)    │            │
-│                        └─────────────┘                  └─────────────┘            │
-└────────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────── chain/ ────────────────────────────────┐
+│  cfg/chain.toml   cfg/core.toml                                        │
+│        │                │                                              │
+│        ▼                ▼                                              │
+│  ┌───────────────────────────┐                                         │
+│  │         main.go           │ InitKernel → WithTripods(...) → Startup │
+│  └─────────────┬─────────────┘                                         │
+│                │                                                       │
+│      ┌─────────┴──────────────────────────────┐                        │
+│      ▼                  ▼                     ▼                        │
+│ ┌──────────┐  ┌──────────────────┐  ┌────────────────────┐             │
+│ │consensus/│  │ core/orderbook   │  │ core/account       │             │
+│ │ PoA      │  │ SendOrder        │  │ (shielded pool)    │             │
+│ │ (VDF /   │  │ SubmitCompare*   │  │ NoteDeposit        │             │
+│ │  PoBuy   │  │ SettleSmall/Large│  │ NoteWithdraw       │             │
+│ │  stubs)  │  │ SubmitSettleLeg │  │ GetNotes/PoolInfo  │             │
+│ └──────────┘  │ ClaimFees        │  │ GetNullifiers      │             │
+│               │ Share/Leg expiry  │ │ GetNoteByCm        │             │
+│               │ RegisterSettleAddr│ │                    │             │
+│               │ QueryOrders/Fees │  │ ApplyPoolMutation  │             │
+│               └──────┬───────────┘  └─────────┬──────────┘             │
+│                      │ GORM                   │ GORM                   │
+│                      ▼                        ▼                        │
+│               ┌────────────┐          ┌──────────────┐                 │
+│               │ orders.db  │          │ accounts.db  │                 │
+│               └────────────┘          └──────────────┘                 │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.1 `main.go`
+### 2.1 `core/account` — the shielded pool
 
-Loads both config files, builds the PoA consensus tripod and the two core
-tripods, then registers them with the yu kernel. See
-[chain/main.go](../chain/main.go).
+The account tripod owns the note pool: an append-only Poseidon Merkle
+tree (depth 20) of note commitments, a nullifier set, and the anchor
+history. All value on the chain lives here. See
+[pool.go](../chain/core/pool.go), [pool_scheme.go](../chain/core/pool_scheme.go),
+[account_pool.go](../chain/core/account_pool.go).
 
-### 2.2 `core/orderbook` tripod — see [chain/core/orderbook.go](../chain/core/orderbook.go)
+- `cm = P2(P2(P2(P2(TAG_CM, npk), assetID), v), r)` — the note
+  commitment chain (spec pinned by `spec/golden.json` across Go, Rust,
+  and circom).
+- `nf = P2(P2(TAG_NF, nk), rho)` with `rho` bound to the leaf index —
+  one note, one nullifier, unlinkable to the commitment.
+- Every mutation goes through `ApplyPoolMutation` (spend nullifiers +
+  append commitments + record the new anchor, atomically).
+- Spends may reference **any** historical anchor.
 
-The order book owns order state and matching. It declares an `Account`
-dependency via yu's tripod tag (`Account *Account `tripod:"account"``) and
-calls it for cash lifecycle operations.
+**Writings:** `NoteDeposit` (bridge in, gated by an operator signature
+until real bridge proofs land), `NoteWithdraw` (spend 2 slots, bridge
+out, mint change).
+**Readings:** `GetNotes`, `GetPoolInfo`, `GetNullifiers`, `GetNoteByCm`.
+**InitChain:** seeds `[[account.genesis_note]]` leaves idempotently
+(dev/test funding; regenerate with
+`cargo run -p invisibook-lib --example dump_dev_notes`).
 
-**Writings**
+### 2.2 `core/orderbook` — orders, matching, settlement
 
-- `SendOrder` — accepts a `SendOrderRequest`, verifies `id == SHA-256(input_cash_ids)`,
-  checks each input cash (exists / `Active` / owner / correct token for
-  Buy-vs-Sell side), locks the cash against the order ID, persists the order
-  as `Pending`, then calls `matchOrder` which flips compatible orders to
-  `Matched` and writes the counter-party link.
-- `SettleOrder` — accepts an `order_ids` pair plus a list of `CashOutput`s
-  and a ZK proof. It verifies the two orders are actually matched with each
-  other, spends the locked input cash of both orders under a single
-  `settleTxID`, mints the output cash records, and flips both orders to
-  `Done`. *The ZK proof verification is currently a TODO*; the intended
-  semantics is that the proof shows `sum(inputs) == sum(outputs)` in
-  ciphertext space.
+**`SendOrder`** ([orderbook.go](../chain/core/orderbook.go)) — spends
+two collateral slots plus two native-fee slots (anchor known, nullifiers
+unspent), verifies the 14-public `send_order` proof, checks the owner's
+ed25519 signature over the whole request, mints both change commitments,
+and accrues the plaintext native fee to the
+block producer, stores the order (its single `LockedCommitment`), and
+runs `matchOrder`.
 
-**Readings**
+**Matching** — crossing predicate, then market flag, best price, block
+height, fee, intra-block index, and id. The resting limit price is the
+execution price; if the resting order is market, the incoming limit is.
+A
+match links exactly two orders and sets both to `Matched`. Matched pairs
+are locked (no cancel path).
 
-- `QueryOrders` — filtered/paginated read; all fields of `QueryOrdersRequest`
-  are optional pointers.
+**`SubmitCompareCoZk2pShare`**
+([orderbook_compare_share.go](../chain/core/orderbook_compare_share.go)) —
+accepts exactly one share from each canonical order owner. Each signature
+binds chain id, pair, owner, match round, `cmp`, the chain-derived absolute
+deadline, and share digest under `invisibook-cozk2p-proof-share-v3`. The
+deadline is exactly this round's `MatchHeight + 10`, not an order's original
+`BlockHeight` and not a first-uploader-selected window. Each versioned payload repeats
+the same canonical template for components already public in the
+Fiat–Shamir transcript and carries that party's native value share for only
+`opening_proof` and `shifted_opening_proof`. The SPDZ MAC shares are not
+uploaded. On the second submission, the Rust bridge requires template
+equality (common components are not re-shared or added), group-adds the two
+pairs of final G1 shares, constructs the standard proof, and verifies
+collaborative PLONK π_cmp (6 publics:
+`cmp`, the two collateral commitments, both own public prices,
+`a_is_seller`; verifier
+linked via cgo behind the `cozk2p` build tag), stores `cmp`, and moves
+both orders to `Settling`. In the same transaction it creates the
+settlement-leg row with absolute deadline `verification_height + 10`, before
+the parties exchange payout-note keys or reveal a quantity.
+`ExpireCompareCoZk2pShares` releases both sides
+without a freeze because no smaller quantity opening was disclosed.
+The Groth16 twin remains as an internal fixture/test helper but is not a
+registered writing; production comparison accepts only owner-bound share
+submissions.
 
-### 2.3 `core/account` tripod — see [chain/core/account.go](../chain/core/account.go)
+**`SubmitSettleLeg` / `FinalizeSettleLegs`** — the owner submission writing
+accepts only the submitting order owner's leg and verifies its outer identity/round
+signature, inner owner signature, and `settle_small` (π_A) or
+`settle_large` (π_B) proof. Its submission neither starts nor extends a
+deadline: the absolute window was created when comparison verification
+succeeded. Public inputs are
+rebuilt from the order rows (the single `LockedCommitment`,
+own and execution prices, side, pay asset, payout/refund outputs, bind;
+π_B additionally opens the
+counterparty's `LockedCommitment`). The current payout opening
+`(npk_ctr, r_note)` is private and is not bound to an owner-signed on-chain
+pre-reveal key commitment. Thus a malicious payer can redirect its output
+while satisfying the circuit; until the key choice is owner-signed, anchored,
+and added as a public circuit binding, this path assumes compliant clients.
+The pipeline is journaled for crash consistency across the two
+databases once both verified owner legs are present: a settlement-journal row (orders.db) records the intent, the
+payout mint is idempotent per settlement id (accounts.db, one
+transaction with a settlement-seen row), and the order-side transitions
+commit in one orders.db transaction with the journal — a crash between
+the databases is completed exactly once by a retry or by the boot-time
+recovery (`recoverPendingSettlements`). If both legs landed but the inline
+executor returned before completion, the
+permissionless `FinalizeSettleLegs` writing reuses only the stored verified
+legs and resumes the same idempotent journal. Its caller cannot replace any
+proof, output, or signature.
+The fully filled side closes;
+the larger side relists **in place**: same order id, `LockedCommitment`
+swapped to the residual collateral commitment, match link cleared,
+status back to `Pending`, block height (time priority) retained,
+immediate re-match attempted. At the comparison-created deadline, zero legs
+release both owners without blame. If `cmp != 0` and only the large-side leg
+exists, `ExpireSettleLegs` releases its owner and freezes the missing small
+owner: the valid large proof requires knowledge of the smaller opening. If
+only the small-side leg exists, both are released because that proof can be
+generated without delivering the opening. Every incomplete `cmp = 0` round
+also releases both. This is conservative but asymmetric; symmetric
+Byzantine attribution requires verifiable encrypted reveal or an equivalent
+chain-checkable artifact. A receiver-withholdable signed receipt does not
+solve fair exchange. A planned `ChallengeReveal` / `AnswerReveal` writing
+pair makes the disclosure chain-checkable and closes this asymmetry, but it
+is **TODO, design only**; see
+[settlement_protocol.md](settlement_protocol.md) §2.4.
 
-The account tripod owns the `Cash` UTXO set. It offers three public entry
-points plus internal helpers (`LockCash`, `SpendCash`, `CreateCash`,
-`FindActiveCash`) used by the order-book tripod.
+**`ClaimFees`** ([fees.go](../chain/core/fees.go)) — a block producer
+mints its accrued plaintext fees as a pool note with a `claim_fees`
+proof.
 
-**Writings**
+**`RegisterSettleAddr` / `QuerySettleAddr`** — owner-signed QUIC address,
+match round, and X25519 key rendezvous. Addresses remain public (dev only),
+while the smaller opening is ChaCha20-Poly1305 encrypted end-to-end.
 
-- `Deposit` — *TODO: verifies a bridge proof* that the user locked assets
-  in the Invisibook bridge contract on some other chain; on success mints a
-  new `Active` cash record.
-- `Withdraw` — *TODO: verifies a range proof* that `sum(inputs) >= amount`
-  and that the optional change commitment is correct; spends the inputs and
-  mints change if supplied.
+**Readings:** `QueryOrders` (filtered, paginated), `QueryFees`,
+`QueryCompareCoZk2pShares`, and `QuerySettleLegs` (owner presence and
+chain-assigned deadlines).
 
-**Reading**
+### 2.3 Proof verification
 
-- `GetAccount` — returns every `Active` cash for a given `(address, token)`.
-  No aggregate balance is computed because amounts are ciphertext.
+[zkverify.go](../chain/core/zkverify.go) wraps `go-rapidsnark` for the
+Groth16 circuits; [plonkverify.go](../chain/core/plonkverify.go) calls
+the cozk2p Rust staticlib over cgo for π_cmp. Go treats the two native
+payloads as opaque canonical bytes; Rust validates their version/party tags,
+matches the common template, reconstructs the final two KZG points with G1
+addition, and verifies the resulting standard proof. Every VK path comes from
+`core.toml`. The posture is FAIL-CLOSED: `require_proofs` defaults to
+true, so a missing VK path refuses to boot; dev/test configs must opt
+out explicitly with `require_proofs = false`. A missing or malformed
+core.toml is fatal (no default fallback), and a binary built without
+the cozk2p verifier refuses to boot on a config that sets
+`settle_cozk2p_vk_path`.
 
-**InitChain** — seeds `cfg.GenesisAccounts` at block 0 (currently pre-funds
-`alice` and `bob` with ETH and USDT, see
-[chain/cfg/core.toml](../chain/cfg/core.toml)).
+### 2.4 Consensus — [chain/consensus/](../chain/consensus/)
 
-### 2.4 Shared domain types — [chain/core/order.go](../chain/core/order.go), [chain/core/cash.go](../chain/core/cash.go), [chain/core/udt.go](../chain/core/udt.go)
+Single-node PoA for development. `proof_of_buying.go` and `vdf.go` are
+stubs for later work (front-running resistance in matching).
 
-- `OrderID = string` (sha256 hex)
-- `TradeType` = `Buy (0) | Sell (1)`
-- `OrderStat` = `Pending | Matched | Done | Cancelled | Frozen`
-- `CashStatus` = `Active | Locked | Spent`
-- `TokenID = string`, with `NativeToken = "invis"`
-- `CipherText = string` — opaque hex blob produced by the client (poseidon
-  on desktop / sha256 on Android, see `lib/chain/src/orderbook.rs::encrypt_amount`).
-- The shared `Validator` is a `go-playground/validator` instance.
+## 3. Trade Lifecycle
 
-### 2.5 Consensus — [chain/consensus/](../chain/consensus/)
-
-Currently the chain runs under yu's single-node PoA for development
-(`poa.SingleNodeCfg()`). Two future tripods are stubbed:
-
-- [`proof_of_buying.go`](../chain/consensus/proof_of_buying.go) — a custom
-  consensus hook keyed off order-book activity (stub).
-- [`vdf.go`](../chain/consensus/vdf.go) — verifiable-delay-function step
-  (stub, used to resist front-running in the matching phase).
-
-Swapping from PoA to PoBuy is a one-line change in `main.go`.
-
-## 3. Business-Scenario Walkthroughs
-
-### 3.1 First deposit → place order → match → settle
-
-Assume `alice` wants to buy 10 ETH paying in USDT at price 3500.
+Alice sells 2 ETH at price 3; Bob buys 1 ETH at price 3 (the
+`settle_e2e` scenario).
 
 ```
-Client (lib/chain)                       chain (orderbook + account)
-───────────────────────                  ──────────────────────────────
-encrypt_amount(10)   ──Deposit(USDT)──▶  Account.Deposit
-                                          └ verify bridge proof (TODO)
-                                          └ Cash{id=c1, owner=alice,
-                                                  token=USDT, amount=CT,
-                                                  status=Active}
+wallet (lib + app)                         chain
+──────────────────                         ─────
+prove send_order        ──SendOrder──────▶ verify sig + proof, spend nfs,
+(spend notes,                              mint change note, store order,
+ locked_commitment)                        match → both orders Matched
 
-compute_order_id([c1])
-encrypt_amount(10)   ──SendOrder(...)──▶ OrderBook.SendOrder
-                                          ├ verify id == sha256([c1])
-                                          ├ Account.LockCash([c1], oid)
-                                          ├ InsertOrder(status=Pending)
-                                          └ matchOrder
-                                            └ finds bob's Sell order o2
-                                              at price 3500 → both → Matched
+⟨2-party MPC compare session over QUIC (cozk2p)⟩
+same common template +    ──SubmitCompareCoZk2pShare──▶ match template; add only
+each owner's 2 G1 shares                                  final G1 shares; verify π_cmp,
+                                           record cmp, both → Settling;
+                                           create leg deadline H_verify+10
+⟨session blocks until both shares verify and Settling is confirmed⟩
+⟨both sides exchange + persist BOTH payout-note key pairs⟩
+⟨smaller side reveals (q, r_locked) to the larger side, P2P⟩
+⟨no peer/MPC dependency remains after reveal⟩
+⟨each side proves its own settle circuit⟩
 
-(relayer detects Matched pair,
- generates zk proof of
- sum(inputs)==sum(outputs))
-
-                     ──SettleOrder────▶  OrderBook.SettleOrder
-                                          ├ check o1.MatchOrder==o2 & vice-versa
-                                          ├ verify zk_proof (TODO)
-                                          ├ Account.SpendCash([c1,c_bob], tx)
-                                          ├ CreateCash(alice: ETH, CT)
-                                          ├ CreateCash(bob:   USDT, CT)
-                                          └ status(o1)=status(o2)=Done
+each owner              ──SubmitSettleLeg──▶ verify/store own leg; after both,
+                                           mint BOTH
+                                           payout notes atomically,
+                                           Bob's order → Done,
+                                           Alice's order relisted in
+                                           place with the residual
+                                           collateral commitment
+                                           (Pending)
 ```
 
-**What the chain reveals** — `(alice, bob, ETH/USDT, price=3500, matched)`.
-**What it hides** — the 10 ETH amount, across every intermediate state.
+What the chain reveals: pair, side, price, fee, the match, `cmp`, and
+the fact of a fill. What it hides: every quantity, every balance, and
+the residual (fresh blindings).
 
-### 3.2 Browsing the market
+## 4. Reference
 
-A UI on mobile wants the top 20 pending ETH/USDT buys:
+### 4.1 Order row
 
-```
-Client ──read QueryOrders {type:Buy, token1:ETH, token2:USDT,
-                           status:Pending, limit:20, offset:0}
-                                                           ──▶ OrderBook.QueryOrders
-                                                               └ FindOrdersByFilter(...)
-```
-
-This is a pure read; no tx is produced, no cash state changes.
-
-### 3.3 Partial-fill and withdraw with change
-
-`bob` wants to withdraw 3 ETH out of a 5 ETH active cash `c5`:
-
-```
-Client                                    chain
-──────                                    ─────
-encrypt_amount(2)  (change)
-zk_proof_range(c5 - 3 = 2)
-──Withdraw({inputs:[c5],
-             change:{owner:bob,amount:CT(2)},
-             zk_proof})─────────────────▶ Account.Withdraw
-                                           ├ verify zk_proof (TODO)
-                                           ├ SpendCash([c5], tx)
-                                           └ CreateCash(bob: ETH, CT(2))
+```go
+type Order struct {
+    ID               OrderID    // SHA-256(nf_0 ‖ nf_1)
+    Type             TradeType  // Buy=0, Sell=1
+    Subject          TradePair  // {Token1, Token2}
+    Price            *big.Int   // plaintext; must fit u64
+    MatchRound       uint64     // increments on every match/rematch
+    MatchHeight      uint64     // current round height; deadline source
+    Pubkey           string     // owner ed25519, authenticates updates
+    LockedCommitment string     // the order's ONLY commitment: P2(needed, r)
+    Fee              uint64     // plaintext, accrues to the producer
+    BlockHeight      uint32     // time priority (kept across relist)
+    IntraBlockIndex  uint32
+    Status           OrderStat  // Pending|Matched|Done|Cancelled|Frozen|Settling
+    MatchOrder       OrderID
+}
 ```
 
-The bridge-side release of the 3 ETH is handled off-chain by the withdraw
-relayer, gated on the same `zk_proof`.
+There is no `Amount` field: the hidden quantity has no commitment of
+its own. `LockedCommitment` pins it through the collateral equation
+(D17).
 
-## 4. Reference: Definitions & Tools
+### 4.2 Writings / readings
 
-### 4.1 Source map
+| Tripod | Kind | Name | Purpose |
+|---|---|---|---|
+| orderbook | writing | `SendOrder` | admit + match an order (spends pool notes) |
+| orderbook | writing | `SubmitCompareCoZk2pShare` | submit one identity-bound PLONK proof share |
+| orderbook | writing | `ExpireCompareCoZk2pShares` | release an incomplete pre-reveal share round |
+| orderbook | writing | `SubmitSettleLeg` | submit one owner's verified settlement proof |
+| orderbook | writing | `FinalizeSettleLegs` | permissionlessly resume atomic execution once both in-deadline legs are stored |
+| orderbook | writing | `ExpireSettleLegs` | after the comparison-created deadline: freeze missing small only for `cmp != 0` + only-large; otherwise release both without blame |
+| orderbook | writing | `ClaimFees` | producer mints accrued fees as a note |
+| orderbook | writing | `RegisterSettleAddr` | QUIC rendezvous (dev) |
+| orderbook | reading | `QueryOrders`, `QuerySettleAddr`, `QueryFees`, `QueryCompareCoZk2pShares`, `QuerySettleLegs` | |
+| account | writing | `NoteDeposit` / `NoteWithdraw` | bridge in / out of the pool |
+| account | reading | `GetNotes`, `GetPoolInfo`, `GetNullifiers`, `GetNoteByCm` | |
+
+### 4.3 Source map
 
 | Path | Purpose |
 |---|---|
 | [chain/main.go](../chain/main.go) | kernel bootstrap, tripod wiring |
-| [chain/cfg/chain.toml](../chain/cfg/chain.toml) | yu kernel config (ports, consensus, chain_id) |
-| [chain/cfg/core.toml](../chain/cfg/core.toml) | tripod config (DB paths, genesis accounts) |
-| [chain/core/orderbook.go](../chain/core/orderbook.go) | `OrderBook` tripod: `SendOrder`, `SettleOrder`, `QueryOrders`, `matchOrder` |
-| [chain/core/order_scheme.go](../chain/core/order_scheme.go) | GORM schema + CRUD for orders |
-| [chain/core/order.go](../chain/core/order.go) | `Order`, `OrderID`, `TradeType`, `OrderStat`, `TradePair`, `ComputeOrderID` |
-| [chain/core/account.go](../chain/core/account.go) | `Account` tripod: `Deposit`, `Withdraw`, `GetAccount`, `InitChain` |
-| [chain/core/cash_scheme.go](../chain/core/cash_scheme.go) | GORM schema + CRUD for cash (incl. `LockCash`, `SpendCash`) |
-| [chain/core/cash.go](../chain/core/cash.go) | `Cash`, `CashStatus`, `AccountRecord`, `ChangeOutput`, `generateCashID`, `verifyProof` (TODO) |
-| [chain/core/config.go](../chain/core/config.go) | TOML loader + `DefaultConfig` |
-| [chain/core/udt.go](../chain/core/udt.go) | `TokenID`, `UDT`, `NativeToken` |
-| [chain/consensus/proof_of_buying.go](../chain/consensus/proof_of_buying.go) | PoBuy tripod stub |
-| [chain/consensus/vdf.go](../chain/consensus/vdf.go) | VDF tripod stub |
+| [chain/core/orderbook.go](../chain/core/orderbook.go) | `SendOrder`, matching, rendezvous, `QueryOrders` |
+| [chain/core/orderbook_cozk.go](../chain/core/orderbook_cozk.go) | legacy Groth16 compare + internal atomic settlement executor |
+| [chain/core/orderbook_compare_share.go](../chain/core/orderbook_compare_share.go) | owner-bound PLONK proof shares + pre-reveal expiry |
+| [chain/core/orderbook_settle_leg.go](../chain/core/orderbook_settle_leg.go) | owner-bound settlement legs + post-reveal expiry |
+| [chain/core/orderbook_cozk2p.go](../chain/core/orderbook_cozk2p.go) | PLONK public-statement builder (`-tags cozk2p` verifier) |
+| [chain/core/order.go](../chain/core/order.go), [order_scheme.go](../chain/core/order_scheme.go) | order model + GORM CRUD |
+| [chain/core/order_sign.go](../chain/core/order_sign.go) | canonical SendOrder signing message |
+| [chain/core/account.go](../chain/core/account.go) | Account tripod (pool only) |
+| [chain/core/pool.go](../chain/core/pool.go), [pool_scheme.go](../chain/core/pool_scheme.go), [account_pool.go](../chain/core/account_pool.go) | note tree, nullifiers, anchors, pool writings |
+| [chain/core/fees.go](../chain/core/fees.go) | fee accrual + `ClaimFees` |
+| [chain/core/zkverify.go](../chain/core/zkverify.go), [plonkverify.go](../chain/core/plonkverify.go) | Groth16 / PLONK verification |
+| [chain/core/config.go](../chain/core/config.go) | TOML config, VK paths, genesis notes |
+| [chain/vk/](../chain/vk/) | committed verifying keys |
 
-### 4.2 Core types cheat sheet
+### 4.4 Binds and signing messages
 
-```go
-// Order
-type Order struct {
-    ID           OrderID    // sha256(input_cash_ids)
-    Type         TradeType  // Buy=0, Sell=1
-    Subject      TradePair  // {Token1, Token2}
-    Price        *big.Int   // clear text; nil = market order
-    Amount       CipherText // encrypted
-    Owner        string
-    InputCashIDs []string
-    MatchOrder   OrderID    // set once Matched
-    Status       OrderStat  // Pending | Matched | Done | Cancelled | Frozen
-}
+Every Groth16 proof carries a `bind` public input:
+`SHA-256(domain ‖ chain_id ‖ writing ‖ version ‖ request fields)`
+reduced into Fr (Go `BindHash`, Rust `note::bind_hash`, pinned by
+`spec/golden.json`). This welds a proof to one exact request on one
+chain. Signing messages (`SendOrderSigningMessage`, the compare and
+settle messages) are length-prefixed and domain-separated; the Rust
+twins in [lib/chain/src/chain.rs](../lib/chain/src/chain.rs) are kept in
+lockstep by tests on both sides.
 
-// Cash (UTXO)
-type Cash struct {
-    ID      string
-    Owner   string
-    Token   TokenID
-    Amount  CipherText
-    ZkProof string     // committed at creation, checked before consumption
-    Status  CashStatus // Active | Locked | Spent
-    By      string     // Locked→order ID; Spent→tx/cash ID
-}
-```
+### 4.5 External dependencies
 
-### 4.3 Writings / Readings reference
-
-| Tripod | Kind | Name | Request |
-|---|---|---|---|
-| orderbook | writing | `SendOrder` | `SendOrderRequest{ID, Type, Subject, Price, Amount, Owner, InputCashIDs, HandlingFee}` |
-| orderbook | writing | `SettleOrder` | `SettleOrderRequest{OrderIDs[2], Outputs[], ZkProof}` |
-| orderbook | reading | `QueryOrders` | `QueryOrdersRequest{ID?, Type?, Token1?, Token2?, Status?, Limit, Offset}` |
-| account | writing | `Deposit` | `DepositRequest{Address, Token, Amount, ZkProof}` |
-| account | writing | `Withdraw` | `WithdrawRequest{Token, Inputs[], Change?, ZkProof}` |
-| account | reading | `GetAccount` | `GetAccountRequest{Address, Token}` → `AccountRecord{Address, Token, Cash[]}` |
-
-### 4.4 External tools & dependencies
-
-- **[yu](https://github.com/yu-org/yu)** — Go blockchain framework; provides the kernel, tripod abstraction, P2P, PoA consensus, HTTP/WS endpoints.
-- **[yu-sdk (Rust)](https://github.com/yu-org/yu-sdk)** — Rust client SDK used by [lib/chain/src/chain.rs](../lib/chain/src/chain.rs) to drive `SendOrder` / `SettleOrder` / `QueryOrders`.
-- **[GORM](https://gorm.io/)** + **SQLite** — persistence for orders and cash (`chain/data/*.db`, paths in `core.toml`).
-- **[go-playground/validator](https://github.com/go-playground/validator)** — struct-tag validation on all request types.
-- **Related client-side crypto** — amount ciphertext is produced off-chain in [lib/chain/src/orderbook.rs](../lib/chain/src/orderbook.rs) via Poseidon (BN254) on desktop, SHA-256 on Android; ZK proofs for deposit / settle / withdraw are produced in [lib/zk/](../lib/zk/) and verified by the three TODOs in `Deposit`, `SettleOrder`, `Withdraw`.
+- **[yu](https://github.com/yu-org/yu)** — kernel, tripods, PoA, endpoints.
+- **[GORM](https://gorm.io/) + SQLite** — orders and pool state.
+- **[go-rapidsnark](https://github.com/iden3/go-rapidsnark)** — Groth16
+  verification.
+- **cozk2p staticlib (cgo, `-tags cozk2p`)** — PLONK π_cmp verification.
+- **[go-playground/validator](https://github.com/go-playground/validator)** —
+  request validation.

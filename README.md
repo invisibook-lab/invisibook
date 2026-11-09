@@ -18,11 +18,17 @@ A privacy-preserving order book built on pure cryptography — no TEE, no centra
 
 ### Chain
 
+The default build includes the cozk2p PLONK verifier (the collaborative
+settlement path); it needs Rust for the verifier staticlib:
+
 ```bash
-cd chain
-go build -o invisibook .
-./invisibook
+make build-chain     # builds the cozk2p staticlib + go build -tags cozk2p
+cd chain && ./invisibook
 ```
+
+`make build-chain-lite` produces a pure-Go binary WITHOUT the verifier —
+dev only. It refuses to boot on any config that sets
+`settle_cozk2p_vk_path`, so it cannot silently run as a production node.
 
 The chain node listens on:
 - **HTTP** `localhost:7999` – reading & writing API
@@ -31,7 +37,7 @@ The chain node listens on:
 
 Configuration files are in `chain/cfg/`:
 - `chain.toml` – yu framework config (ports, consensus, chain_id)
-- `core.toml` – tripod config (DB paths, genesis accounts)
+- `core.toml` – tripod config (DB paths, verifying keys, genesis pool notes)
 
 ### Docker
 
@@ -94,26 +100,68 @@ Use the trade form on the right panel to place orders:
 
 ## Collaborative ZK Settlement (co-zk)
 
-Matched orders settle with a **single proof generated jointly by both
-traders**, so neither ever learns the other's hidden amount. The chain
-verifies the proof, removes the fully-filled order from the book, and updates
-the surviving order's hidden amount commitment in place (keeping its time
-priority). The active path is the **2-party** variant ([cozk2p](cozk2p/):
-malicious-secure SPDZ + collaborative TurboPlonk, no helper node). See
-[docs/cozk2p_design.md](docs/cozk2p_design.md) for the protocol, circuit, and
-threat model, and [docs/cozk_experiments.md](docs/cozk_experiments.md) for
-measurements.
+Matched orders settle in two phases. First the two traders **jointly
+prove the comparison of their hidden quantities** ([cozk2p](cozk2p/):
+2-party SPDZ fabric + collaborative TurboPlonk, no helper node; the current
+Beaver source is explicitly dev-only) and
+submit one identity/round/deadline-bound native proof-share payload each.
+Both payloads repeat the same Fiat–Shamir-opened canonical template; only the
+final two unopened KZG G1 points are native SPDZ value shares (MAC shares
+never leave the MPC). The comparison-share deadline is the current round's
+`MatchHeight + 10`, not either order's original admission height. No explicit
+quantity opening `(q, r_locked)` is disclosed until the chain checks the
+templates, adds each pair of point shares, reconstructs the standard proof,
+and verifies it; that verification also
+creates an absolute ten-block settlement-leg deadline. Both parties exchange
+and durably record both payout-note key pairs before the smaller opening is
+revealed. This WAL barrier currently assumes compliant clients: the pairs are
+not owner-signed or committed on chain, and the settle circuits do not
+publicly bind the counterparty's choice, so a malicious payer can redirect a
+payout. After reveal, each owner can construct and submit its settlement
+proof with no further peer/MPC dependency. At the deadline, zero legs release
+both owners without blame. For `cmp != 0`, a lone valid **large-side** leg
+proves that its owner knew the smaller opening, so the chain releases that
+owner and freezes the missing small owner. A lone small-side leg cannot prove
+delivery to the large owner; only-small, zero-leg, and every incomplete
+`cmp = 0` round therefore release both without blame. This timeout rule is
+conservative against false blame but asymmetric; the overall prototype claims
+only compliant-until-fail-stop security (see the threat-model note in the
+protocol reference). After both verify, the chain applies both sides atomically:
+the fully filled order closes, the surviving order is relisted in place with
+fresh residual commitments (keeping its time priority),
+and both payout notes mint in one step. See
+[docs/cozk2p_design.md](docs/cozk2p_design.md) for the protocol and
+threat model, and [docs/cozk_experiments.md](docs/cozk_experiments.md)
+for measurements.
 
 ```bash
 # unit + satisfiability + 2-party e2e (mock network)
 cd cozk2p && cargo test
 
-# benchmark: single-prover vs full 2-party session
-cargo run --release --bin bench_settle2p -- --runs 5
-
 # real collaborative proof settled on a running chain
 make test-e2e-cozk2p
 ```
+
+### Measurements
+
+Each experiment is one script in [experiments/](experiments/), and
+[experiments/README.md](experiments/README.md) states what each one
+measures. The results are in
+[docs/cozk_experiments.md](docs/cozk_experiments.md).
+
+```bash
+./experiments/rq1_crypto_overhead.sh    # what the cryptography costs
+./experiments/rq2_network_latency.sh    # what the round-trip time costs
+./experiments/rq3_end_to_end.sh --runs 5  # one complete trade
+```
+
+## Documentation
+
+The documentation index is [docs/README.md](docs/README.md). It lists
+every design document with its status, and
+[docs/paper_deviations.md](docs/paper_deviations.md) records each place
+the implementation differs from the protocol paper
+([papers/invisibook.pdf](papers/invisibook.pdf)).
 
 ## License
 

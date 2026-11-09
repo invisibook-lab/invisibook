@@ -23,10 +23,13 @@ ark-serialize = "0.4"
 ark-std = "0.4"
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
+chacha20poly1305 = "0.10"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+sha2 = "0.10"
 
 # Renegade's 2-party malicious-secure SPDZ MPC framework. `test_helpers` is
 # enabled unconditionally because the demo binaries use the mock Beaver
@@ -50,6 +53,12 @@ mpc-relation = { git = "https://github.com/invisibook-lab/mpc-jellyfish", rev = 
 # (two URLs would otherwise produce two incompatible copies of MpcFabric).
 [patch."https://github.com/renegade-fi/ark-mpc"]
 ark-mpc = { git = "https://github.com/invisibook-lab/ark-mpc-1", rev = "178b66b6e9e5c7ff9217fa3ab236865770917cf1" }
+
+[dev-dependencies]
+# The traffic_census example implements ark-mpc's MpcNetwork trait, which
+# needs the same `futures` Stream/Sink traits ark-mpc itself uses. The
+# version matches the one already pinned in Cargo.lock.
+futures = "0.3"
 
 [profile.release]
 opt-level = 3

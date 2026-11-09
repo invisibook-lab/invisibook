@@ -1,8 +1,9 @@
 //! One trader of the 2-party collaborative settlement prover, connected
 //! over QUIC. Run exactly two instances: trader-a (PARTY0, dials) and
 //! trader-b (PARTY1, listens). Each loads ONLY its own private side; the
-//! counterparty's inputs arrive as SPDZ shares. Both end with the identical
-//! standard PLONK proof, locally verified before writing.
+//! counterparty's inputs arrive as SPDZ shares. Each ends with its own
+//! canonical native comparison-proof share; neither process opens or locally
+//! verifies the complete standard PLONK proof.
 //!
 //! DEV CAVEAT: Beaver triples come from `PartyIDBeaverSource` (mock,
 //! insecure); swap in a real offline phase (ark-mpc-offline LowGear) for
@@ -18,11 +19,10 @@ use std::{fs, net::SocketAddr, path::PathBuf, time::Instant};
 
 use anyhow::{Context, Result};
 use ark_mpc::{MpcFabric, PARTY0, PARTY1, offline_prep::PartyIDBeaverSource};
-use ark_serialize::CanonicalSerialize;
 use clap::{Parser, ValueEnum};
 use cozk2p::{
     SettlePublic, SidePrivate, default_cache_dir, dev_keys, net::connect,
-    prove::prove_collaborative_timed, stats::peak_rss_bytes, verify_settle,
+    prove::prove_collaborative_share_timed, serialize_compare_proof_share, stats::peak_rss_bytes,
 };
 use serde_json::json;
 
@@ -55,7 +55,7 @@ struct Args {
     /// Proving/verifying key cache directory (dev keys generated on miss).
     #[arg(long)]
     keys_dir: Option<PathBuf>,
-    /// Output directory for proof + stats.
+    /// Output directory for this party's proof share + stats.
     #[arg(long)]
     out_dir: PathBuf,
 }
@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
         &fs::read_to_string(&args.public_json).context("reading --public-json")?,
     )?;
     let keys_dir = args.keys_dir.unwrap_or_else(default_cache_dir);
-    let (pk, vk) = dev_keys(&keys_dir)?;
+    let (pk, _vk) = dev_keys(&keys_dir)?;
 
     println!("[{role_name}] connecting to peer...");
     let total_start = Instant::now();
@@ -100,40 +100,38 @@ async fn main() -> Result<()> {
     let fabric = MpcFabric::new(net, PartyIDBeaverSource::new(party));
 
     println!("[{role_name}] proving collaboratively...");
-    let (proof, timings) = prove_collaborative_timed(fabric, party, &side, &public, &pk).await?;
-
-    let t = Instant::now();
-    verify_settle(&vk, &public, &proof)?;
-    let verify_ms = t.elapsed().as_secs_f64() * 1e3;
+    let (proof_share, timings) =
+        prove_collaborative_share_timed(fabric, party, &side, &public, &pk).await?;
     let total_ms = total_start.elapsed().as_secs_f64() * 1e3;
 
     fs::create_dir_all(&args.out_dir)?;
-    let mut proof_bytes = Vec::new();
-    proof
-        .serialize_compressed(&mut proof_bytes)
-        .expect("proof serialization must not fail");
-    fs::write(args.out_dir.join("proof.hex"), hex::encode(&proof_bytes))?;
+    let share_bytes = serialize_compare_proof_share(&proof_share)?;
+    fs::write(
+        args.out_dir.join("proof_share.hex"),
+        hex::encode(&share_bytes),
+    )?;
     let stats = json!({
+        "protocol_version": "native-final-kzg-spdz-share-v1",
         "role": role_name,
         "build_ms": timings.build_ms,
         "prove_ms": timings.prove_ms,
+        "share_export_ms": timings.open_ms,
         "open_ms": timings.open_ms,
-        "verify_ms": verify_ms,
+        "verify_ms": 0.0,
         "total_ms": total_ms,
         "peak_rss_bytes": peak_rss_bytes(),
-        "proof_size_bytes_compressed": proof_bytes.len(),
+        "proof_share_size_bytes_compressed": share_bytes.len(),
     });
     fs::write(
         args.out_dir.join("stats.json"),
         serde_json::to_string_pretty(&stats)?,
     )?;
     println!(
-        "[{role_name}] done: build {:.0} ms, prove {:.0} ms, open {:.0} ms, verified in {:.1} ms; proof {} B; outputs in {}",
+        "[{role_name}] done: build {:.0} ms, prove {:.0} ms, share-export {:.0} ms; native share {} B; outputs in {}",
         timings.build_ms,
         timings.prove_ms,
         timings.open_ms,
-        verify_ms,
-        proof_bytes.len(),
+        share_bytes.len(),
         args.out_dir.display()
     );
     Ok(())
