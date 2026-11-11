@@ -1,10 +1,7 @@
 # Core Tripod Configuration — test mode (no ZK verification)
 # VK paths are left empty so VerifyGroth16 is skipped.
 
-# One SQLite database for all tripods: orders and cash are the same
-# block's state, so they share a file and a transaction.
-db_path      = "data/chain.db"
-db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
+# SQL state storage is configured in chain.toml under [state_sql].
 
 [consensus]
 # The mock L1 holds no allocations, so no payment declaration can ever be

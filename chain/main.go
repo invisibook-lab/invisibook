@@ -16,7 +16,6 @@ import (
 	"github.com/invisibook-lab/invisibook/config"
 	"github.com/invisibook-lab/invisibook/consensus"
 	"github.com/invisibook-lab/invisibook/core"
-	"github.com/invisibook-lab/invisibook/store"
 )
 
 // main boots the Invisibook chain node: it loads kernel and core configs,
@@ -68,20 +67,16 @@ func main() {
 	// and the consensus loop takes them out at the matching height.
 	paymentBook := consensus.NewPaymentBook()
 
-	// One database, one handle: orders and cash are the same block's state.
-	db, err := store.Open(coreCfg.DBPath, store.ParseGormLogLevel(coreCfg.DBLogLevel))
-	if err != nil {
-		logrus.Fatal("opening chain database: ", err)
-	}
-	stateDB, err := sqlstate.NewState(db)
-	if err != nil {
-		logrus.Fatal("opening SQL state: ", err)
+	// yu owns the SQL connection and state lifecycle configured in chain.toml.
+	kernel := startup.InitKernel(yuCfg)
+	stateDB, ok := startup.StateDB.(*sqlstate.State)
+	if !ok {
+		logrus.Fatal("PoB requires statedb_type = sql")
 	}
 	cash, tables, err := registerTables(stateDB)
 	if err != nil {
 		logrus.Fatal("registering state tables: ", err)
 	}
-	startup.StateDB = stateDB
 	accountTri := account.NewAccount(&coreCfg.Account, cash)
 	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook, tables)
 	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, l1Reader, vrfPrivKey, l1Submitter, paymentBook)
@@ -103,7 +98,7 @@ func main() {
 
 	// PoB is the one tripod defining the genesis block (DefineGenesis); the
 	// kernel writes it before any InitChain runs.
-	startup.InitKernel(yuCfg).
+	kernel.
 		WithTripods(pobTri, accountTri, orderBookTri, synchronizer.NewSynchronizer(yuCfg.SyncMode)).
 		Startup()
 }

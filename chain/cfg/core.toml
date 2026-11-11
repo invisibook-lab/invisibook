@@ -1,9 +1,6 @@
 # Core Tripod Configuration
 
-# One SQLite database for all tripods: orders and cash are the same
-# block's state, so they share a file and a transaction.
-db_path      = "data/chain.db"
-db_log_level = "warn"   # "silent" | "error" | "warn" | "info"
+# SQL state storage is configured in chain.toml under [state_sql].
 
 [consensus]
 min_payment     = "100"

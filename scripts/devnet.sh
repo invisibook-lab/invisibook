@@ -203,7 +203,6 @@ write_configs() {
 import sys
 src, dst, dev = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(src).read()
-text = text.replace('db_path      = "data/chain.db"', f'db_path      = "{dev}/chain.db"')
 # The protocol behaviour: sit out any height with no L1-confirmed declaration.
 # Off in the repo's config because the mock L1 can confirm nothing.
 text = text.replace('require_declared_payment = false', 'require_declared_payment = true')
@@ -266,7 +265,7 @@ start_l2() {
     k="$(sed -n 's/^anchor_window *= *\([0-9]*\).*/\1/p' "$DEV/core.toml")"
     [ -n "$n" ] && [ -n "$k" ] || die "could not read anchor_genesis_l1_height or anchor_window"
     now="$(tip)"
-    if [ ! -e "$DEV/chain.db" ] && [ "$now" -ge "$((n + k))" ]; then
+    if [ ! -e "$DEV/yu/state.db" ] && [ "$now" -ge "$((n + k))" ]; then
         die "L1 is at block $now, past L2 genesis's first window [$n, $((n + k))]; run \`clean\` and start again, or raise anchor_genesis_l1_height"
     fi
     say "L2 genesis is L1 block $n; L1 is at $now"

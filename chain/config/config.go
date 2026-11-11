@@ -19,26 +19,21 @@ import (
 
 // Config holds all configurable parameters for the chain's tripods.
 //
-// `DBPath` is the one SQLite database every tripod writes through: orders and
-// cash are the same block's state, so they share a file and a transaction.
+// Database ownership and connection settings belong to yu in cfg/chain.toml.
 type Config struct {
-	DBPath     string               `toml:"db_path"`
-	DBLogLevel string               `toml:"db_log_level"`
-	Consensus  consensus.Config     `toml:"consensus"`
-	OrderBook  core.OrderBookConfig `toml:"orderbook"`
-	Account    account.Config       `toml:"account"`
-	CKB        ckb.Config           `toml:"ckb"`
+	Consensus consensus.Config     `toml:"consensus"`
+	OrderBook core.OrderBookConfig `toml:"orderbook"`
+	Account   account.Config       `toml:"account"`
+	CKB       ckb.Config           `toml:"ckb"`
 }
 
 // Default returns a Config with every section at its own default.
 func Default() *Config {
 	return &Config{
-		DBPath:     "data/chain.db",
-		DBLogLevel: "warn",
-		Consensus:  consensus.DefaultConsensusConfig(),
-		OrderBook:  core.DefaultOrderBookConfig(),
-		Account:    account.DefaultConfig(),
-		CKB:        ckb.DefaultConfig(),
+		Consensus: consensus.DefaultConsensusConfig(),
+		OrderBook: core.DefaultOrderBookConfig(),
+		Account:   account.DefaultConfig(),
+		CKB:       ckb.DefaultConfig(),
 	}
 }
 

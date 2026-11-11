@@ -2,10 +2,11 @@ package main
 
 import (
 	"github.com/invisibook-lab/invisibook/account"
-	"github.com/invisibook-lab/invisibook/store"
 	"github.com/yu-org/yu/common"
 	"github.com/yu-org/yu/core/state/sqlstate"
 	"github.com/yu-org/yu/core/types"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 	"path/filepath"
 	"testing"
@@ -26,7 +27,7 @@ func TestGenesisSQLCommitment(t *testing.T) {
 	if root != again {
 		t.Fatal("genesis commitment differs across nodes")
 	}
-	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"), logger.Silent)
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "state.db")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
 		t.Fatal(err)
 	}

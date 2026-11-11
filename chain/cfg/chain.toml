@@ -11,6 +11,10 @@ log_output  = ""         # empty = stderr
 lei_limit   = 50000
 statedb_type = "sql"
 
+[state_sql]
+sql_db_type = "sqlite"
+dsn = "state.db" # Resolved below data_dir by yu.
+
 [chain_spec]
 chain_name = "Invisibook"
 author     = "invisibook-lab"

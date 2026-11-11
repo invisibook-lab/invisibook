@@ -5,19 +5,20 @@ import (
 	"testing"
 
 	"github.com/invisibook-lab/invisibook/account"
-	"github.com/invisibook-lab/invisibook/store"
 	"github.com/yu-org/yu/common"
 	"github.com/yu-org/yu/core/env"
 	"github.com/yu-org/yu/core/state/sqlstate"
 	"github.com/yu-org/yu/core/tripod"
 	"github.com/yu-org/yu/core/types"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
 
 // rewardState creates an independent node with identical genesis and an authenticated cash table.
 func rewardState(t *testing.T) (*ProofOfBuy, *sqlstate.State, *sqlstate.Table, *types.Block) {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"), logger.Silent)
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "state.db")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
 		t.Fatal(err)
 	}

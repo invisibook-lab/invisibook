@@ -6,7 +6,6 @@ package account
 // produced by `snarkjs zkey export verificationkey <circuit>.zkey vk.json`.
 // Both are required at startup — chain refuses to boot if any path is unset
 // or the file is missing/malformed.
-// `DBLogLevel` controls GORM SQL logging: "silent", "error", "warn", "info".
 type Config struct {
 	DepositVKPath  string        `toml:"deposit_vk_path"`
 	WithdrawVKPath string        `toml:"withdraw_vk_path"`

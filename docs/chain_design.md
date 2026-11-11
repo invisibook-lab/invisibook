@@ -237,7 +237,8 @@ writes a real CKB chain through [`chain/ckb`](../chain/ckb).
 Finality follows the fixed L1 batch windows defined by PoB. Once a window has
 closed and accumulated its confirmation depth, nodes select the complete,
 continuous branch with the largest cumulative goal. Business tables use yu
-v1.5.0 SQL state directly: execution starts from the actual parent version,
+v1.5.0 SQL state directly (the connection is created by yu from `[state_sql]`
+in `chain/cfg/chain.toml`): execution starts from the actual parent version,
 transaction failures roll back through yu, and finalization atomically promotes
 the chosen state and retires losing forks. No separate application overlay,
 staging table, or applied-height marker is maintained.
