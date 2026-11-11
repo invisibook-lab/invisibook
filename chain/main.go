@@ -8,6 +8,8 @@ import (
 	"github.com/yu-org/yu/apps/synchronizer"
 	"github.com/yu-org/yu/core/keypair"
 	"github.com/yu-org/yu/core/startup"
+	"github.com/yu-org/yu/core/state/sqlstate"
+	"github.com/yu-org/yu/core/types"
 
 	"github.com/invisibook-lab/invisibook/account"
 	"github.com/invisibook-lab/invisibook/ckb"
@@ -71,25 +73,25 @@ func main() {
 	if err != nil {
 		logrus.Fatal("opening chain database: ", err)
 	}
-	if err := account.MigrateCashTable(db); err != nil {
-		logrus.Fatal("migrating account tables: ", err)
+	stateDB, err := sqlstate.NewState(db)
+	if err != nil {
+		logrus.Fatal("opening SQL state: ", err)
 	}
-	if err := core.MigrateOrderTables(db); err != nil {
-		logrus.Fatal("migrating orderbook tables: ", err)
+	cash, tables, err := registerTables(stateDB)
+	if err != nil {
+		logrus.Fatal("registering state tables: ", err)
 	}
-
-	// Writes are staged per block and only promoted once L1 settles the height,
-	// so a block L1 rules against can be undone by dropping its staged rows.
-	if err := store.MigrateStagedTable(db); err != nil {
-		logrus.Fatal("migrating staging table: ", err)
+	startup.StateDB = stateDB
+	accountTri := account.NewAccount(&coreCfg.Account, cash)
+	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook, tables)
+	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, l1Reader, vrfPrivKey, l1Submitter, paymentBook)
+	pobTri.GenesisRoot, err = genesisStateRoot(&coreCfg.Account)
+	if err != nil {
+		logrus.Fatal("computing genesis state: ", err)
 	}
-	pending := store.NewPending(db)
-	pending.Register(account.CashApplier{})
-	pending.Register(core.Appliers()...)
-
-	accountTri := account.NewAccount(&coreCfg.Account, db, pending)
-	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook, db, pending)
-	pobTri := consensus.NewProofOfBuy(&coreCfg.Consensus, pubkey, privkey, l1Verifier, l1Reader, vrfPrivKey, l1Submitter, paymentBook, pending)
+	pobTri.InitializeGenesis = func(genesis *types.Block) error {
+		return initializeGenesis(stateDB, cash, &coreCfg.Account, genesis)
+	}
 
 	// The payment endpoint confirms each declaration against L1 before it
 	// reaches the book, so it needs the same verifier and miner identity the

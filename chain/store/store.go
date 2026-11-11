@@ -19,7 +19,7 @@ import (
 )
 
 // Open opens the chain database at `dsn` and returns the handle every tripod
-// writes through. Each tripod migrates its own tables.
+// uses through yu SQL state. Business tables are registered before execution.
 func Open(dsn string, logLevel logger.LogLevel) (*gorm.DB, error) {
 	gormLogger := logger.New(
 		log.New(os.Stdout, "\n", log.LstdFlags),

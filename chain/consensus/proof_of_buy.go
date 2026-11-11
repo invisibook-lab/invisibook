@@ -18,7 +18,7 @@ import (
 	"github.com/yu-org/yu/core/types"
 
 	"github.com/invisibook-lab/invisibook/account"
-	"github.com/invisibook-lab/invisibook/store"
+	"github.com/yu-org/yu/core/state"
 )
 
 // candidateForksSlow is how long the chain may take to enumerate candidate
@@ -57,8 +57,9 @@ type ProofOfBuy struct {
 	l1Submitter L1HeaderSubmitter
 	// schedule says which L1 window each batch of L2 heights is anchored in.
 	schedule AnchorSchedule
-	// pending stages each block's writes until its batch is decided.
-	pending *store.Pending
+	// GenesisRoot commits to the configured initial allocations.
+	GenesisRoot       common.Hash
+	InitializeGenesis func(*types.Block) error
 
 	// pendingFinalizations is a buffered channel for blocks whose header is
 	// yet to be submitted to L1.
@@ -67,11 +68,11 @@ type ProofOfBuy struct {
 
 // NewProofOfBuy constructs a ProofOfBuy tripod with the given config, keypair,
 // L1 verifier and reader, VRF private key, L1 header submitter, payment book
-// and staging layer.
+// and payment book.
 // `cfg` must not be nil; `pubkey`/`privkey` must be a secp256k1 keypair and
 // `vrfPrivKey` must be the same key in ecdsa form (see SecpPrivKeyToECDSA);
 // `paymentBook` must be the same instance the HTTP endpoint writes into.
-func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, l1Reader L1Reader, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1HeaderSubmitter, paymentBook *PaymentBook, pending *store.Pending) *ProofOfBuy {
+func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, l1Verifier L1PaymentVerifier, l1Reader L1Reader, vrfPrivKey *ecdsa.PrivateKey, l1Submitter L1HeaderSubmitter, paymentBook *PaymentBook) *ProofOfBuy {
 	schedule, err := NewAnchorSchedule(cfg)
 	if err != nil {
 		// A startup failure: without a schedule nothing can ever be finalized.
@@ -89,7 +90,6 @@ func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, 
 		paymentBook:          paymentBook,
 		blockCh:              make(chan *types.Block, 16),
 		l1Submitter:          l1Submitter,
-		pending:              pending,
 		schedule:             schedule,
 		pendingFinalizations: make(chan *pendingFinalization, 100),
 	}
@@ -110,55 +110,13 @@ func (p *ProofOfBuy) InitChain() {
 	go p.finalityWorker()
 }
 
-// reconcile brings the chain and the staged writes back into agreement after a
-// restart, which is the only time they can disagree.
-//
-// The promoted height is the boundary, not yu's finalized marker: it is
-// written with the state it describes, so it is exactly how far the tables
-// got. Everything at or below it was settled by L1 and is already in the
-// tables; everything above it was never promised to anyone and goes.
-//
-// Three things can be out of place, and all three are idempotent to fix:
-//
-//   - A block whose state was promoted but whose finalized marker was not
-//     written — the crash window between the two. Nothing is done about it
-//     here. The finality worker decides batches from L1's record starting
-//     after the last marker, so it decides that batch again; promotion finds
-//     its staged rows already gone, and the block gets its marker.
-//     Recovering it by height instead would mean picking one block out of a
-//     height that may hold several, and marking the wrong one would point
-//     `LastFinalized` at a branch this node does not follow — every later
-//     enumeration would start from there.
-//   - Staged rows of blocks above the boundary. The finality worker's queue
-//     lives in memory, so after a restart nothing would ever rule on them; left
-//     alone they would overlay every read forever.
-//   - The blocks themselves, above the boundary, still on the chain.
+// reconcile restores the payment cursor; yu recovers durable SQL state and chain markers.
 func (p *ProofOfBuy) reconcile() {
-	applied, err := p.pending.AppliedHeight()
+	tip, err := p.Chain.GetEndCompactBlock()
 	if err != nil {
-		logrus.Errorf("PoB: reading the promoted height: %v — skipping reconciliation", err)
-		return
+		logrus.Fatalf("PoB: reading recovered tip: %v", err)
 	}
-
-	if err := p.pending.DropFrom(applied + 1); err != nil {
-		logrus.Errorf("PoB: dropping staged writes above height=%d: %v", applied, err)
-		return
-	}
-	// Pruning by the promoted height rather than by Prune()'s own boundary:
-	// yu's marker may still lag it, and pruning to a lagging boundary would
-	// delete blocks whose state is already in the tables.
-	if err := p.Chain.PruneAfter(applied + 1); err != nil {
-		logrus.Errorf("PoB: pruning blocks above height=%d: %v", applied, err)
-		return
-	}
-
-	// The payment book lives in memory and starts out believing nothing has
-	// been produced. Left that way it would take declarations for heights the
-	// chain already has, and anything reading it would report the chain at
-	// zero, so it is told where the chain resumes from.
-	p.paymentBook.Settle(applied)
-
-	logrus.Infof("PoB: reconciled to height=%d", applied)
+	p.paymentBook.Settle(tip.Height)
 }
 
 // blockListener subscribes to the P2P block topic and forwards
@@ -371,7 +329,7 @@ func (p *ProofOfBuy) adoptRival(block *types.Block, candidate *types.Block, vrfI
 // yu calls this on the synchronizer's path, which fetches blocks from a peer
 // and then verifies, appends and executes each one. This hook is the only
 // examination on that path: without it, blocks pulled during catch-up reach
-// the chain — and the staging layer — entirely unchecked, while blocks
+// the chain entirely unchecked, while blocks
 // arriving over the block topic go through verifyCandidate.
 //
 // It checks what a block can be judged on by itself: that its producer
@@ -554,10 +512,34 @@ func (p *ProofOfBuy) produceBlock(block *types.Block, vrfResult *VRFResult, paym
 		L1Payment:  payment,
 		BlockScore: score.String(),
 	}
+	block.Txns = txns
+	block.TxnRoot, err = types.MakeTxnRoot(txns)
+	if err != nil {
+		return err
+	}
+	block.MinerPubkey = p.myPubkey.Bytes()
+	block.Extra, err = EncodeConsensusData(cdata)
+	if err != nil {
+		return err
+	}
+	if _, managed := p.State.(state.ExecutionState); managed {
+		if err := p.Execute(block); err != nil {
+			return err
+		}
+	}
 	if err := SealBlock(block, txns, cdata, p.myPubkey, p.myPrivKey); err != nil {
+		if managed, ok := p.State.(state.ExecutionState); ok {
+			managed.AbortExecution()
+		}
 		return fmt.Errorf("sealing block: %w", err)
 	}
 
+	if managed, ok := p.State.(state.ExecutionState); ok {
+		if err := p.bindState(block); err != nil {
+			managed.AbortExecution()
+			return err
+		}
+	}
 	// Broadcast the block. A failure here costs this node the round elsewhere
 	// but does not invalidate the block, so it is logged rather than returned.
 	if blockByt, err := block.Encode(); err != nil {
@@ -567,7 +549,9 @@ func (p *ProofOfBuy) produceBlock(block *types.Block, vrfResult *VRFResult, paym
 	}
 
 	// Open the state snapshot last: every error above returns without one.
-	p.State.StartBlock(block)
+	if _, managed := p.State.(state.ExecutionState); !managed {
+		p.State.StartBlock(block)
+	}
 	return nil
 }
 
@@ -598,15 +582,23 @@ func (p *ProofOfBuy) EndBlock(block *types.Block) {
 		return
 	}
 
-	// Everything the block writes is staged under its height, so a block L1
-	// later rules against can be undone by dropping that height.
-	p.pending.SetBlock(block.Height, block.Hash.String())
+	// yu executes each branch from its authenticated parent state.
 
 	// Execute all transactions in the block
 	logrus.Infof("PoB: executing block %d", block.Height)
-	if err = p.Execute(block); err != nil {
-		logrus.Errorf("PoB: executing block at height=%d: %v", block.Height, err)
-		return
+	managed, transactional := p.State.(state.ExecutionState)
+	if !transactional || !managed.ExecutionCommitted(block) {
+		if err = p.Execute(block); err != nil {
+			logrus.Errorf("PoB: execution: %v", err)
+			return
+		}
+		if transactional {
+			if err = p.bindState(block); err != nil {
+				managed.AbortExecution()
+				logrus.Errorf("PoB: binding: %v", err)
+				return
+			}
+		}
 	}
 
 	// Persist block to chain storage
@@ -623,7 +615,6 @@ func (p *ProofOfBuy) EndBlock(block *types.Block) {
 
 	// Pay the producer now that the block is on the chain. Every node runs
 	// this for every block, so the payout is part of the agreed state.
-	p.payBlockReward(block)
 
 	// Nothing is finalized here. A block is only executed and appended at this
 	// point; whether it belongs on the canonical chain is L1's call, and that
@@ -660,7 +651,8 @@ func (p *ProofOfBuy) finalityWorker() {
 	pollInterval := time.Duration(p.cfg.L1PollInterval) * time.Millisecond
 	// queued holds blocks whose window has not opened yet; pending holds
 	// blocks whose header has been sent but not yet seen on chain.
-	var queued, pending []*pendingFinalization
+	queued := p.unfinalizedSubmissions()
+	var pending []*pendingFinalization
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -859,7 +851,7 @@ func (p *ProofOfBuy) decideBatch(ctx context.Context, l1Tip uint64) (bool, error
 	}
 
 	blocks := make([]*types.Block, len(winner))
-	staged := make([]store.Block, len(winner))
+
 	for i, header := range winner {
 		block, err := p.Chain.GetBlock(header.Hash)
 		if err != nil || block == nil {
@@ -868,20 +860,20 @@ func (p *ProofOfBuy) decideBatch(ctx context.Context, l1Tip uint64) (bool, error
 			return false, nil
 		}
 		blocks[i] = block
-		staged[i] = store.Block{Height: block.Height, Hash: block.Hash.String()}
 	}
 	through := blocks[len(blocks)-1]
 
-	// The state goes in first: it is the part that matters and it records how
-	// far it got, so a crash before the markers below costs nothing that
-	// startup cannot rebuild from that record.
-	if err := p.pending.ApplyBlocks(staged); err != nil {
-		return false, fmt.Errorf("promoting staged writes through height=%d: %w", through.Height, err)
+	// Finalize SQL state first; yu repairs a lagging chain marker on restart.
+	if finalizing, ok := p.State.(state.FinalizingState); ok {
+		if err := finalizing.FinalizeState(through); err != nil {
+			return false, err
+		}
+	} else {
+		p.State.FinalizeBlock(through)
 	}
 	if err := p.Chain.FinalizeFork(&types.Fork{Blocks: blocks}); err != nil {
 		return false, fmt.Errorf("finalizing batch %d through height=%d: %w", batch, through.Height, err)
 	}
-	p.State.FinalizeBlock(through)
 	logrus.Infof("PoB: decided batch %d, settled through height=%d", batch, through.Height)
 	return true, nil
 }
@@ -928,4 +920,47 @@ func (p *ProofOfBuy) submitHeader(pf *pendingFinalization) error {
 	pf.l1TxHash = l1TxHash
 	pf.submittedAt = time.Now()
 	return nil
+}
+
+// Commit includes the deterministic producer reward in the execution state before its root is sealed.
+func (p *ProofOfBuy) Commit(block *types.Block) {
+	if err := p.payBlockReward(block); err != nil {
+		// yu's commit callback has no error return; stop before sealing a partial reward state.
+		if managed, ok := p.State.(state.ExecutionState); ok {
+			managed.AbortExecution()
+		}
+		logrus.Panicf("PoB: committing reward: %v", err)
+	}
+}
+
+// bindState publishes the sealed block identity and its receipt metadata through yu.
+func (p *ProofOfBuy) bindState(block *types.Block) error {
+	if p.BindState != nil {
+		return p.BindState(block)
+	}
+	return p.State.(state.ExecutionState).BindBlock(block)
+}
+
+// unfinalizedSubmissions restores this miner's retained headers after restart; window checks discard expired ones.
+func (p *ProofOfBuy) unfinalizedSubmissions() []*pendingFinalization {
+	forks, err := p.Chain.CandidateForks()
+	if err != nil {
+		logrus.Errorf("PoB: restoring submissions: %v", err)
+		return nil
+	}
+	seen := make(map[common.Hash]bool)
+	var queued []*pendingFinalization
+	for _, fork := range forks {
+		if fork == nil {
+			continue
+		}
+		for _, block := range fork.Blocks {
+			if block == nil || block.Header == nil || seen[block.Hash] || hex.EncodeToString(block.MinerPubkey) != p.myPubkeyHex() {
+				continue
+			}
+			seen[block.Hash] = true
+			queued = append(queued, &pendingFinalization{block: block})
+		}
+	}
+	return queued
 }

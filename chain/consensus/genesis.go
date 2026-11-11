@@ -24,6 +24,11 @@ func (p *ProofOfBuy) DefineGenesis() *types.Block {
 		logrus.Errorf("PoB: building the genesis block: %v", err)
 		return nil
 	}
+	if p.InitializeGenesis != nil {
+		if err := p.InitializeGenesis(genesis); err != nil {
+			logrus.Fatalf("initializing genesis state: %v", err)
+		}
+	}
 	logrus.Infof("PoB: genesis block defined, hash=%s chain_id=%d", genesis.Hash.String(), genesis.ChainID)
 	return genesis
 }
@@ -41,6 +46,7 @@ func (p *ProofOfBuy) DefineGenesis() *types.Block {
 func (p *ProofOfBuy) genesisBlock() (*types.Block, error) {
 	genesis := p.Chain.NewEmptyBlock()
 	genesis.Height = 0
+	genesis.StateRoot = p.GenesisRoot
 	genesis.Extra = encodeGenesisL1Height(p.cfg.AnchorGenesisL1Height)
 	encoded, err := genesis.Encode()
 	if err != nil {

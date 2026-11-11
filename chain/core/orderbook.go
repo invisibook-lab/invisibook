@@ -5,12 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"github.com/invisibook-lab/invisibook/account"
-	"github.com/invisibook-lab/invisibook/store"
+	"github.com/yu-org/yu/core/state/sqlstate"
 	"math/big"
 	"net/http"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
-	"gorm.io/gorm"
 
 	"github.com/yu-org/yu/core/context"
 	"github.com/yu-org/yu/core/tripod"
@@ -43,22 +42,21 @@ type OrderEvent struct {
 // account.Account tripod (injected via the `tripod` struct tag) for account.Cash state changes.
 type OrderBook struct {
 	*tripod.Tripod
-	Account *account.Account `tripod:"account"`
-	db      *gorm.DB
-	// pending stages this block's writes until L1 settles the height.
-	pending        *store.Pending
-	splitVK        *account.CircuitVK
-	settleLargerVK *account.CircuitVK
-	settleCoZkVK   *account.CircuitVK
-	settleCoZk2pVK *PlonkVK
+	Account                                     *account.Account `tripod:"account"`
+	orders, comparisons, settlements, addresses *sqlstate.Table
+	splitVK                                     *account.CircuitVK
+	settleLargerVK                              *account.CircuitVK
+	settleCoZkVK                                *account.CircuitVK
+	settleCoZk2pVK                              *PlonkVK
 }
 
 // NewOrderBook constructs the OrderBook tripod and registers its writings and
-// readings. `cfg` must carry a valid SQLite DSN plus readable `SplitVKPath`
-// and `SettleLargerVKPath`. DB init and VK loading panic on failure.
+// readings. `tables` must contain orders, comparisons, settlements and addresses.
+// `cfg` must carry readable `SplitVKPath`
+// and `SettleLargerVKPath`. VK loading panics on failure.
 // Only the larger party submits a ZK proof; the smaller party confirms
 // settlement without proof, so no settle_smaller VK is needed.
-func NewOrderBook(cfg *OrderBookConfig, db *gorm.DB, pending *store.Pending) *OrderBook {
+func NewOrderBook(cfg *OrderBookConfig, tables []*sqlstate.Table) *OrderBook {
 	tri := tripod.NewTripodWithName(OrderBookTripodName)
 	splitVK, err := account.LoadVK("split", cfg.SplitVKPath)
 	if err != nil {
@@ -92,9 +90,8 @@ func NewOrderBook(cfg *OrderBookConfig, db *gorm.DB, pending *store.Pending) *Or
 		}
 	}
 	ot := &OrderBook{
-		Tripod:         tri,
-		db:             db,
-		pending:        pending,
+		Tripod: tri,
+		orders: tables[0], comparisons: tables[1], settlements: tables[2], addresses: tables[3],
 		splitVK:        splitVK,
 		settleLargerVK: settleLargerVK,
 		settleCoZkVK:   settleCoZkVK,
@@ -407,7 +404,7 @@ func (ot *OrderBook) CompareOrders(ctx *context.WriteContext) error {
 	counterSub, err := ot.GetCompareSubmission(req.MatchOrderID)
 	if err != nil {
 		// Counterparty not yet submitted — store this submission and return.
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
+		if !errors.Is(err, sqlstate.ErrNotFound) {
 			return fmt.Errorf("failed to check counterparty compare submission: %w", err)
 		}
 		shareJSON, _ := json.Marshal(req.MpcShare)
@@ -561,7 +558,7 @@ func (ot *OrderBook) SettleOrders(ctx *context.WriteContext) error {
 	counterSub, err := ot.GetSettleSubmission(req.MatchOrderID)
 	if err != nil {
 		// Counterparty not yet submitted — store this submission and return.
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
+		if !errors.Is(err, sqlstate.ErrNotFound) {
 			return fmt.Errorf("failed to check counterparty settle submission: %w", err)
 		}
 		legJSON := ""

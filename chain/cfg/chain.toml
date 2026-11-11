@@ -9,7 +9,7 @@ ws_port     = "8999"
 log_level   = "info"
 log_output  = ""         # empty = stderr
 lei_limit   = 50000
-statedb_type = ""
+statedb_type = "sql"
 
 [chain_spec]
 chain_name = "Invisibook"

@@ -234,11 +234,20 @@ Without a `[ckb]` section the node runs against in-memory stand-ins for L1
 (`MockL1PaymentVerifier`, `MockL1CommitmentSubmitter`); with one it reads and
 writes a real CKB chain through [`chain/ckb`](../chain/ckb).
 
-Finality follows from fork choice: which fork is canonical is decided by
-cumulative goal, irreversibility grows with the score gap, and L1's record of
-when each commitment appeared is what exposes a fork bought after the fact. The
-interfaces that read a verdict back from L1 are gone; staged writes are
-promoted once the commitment is on chain, pending fork choice.
+Finality follows the fixed L1 batch windows defined by PoB. Once a window has
+closed and accumulated its confirmation depth, nodes select the complete,
+continuous branch with the largest cumulative goal. Business tables use yu
+v1.5.0 SQL state directly: execution starts from the actual parent version,
+transaction failures roll back through yu, and finalization atomically promotes
+the chosen state and retires losing forks. No separate application overlay,
+staging table, or applied-height marker is maintained.
+
+Producer rewards are written before StateRoot is committed. The producer then
+seals and signs the resulting header and binds the state version to its final
+block hash. Reward identities use the parent, height, producer and transaction
+root, avoiding a circular dependency on the final block hash. Genesis allocations
+also participate in the genesis state root. Existing pre-v1.5 application databases
+are not automatically converted into this authenticated state format.
 
 ## 3. Business-Scenario Walkthroughs
 

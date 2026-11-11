@@ -28,16 +28,16 @@ func CalcBlockReward(coinbase, fees *big.Int) *big.Int {
 }
 
 // RewardRandomHex derives the blinding factor for a block's coinbase
-// commitment from the block hash.
+// commitment from the pre-execution reward identity.
 //
 // It has to be derived rather than sampled: every node executes the block and
 // must arrive at byte-identical state, so a random draw would fork the chain.
 // The consequence is that the reward's opening is public — anyone can
 // recompute (amount, random) — but the reward amount is public anyway. Only
 // the owner's key can spend it.
-func RewardRandomHex(blockHash common.Hash) string {
+func RewardRandomHex(identity common.Hash) string {
 	h := sha256.New()
-	h.Write(blockHash.Bytes())
+	h.Write(identity.Bytes())
 	h.Write([]byte(rewardRandomDomain))
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -72,17 +72,17 @@ func handlingFees(block *types.Block) (*big.Int, error) {
 
 // creditReward mints native-token cash holding `commitment` for `owner`.
 //
-// `blockHash` is mixed into the cash ID so that two blocks paying the same
+// The pre-execution identity is mixed into the cash ID so different heights paying the same
 // owner the same amount stay two distinct records. The reward is Active on
 // creation: unlike bridged cash there is nothing to prove about where it came
 // from, the block itself is the proof.
-func (p *ProofOfBuy) creditReward(owner, commitment string, blockHash common.Hash) error {
+func (p *ProofOfBuy) creditReward(owner, commitment string, identity common.Hash) error {
 	return p.Account.CreateCash(&account.Cash{
-		ID:      account.ComputeRewardCashID(owner, account.NativeToken.Name, account.CipherText(commitment), blockHash),
+		ID:      account.ComputeRewardCashID(owner, account.NativeToken.Name, account.CipherText(commitment), identity),
 		Pubkey:  owner,
 		Token:   account.NativeToken.Name,
 		Amount:  account.CipherText(commitment),
-		ZkProof: fmt.Sprintf("coinbase:%s", blockHash.String()),
+		ZkProof: fmt.Sprintf("coinbase:%s", identity.String()),
 		Status:  account.Active,
 	})
 }
@@ -101,46 +101,36 @@ func (p *ProofOfBuy) creditReward(owner, commitment string, blockHash common.Has
 // an all-or-nothing bet (docs/proof_of_buy.md §10.2) — that requires knowing
 // which rivals bid, which means their losing blocks have to be retained and
 // their payments confirmed, none of which happens yet.
-func (p *ProofOfBuy) payBlockReward(block *types.Block) {
+func (p *ProofOfBuy) payBlockReward(block *types.Block) error {
 	if p.Account == nil {
-		return
+		return nil
 	}
 	if len(block.MinerPubkey) == 0 {
-		logrus.Warnf("PoB: block at height=%d carries no miner key, reward dropped", block.Height)
-		return
+		return fmt.Errorf("reward has no producer key")
 	}
 	owner := hex.EncodeToString(block.MinerPubkey)
-
 	coinbase, ok := new(big.Int).SetString(p.cfg.CoinbaseReward, 10)
-	if !ok {
-		logrus.Errorf("PoB: invalid coinbase_reward %q in config, paying no reward for height=%d",
-			p.cfg.CoinbaseReward, block.Height)
-		return
+	if !ok || coinbase.Sign() < 0 {
+		return fmt.Errorf("invalid coinbase_reward %q", p.cfg.CoinbaseReward)
 	}
-
 	fees, err := handlingFees(block)
 	if err != nil {
-		logrus.Errorf("PoB: summing handling fees at height=%d: %v, paying coinbase only", block.Height, err)
-		fees = new(big.Int)
+		return err
 	}
-
 	reward := CalcBlockReward(coinbase, fees)
 	if reward.Sign() <= 0 {
-		return
+		return nil
 	}
-
-	commitment, err := PoseidonCommit(reward, RewardRandomHex(block.Hash))
+	identity := rewardIdentity(block)
+	commitment, err := PoseidonCommit(reward, RewardRandomHex(identity))
 	if err != nil {
-		logrus.Errorf("PoB: committing block reward at height=%d: %v", block.Height, err)
-		return
+		return err
 	}
-	if err := p.creditReward(owner, commitment, block.Hash); err != nil {
-		logrus.Errorf("PoB: crediting block reward at height=%d: %v", block.Height, err)
-		return
+	if err := p.creditReward(owner, commitment, identity); err != nil {
+		return err
 	}
-
-	logrus.Infof("PoB: block reward height=%d coinbase=%s fees=%s total=%s to %s",
-		block.Height, coinbase, fees, reward, shortHex(owner))
+	logrus.Infof("PoB: block reward height=%d coinbase=%s fees=%s total=%s to %s", block.Height, coinbase, fees, reward, shortHex(owner))
+	return nil
 }
 
 // shortHex trims a long hex string down to something readable in a log line.
@@ -149,4 +139,13 @@ func shortHex(s string) string {
 		return s
 	}
 	return s[:12] + "…"
+}
+
+// rewardIdentity binds rewards to the parent, height, producer and transaction root without a circular StateRoot dependency.
+func rewardIdentity(block *types.Block) common.Hash {
+	raw := append([]byte("pob-reward-v2"), block.PrevHash.Bytes()...)
+	raw = append(raw, []byte(fmt.Sprintf(":%d:", block.Height))...)
+	raw = append(raw, block.MinerPubkey...)
+	raw = append(raw, block.TxnRoot.Bytes()...)
+	return common.BytesToHash(common.Sha256(raw))
 }

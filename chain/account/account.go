@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"gorm.io/gorm"
-
-	"github.com/invisibook-lab/invisibook/store"
+	"github.com/yu-org/yu/core/state/sqlstate"
 
 	"github.com/yu-org/yu/core/context"
 	"github.com/yu-org/yu/core/tripod"
@@ -19,19 +17,17 @@ import (
 // amounts are encrypted ciphertext and cannot be summed on-chain.
 type Account struct {
 	*tripod.Tripod
-	db *gorm.DB
-	// pending stages this block's writes until L1 settles the height.
-	pending    *store.Pending
+	cash       *sqlstate.Table
 	cfg        *Config
 	depositVK  *CircuitVK
 	withdrawVK *CircuitVK
 }
 
 // NewAccount constructs the Account tripod and registers its writings and readings.
-// `cfg` must carry a valid SQLite DSN and readable `DepositVKPath` /
-// `WithdrawVKPath`. DB init and VK loading panic on failure — the chain will
+// `cfg` must carry readable `DepositVKPath` /
+// `WithdrawVKPath`. VK loading panics on failure; the chain will
 // not start without all wallet circuits' verifying keys in memory.
-func NewAccount(cfg *Config, db *gorm.DB, pending *store.Pending) *Account {
+func NewAccount(cfg *Config, cash *sqlstate.Table) *Account {
 	tri := tripod.NewTripodWithName("account")
 	depositVK, err := LoadVK("deposit", cfg.DepositVKPath)
 	if err != nil {
@@ -43,8 +39,7 @@ func NewAccount(cfg *Config, db *gorm.DB, pending *store.Pending) *Account {
 	}
 	a := &Account{
 		Tripod:     tri,
-		db:         db,
-		pending:    pending,
+		cash:       cash,
 		cfg:        cfg,
 		depositVK:  depositVK,
 		withdrawVK: withdrawVK,
@@ -52,29 +47,6 @@ func NewAccount(cfg *Config, db *gorm.DB, pending *store.Pending) *Account {
 	a.SetWritings(a.Deposit, a.Withdraw)
 	a.SetReadings(a.GetAccount)
 	return a
-}
-
-// InitChain inserts genesis Cash records at chain startup.
-// Cash IDs are taken directly from the config — no derivation happens on-chain.
-// Idempotent: skips records that already exist so the chain can restart safely.
-func (a *Account) InitChain() {
-	for _, gc := range a.cfg.GenesisCash {
-		if a.CashExists(gc.ID) {
-			continue
-		}
-		cash := &Cash{
-			ID:      gc.ID,
-			Pubkey:  gc.Pubkey,
-			Token:   TokenID(gc.Token),
-			Amount:  CipherText(gc.Amount),
-			ZkProof: "genesis",
-			Status:  Active,
-		}
-		if err := a.createCashDirect(cash); err != nil {
-			panic(fmt.Sprintf("failed to seed genesis cash %s: %v", gc.ID, err))
-		}
-		fmt.Printf("genesis: id=%s pubkey=%s token=%s\n", gc.ID, gc.Pubkey, gc.Token)
-	}
 }
 
 // ────────────────────── Reading: GetAccount ──────────────────────
@@ -171,7 +143,7 @@ func (a *Account) Deposit(ctx *context.WriteContext) error {
 		ZkProof: req.ZkProof,
 		Status:  Active,
 	}
-	if err := a.createCashDirect(cash); err != nil {
+	if err := a.CreateCash(cash); err != nil {
 		return fmt.Errorf("failed to create cash: %w", err)
 	}
 
