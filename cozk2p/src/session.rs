@@ -138,7 +138,7 @@ pub struct SessionResult {
     pub public: SettlePublic,
     /// Hex of the ark-compressed PLONK proof (the on-chain wire format).
     pub proof_hex: String,
-    /// Both traders' 128-char hex ed25519 signatures over the canonical
+    /// Both traders' 128-char hex secp256k1 signatures over the canonical
     /// settlement message (opaque to this crate; the app verifies them).
     pub sig_a: String,
     pub sig_b: String,
@@ -161,7 +161,7 @@ pub struct NeedSig {
 
 /// Host-side signature ferry. `request_sig` is called at most once per
 /// session, from a blocking context, and must return this trader's 128-char
-/// hex ed25519 signature over the canonical settlement message built from
+/// hex secp256k1 signature over the canonical settlement message built from
 /// `need` plus the order ids the host already knows.
 pub trait SigIo: Send {
     fn request_sig(&mut self, need: &NeedSig) -> Result<String>;

@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use k256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use yu_sdk::{KeyPair, YuClient};
@@ -109,7 +109,7 @@ pub struct SettleTokenLegParam {
 /// settlement message. `order_a_id` must be the maker's order (earlier block
 /// height; ties broken by the smaller order ID), `cmp` the public three-way
 /// comparison sign(a - b), and the six commitments the circuit's public
-/// outputs. `sig_a`/`sig_b` are ed25519 signatures over
+/// outputs. `sig_a`/`sig_b` are secp256k1 signatures over
 /// `settle_cozk_message` by each order's key.
 #[derive(Debug, Clone, Serialize)]
 pub struct SettleCoZkParams {
@@ -147,14 +147,14 @@ fn settle_cozk_message_with_prefix(prefix: &str, params: &SettleCoZkParams) -> V
     msg.into_bytes()
 }
 
-/// Canonical byte string both traders ed25519-sign for a 3-party co-zk
+/// Canonical byte string both traders secp256k1-sign for a 3-party co-zk
 /// settlement. Must stay in lockstep with Go `core.CoZkSettleMessage`. The
 /// signature fields of `params` are not part of the message and may be empty.
 pub fn settle_cozk_message(params: &SettleCoZkParams) -> Vec<u8> {
     settle_cozk_message_with_prefix("invisibook-cozk-settle", params)
 }
 
-/// Canonical byte string both traders ed25519-sign for a 2-party co-zk
+/// Canonical byte string both traders secp256k1-sign for a 2-party co-zk
 /// settlement. Must stay in lockstep with Go `core.CoZk2pSettleMessage`; the
 /// distinct prefix domain-separates the 2-party variant from the 3-party one.
 /// The signature fields of `params` are not part of the message and may be empty.
@@ -162,9 +162,10 @@ pub fn settle_cozk2p_message(params: &SettleCoZkParams) -> Vec<u8> {
     settle_cozk_message_with_prefix("invisibook-cozk2p-settle", params)
 }
 
-/// Verifies an ed25519 signature over `settle_cozk2p_message(params)`.
-/// `pubkey_hex` must be the signer's raw ed25519 public key as a 64-char hex
-/// string and `sig_hex` the 64-byte signature as a 128-char hex string.
+/// Verifies a secp256k1 ECDSA signature over `settle_cozk2p_message(params)`.
+/// `pubkey_hex` must encode a 33-byte compressed public key and `sig_hex`
+/// a 64-byte compact signature. Verification hashes the message with SHA-256,
+/// matching yu-sdk signing and the Go chain's owner signature verifier.
 /// Returns `false` (never panics) on any malformed input.
 pub fn verify_settle_cozk2p_sig(
     params: &SettleCoZkParams,
@@ -177,16 +178,15 @@ pub fn verify_settle_cozk2p_sig(
     let Ok(sig_bytes) = hex::decode(sig_hex) else {
         return false;
     };
-    let Ok(pk_arr) = <[u8; 32]>::try_from(pk_bytes.as_slice()) else {
+    if pk_bytes.len() != 33 {
+        return false;
+    }
+    let Ok(verifying_key) = VerifyingKey::from_sec1_bytes(&pk_bytes) else {
         return false;
     };
-    let Ok(sig_arr) = <[u8; 64]>::try_from(sig_bytes.as_slice()) else {
+    let Ok(signature) = Signature::from_slice(&sig_bytes) else {
         return false;
     };
-    let Ok(verifying_key) = VerifyingKey::from_bytes(&pk_arr) else {
-        return false;
-    };
-    let signature = Signature::from_bytes(&sig_arr);
     verifying_key
         .verify(&settle_cozk2p_message(params), &signature)
         .is_ok()
@@ -523,7 +523,7 @@ impl ChainClient {
             .await
     }
 
-    /// ed25519-signs the canonical co-zk settlement message with this
+    /// secp256k1-signs the canonical co-zk settlement message with this
     /// client's key, returning the 128-char hex signature. The signature
     /// fields of `params` are ignored (they are not part of the message).
     pub fn sign_settle_cozk(&self, params: &SettleCoZkParams) -> String {
@@ -549,7 +549,7 @@ impl ChainClient {
             .await
     }
 
-    /// ed25519-signs the canonical 2-party co-zk settlement message with this
+    /// secp256k1-signs the canonical 2-party co-zk settlement message with this
     /// client's key, returning the 128-char hex signature. The signature
     /// fields of `params` are ignored (they are not part of the message).
     pub fn sign_settle_cozk2p(&self, params: &SettleCoZkParams) -> String {
