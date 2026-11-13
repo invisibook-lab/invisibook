@@ -1,0 +1,14 @@
+# CKB-VM has no A extension, and pob-budget links Plonky3's verifier, which
+# leans on `Arc` throughout. Rather than avoiding atomics, compile them out:
+# without A — and, on current LLVM, without its halves Zaamo and Zalrsc, or
+# `-a` alone leaves them on and instruction selection fails — every atomic
+# becomes an `__atomic_*` call, which ckb-std's `dummy-atomic` feature (on by
+# default) implements as plain loads and stores. Sound on a VM that only ever
+# runs one thread.
+#
+# At the repo root rather than beside the contract because cargo looks for
+# this file from the working directory, not from `--manifest-path`: the
+# scripts and ckb/README.md build contracts from elsewhere. Only the RISC-V
+# target is affected, so host builds anywhere in the repo are untouched.
+[target.riscv64imac-unknown-none-elf]
+rustflags = ["-C", "target-feature=-a,-zaamo,-zalrsc"]

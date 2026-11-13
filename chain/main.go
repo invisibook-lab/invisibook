@@ -2,37 +2,58 @@ package main
 
 import (
 	"flag"
-	"log"
 
-	"github.com/yu-org/yu/apps/poa"
+	"github.com/sirupsen/logrus"
+	"github.com/yu-org/yu/apps/synchronizer"
 	"github.com/yu-org/yu/core/startup"
+	"github.com/yu-org/yu/core/state/sqlstate"
 
+	"github.com/invisibook-lab/invisibook/account"
+	"github.com/invisibook-lab/invisibook/config"
+	"github.com/invisibook-lab/invisibook/consensus"
 	"github.com/invisibook-lab/invisibook/core"
 )
 
 // main boots the Invisibook chain node: it loads kernel and core configs,
-// constructs the PoA, Account, and OrderBook tripods, then starts the kernel.
-// `cfgPath` and `coreCfgPath` must point at readable TOML files (or core falls
-// back to defaults if its file is missing/unreadable).
+// constructs the configured consensus, Account, and OrderBook tripods, then starts
+// the kernel.
 func main() {
 	cfgPath := flag.String("config", "cfg/chain.toml", "path to chain config file")
 	coreCfgPath := flag.String("core-config", "cfg/core.toml", "path to core tripod config file")
 	flag.Parse()
 
 	yuCfg := startup.InitKernelConfigFromPath(*cfgPath)
-	poaCfg := poa.SingleNodeCfg()
 
-	// Core config is optional: missing or malformed files fall back to defaults
-	// so a fresh node can boot without a hand-written core.toml.
-	coreCfg, err := core.LoadConfig(*coreCfgPath)
+	coreCfg, err := config.Load(*coreCfgPath)
 	if err != nil {
-		log.Printf("WARN: failed to load core config (%s), using defaults: %v", *coreCfgPath, err)
-		coreCfg = core.DefaultConfig()
+		logrus.Fatal("loading core configuration: ", err)
 	}
+	// yu owns the SQL connection and state lifecycle configured in chain.toml.
+	kernel := startup.InitKernel(yuCfg)
+	stateDB, ok := startup.StateDB.(*sqlstate.State)
+	if !ok {
+		logrus.Fatal("Invisibook requires statedb_type = sql")
+	}
+	kernel.ChainEnv.BindState = recoveringBind(stateDB, kernel.Chain.GetCompactBlock, kernel.BindState)
+	cash, tables, err := consensus.RegisterTables(stateDB)
+	if err != nil {
+		logrus.Fatal("registering state tables: ", err)
+	}
+	accountTri := account.NewAccount(&coreCfg.Account, cash)
+	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook, tables)
+	selected, err := buildConsensus(coreCfg)
+	if err != nil {
+		logrus.Fatal("building consensus: ", err)
+	}
+	genesisTri, err := consensus.NewGenesis(coreCfg.Consensus.Engine, &coreCfg.PoB, stateDB, cash, &coreCfg.Account)
+	if err != nil {
+		logrus.Fatal("building genesis: ", err)
+	}
+	selected.start()
 
-	poaTri := poa.NewPoa(poaCfg)
-	accountTri := core.NewAccount(&coreCfg.Account)
-	orderBookTri := core.NewOrderBook(&coreCfg.OrderBook)
-
-	startup.InitDefaultKernel(yuCfg).WithTripods(poaTri, accountTri, orderBookTri).Startup()
+	// The shared genesis tripod defines the genesis block; the
+	// kernel writes it before any InitChain runs.
+	kernel.
+		WithTripods(genesisTri, selected.tripod, accountTri, orderBookTri, synchronizer.NewSynchronizer(yuCfg.SyncMode)).
+		Startup()
 }

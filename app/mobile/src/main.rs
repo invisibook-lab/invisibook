@@ -26,7 +26,7 @@ fn App() -> Element {
         let cfg = ClientConfig::load(None);
         match cfg.seed() {
             Ok(seed) => {
-                let kp = yu_sdk::KeyPair::from_ed25519_bytes(&seed);
+                let kp = yu_sdk::KeyPair::from_secp256k1_bytes(&seed).expect("valid secp256k1 key");
                 let addr = hex::encode(kp.pubkey_bytes());
                 let c = ChainClient::new(
                     &cfg.chain.http_url,

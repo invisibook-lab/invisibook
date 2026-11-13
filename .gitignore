@@ -16,6 +16,10 @@ node_modules/
 
 # Go build binary
 invisibook
+/chain/pob-miner
 
 # Dev dual-instance test data
 .dev/
+
+# Local CKB devnet scratch space (scripts/devnet.sh)
+.devnet/

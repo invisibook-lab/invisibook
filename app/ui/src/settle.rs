@@ -6,7 +6,7 @@
 //! proof — runs in the pre-built `settle2p_session` subprocess (a separate
 //! cargo workspace pinned to an older toolchain, so it cannot be linked).
 //! This module drives that subprocess over piped stdio, ferries the one
-//! ed25519 signature it asks for, submits the single on-chain writing, and
+//! secp256k1 signature it asks for, submits the single on-chain writing, and
 //! persists the resulting UTXOs.
 //!
 //! NOTE: peer QUIC addresses are exchanged on-chain today; production would

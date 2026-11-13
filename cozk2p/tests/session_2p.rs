@@ -17,7 +17,7 @@ use cozk2p::{
 use mpc_plonk::proof_system::structs::Proof;
 
 /// Fixed dummy signatures: content is opaque to the session (the app layer
-/// verifies real ed25519 signatures); the session only ferries them.
+/// verifies real secp256k1 signatures); the session only ferries them.
 const SIG_A: &str = "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11\
                      aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11";
 const SIG_B: &str = "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22\

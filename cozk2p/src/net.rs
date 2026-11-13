@@ -4,7 +4,7 @@
 //! PARTY1 (trader B) listens. TLS uses an in-crate self-signed certificate
 //! with a pass-through verifier — transport encryption without peer
 //! authentication. Peers must authenticate at the application layer (the
-//! settlement message is ed25519-signed by both traders before the chain
+//! settlement message is secp256k1-signed by both traders before the chain
 //! accepts it, and the SPDZ MACs abort on any in-protocol tampering).
 
 use std::{net::SocketAddr, time::Duration};

@@ -1,0 +1,21 @@
+[package]
+name = "pob-budget"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ckb-std = "1.1"
+# R3.2's STARK verifier (no_std). Shared with the prover, so the two cannot
+# disagree about the statement.
+budget-stark = { path = "../../../lib/budget-stark" }
+
+[profile.release]
+# "s", not "z": "z" saves ~35 KB of code but makes R3.2's verifier ~55%
+# slower (78M vs 50M cycles).
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+# Symbols are dead weight in a code cell, which is paid for by the byte: this
+# halves the binary (~490 KB to ~220 KB).
+strip = "symbols"

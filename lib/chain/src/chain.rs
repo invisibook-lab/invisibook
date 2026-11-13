@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use k256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use yu_sdk::{KeyPair, YuClient};
@@ -25,8 +25,8 @@ struct SendOrderParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     price: Option<u64>,
     amount: CipherText,
-    pubkey: String,    // sender's ed25519 pubkey (64-char hex)
-    signature: String, // ed25519 sig over order ID bytes (128-char hex)
+    pubkey: String,    // sender's compressed secp256k1 pubkey (66-char hex)
+    signature: String, // compact secp256k1 sig over order ID bytes (128-char hex)
     input_cash_ids: Vec<String>,
     handling_fee: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,7 +109,7 @@ pub struct SettleTokenLegParam {
 /// settlement message. `order_a_id` must be the maker's order (earlier block
 /// height; ties broken by the smaller order ID), `cmp` the public three-way
 /// comparison sign(a - b), and the six commitments the circuit's public
-/// outputs. `sig_a`/`sig_b` are ed25519 signatures over
+/// outputs. `sig_a`/`sig_b` are secp256k1 signatures over
 /// `settle_cozk_message` by each order's key.
 #[derive(Debug, Clone, Serialize)]
 pub struct SettleCoZkParams {
@@ -147,14 +147,14 @@ fn settle_cozk_message_with_prefix(prefix: &str, params: &SettleCoZkParams) -> V
     msg.into_bytes()
 }
 
-/// Canonical byte string both traders ed25519-sign for a 3-party co-zk
+/// Canonical byte string both traders secp256k1-sign for a 3-party co-zk
 /// settlement. Must stay in lockstep with Go `core.CoZkSettleMessage`. The
 /// signature fields of `params` are not part of the message and may be empty.
 pub fn settle_cozk_message(params: &SettleCoZkParams) -> Vec<u8> {
     settle_cozk_message_with_prefix("invisibook-cozk-settle", params)
 }
 
-/// Canonical byte string both traders ed25519-sign for a 2-party co-zk
+/// Canonical byte string both traders secp256k1-sign for a 2-party co-zk
 /// settlement. Must stay in lockstep with Go `core.CoZk2pSettleMessage`; the
 /// distinct prefix domain-separates the 2-party variant from the 3-party one.
 /// The signature fields of `params` are not part of the message and may be empty.
@@ -162,9 +162,10 @@ pub fn settle_cozk2p_message(params: &SettleCoZkParams) -> Vec<u8> {
     settle_cozk_message_with_prefix("invisibook-cozk2p-settle", params)
 }
 
-/// Verifies an ed25519 signature over `settle_cozk2p_message(params)`.
-/// `pubkey_hex` must be the signer's raw ed25519 public key as a 64-char hex
-/// string and `sig_hex` the 64-byte signature as a 128-char hex string.
+/// Verifies a secp256k1 ECDSA signature over `settle_cozk2p_message(params)`.
+/// `pubkey_hex` must encode a 33-byte compressed public key and `sig_hex`
+/// a 64-byte compact signature. Verification hashes the message with SHA-256,
+/// matching yu-sdk signing and the Go chain's owner signature verifier.
 /// Returns `false` (never panics) on any malformed input.
 pub fn verify_settle_cozk2p_sig(
     params: &SettleCoZkParams,
@@ -177,16 +178,15 @@ pub fn verify_settle_cozk2p_sig(
     let Ok(sig_bytes) = hex::decode(sig_hex) else {
         return false;
     };
-    let Ok(pk_arr) = <[u8; 32]>::try_from(pk_bytes.as_slice()) else {
+    if pk_bytes.len() != 33 {
+        return false;
+    }
+    let Ok(verifying_key) = VerifyingKey::from_sec1_bytes(&pk_bytes) else {
         return false;
     };
-    let Ok(sig_arr) = <[u8; 64]>::try_from(sig_bytes.as_slice()) else {
+    let Ok(signature) = Signature::from_slice(&sig_bytes) else {
         return false;
     };
-    let Ok(verifying_key) = VerifyingKey::from_bytes(&pk_arr) else {
-        return false;
-    };
-    let signature = Signature::from_bytes(&sig_arr);
     verifying_key
         .verify(&settle_cozk2p_message(params), &signature)
         .is_ok()
@@ -388,17 +388,18 @@ pub struct ChainClient {
     client: YuClient,
     ws_url: String,
     chain_id: u64,
-    seed: [u8; 32],     // ed25519 private key seed (for application-level signing)
-    pubkey_hex: String, // raw ed25519 pubkey as 64-char hex
+    seed: [u8; 32],     // secp256k1 private key (for application-level signing)
+    pubkey_hex: String, // compressed secp256k1 pubkey as 66-char hex
 }
 
 impl ChainClient {
     /// Creates a new ChainClient connected to the given yu node.
     /// `http_url` example: "http://localhost:7999"
     /// `ws_url`   example: "ws://localhost:8999"
-    /// `seed` is the 32-byte ed25519 private key seed.
+    /// `seed` is the 32-byte secp256k1 private key.
     pub fn new(http_url: &str, ws_url: &str, seed: [u8; 32], chain_id: u64) -> Self {
-        let keypair = KeyPair::from_ed25519_bytes(&seed);
+        let keypair =
+            KeyPair::from_secp256k1_bytes(&seed).expect("derived seed is a valid secp256k1 key");
         let pubkey_hex = hex::encode(keypair.pubkey_bytes());
         let client = YuClient::new(http_url, ws_url).with_keypair(keypair);
         Self {
@@ -410,15 +411,17 @@ impl ChainClient {
         }
     }
 
-    /// Returns the owner's raw ed25519 pubkey as a 64-char hex string.
+    /// Returns the owner's compressed secp256k1 pubkey as a 66-char hex string.
     pub fn pubkey_hex(&self) -> &str {
         &self.pubkey_hex
     }
 
-    /// Signs `message` with the client's ed25519 private key.
-    /// Returns the 64-byte signature as a 128-char hex string.
+    /// Signs `message` with the client's secp256k1 private key — the same key
+    /// that owns the cash being spent and, for a miner, signs its blocks.
+    /// Returns the 64-byte compact signature as a 128-char hex string.
     fn sign(&self, message: &[u8]) -> String {
-        let kp = KeyPair::from_ed25519_bytes(&self.seed);
+        let kp = KeyPair::from_secp256k1_bytes(&self.seed)
+            .expect("derived seed is a valid secp256k1 key");
         hex::encode(kp.sign(message))
     }
 
@@ -520,7 +523,7 @@ impl ChainClient {
             .await
     }
 
-    /// ed25519-signs the canonical co-zk settlement message with this
+    /// secp256k1-signs the canonical co-zk settlement message with this
     /// client's key, returning the 128-char hex signature. The signature
     /// fields of `params` are ignored (they are not part of the message).
     pub fn sign_settle_cozk(&self, params: &SettleCoZkParams) -> String {
@@ -546,7 +549,7 @@ impl ChainClient {
             .await
     }
 
-    /// ed25519-signs the canonical 2-party co-zk settlement message with this
+    /// secp256k1-signs the canonical 2-party co-zk settlement message with this
     /// client's key, returning the 128-char hex signature. The signature
     /// fields of `params` are ignored (they are not part of the message).
     pub fn sign_settle_cozk2p(&self, params: &SettleCoZkParams) -> String {
