@@ -1,4 +1,4 @@
-package main
+package consensus
 
 import (
 	"fmt"
@@ -11,8 +11,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// registerTables registers all business schemas before block execution begins.
-func registerTables(s *sqlstate.State) (*sqlstate.Table, []*sqlstate.Table, error) {
+// RegisterTables registers all business schemas before block execution begins.
+func RegisterTables(s *sqlstate.State) (*sqlstate.Table, []*sqlstate.Table, error) {
 	cash, err := s.RegisterTable("account", &account.CashScheme{})
 	if err != nil {
 		return nil, nil, err
@@ -58,7 +58,7 @@ func genesisStateRoot(cfg *account.Config) (common.Hash, error) {
 	if err != nil {
 		return common.Hash{}, err
 	}
-	cash, _, err := registerTables(s)
+	cash, _, err := RegisterTables(s)
 	if err != nil {
 		return common.Hash{}, err
 	}
@@ -73,7 +73,8 @@ func genesisStateRoot(cfg *account.Config) (common.Hash, error) {
 }
 
 // initializeGenesis prepares the exact genesis version before yu anchors its finalized identity.
-func initializeGenesis(s *sqlstate.State, cash *sqlstate.Table, cfg *account.Config, genesis *types.Block) error {
+func (p *Genesis) initializeState(genesis *types.Block) error {
+	s, cash, cfg := p.state, p.cash, p.accountCfg
 	if err := s.Store.Begin(genesis.Hash.String(), "", 0); err != nil {
 		return err
 	}

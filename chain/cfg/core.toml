@@ -3,6 +3,7 @@
 # SQL state storage is configured in chain.toml under [state_sql].
 
 [consensus]
+engine = "pob" # "pob" or "poa"; fixed for the lifetime of this chain.
 min_payment     = "100"
 # Protocol behaviour is to sit out any height with no L1-confirmed declaration.
 # Turn this on together with [ckb] below: against the mock L1 no declaration
@@ -136,3 +137,15 @@ amount = "08dc6ec7efa5cb39b1ed533b754eae8e76b99d1c8cb1a867caa954ce0b082c9b"  # 6
 # ...
 # [ckb.spent_script]                   # pob-spent
 # ...
+
+# Used only when consensus.engine = "poa". Development key; replace for deployment.
+[poa]
+key_type = "secp256k1"
+my_secret = "node1"
+block_interval = 3000
+pack_num = 30000
+pretty_log = false
+
+[[poa.validators]]
+pubkey = "0x3302e9f64e8000c3df2aabd5441904fa073bf797e8f4c10241a0a9df2c9401cb71af"
+p2p_ip = ""

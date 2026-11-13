@@ -29,21 +29,21 @@ func (noTxDB) SetReceipt(common.Hash, *types.Receipt) error        { return nil 
 
 // newGenesisPoB returns a ProofOfBuy on a fresh yu chain of `chainID`, with
 // nothing but the chain wired in.
-func newGenesisPoB(t *testing.T, chainID uint64) (*ProofOfBuy, *blockchain.BlockChain) {
+func newGenesisPoB(t *testing.T, chainID uint64) (*Genesis, *blockchain.BlockChain) {
 	t.Helper()
 	return openGenesisPoB(chainID, filepath.Join(t.TempDir(), "chain.db"))
 }
 
 // openGenesisPoB is newGenesisPoB on the database at `dsn`, which may already
 // hold a chain.
-func openGenesisPoB(chainID uint64, dsn string) (*ProofOfBuy, *blockchain.BlockChain) {
+func openGenesisPoB(chainID uint64, dsn string) (*Genesis, *blockchain.BlockChain) {
 	cfg := config.InitDefaultCfg()
 	cfg.BlockChain.ChainID = chainID
 	cfg.BlockChain.ChainDB.Dsn = dsn
 	chain := blockchain.NewBlockChain(common.FullNode, &cfg.BlockChain, noTxDB{})
 
 	pobCfg := DefaultConsensusConfig()
-	p := &ProofOfBuy{Tripod: tripod.NewTripod(), cfg: &pobCfg}
+	p := &Genesis{Tripod: tripod.NewTripodWithName("genesis"), cfg: &pobCfg}
 	p.SetChainEnv(&env.ChainEnv{Chain: chain})
 	return p, chain
 }
@@ -168,5 +168,15 @@ func TestCheckGenesisRefusesAnotherL1Height(t *testing.T) {
 	}()
 	if !exited {
 		t.Fatal("checkGenesis accepted a genesis built with another n")
+	}
+}
+
+// TestGenesisBindsConsensus refuses silently reusing chain identity across engines.
+func TestGenesisBindsConsensus(t *testing.T) {
+	pob, _ := newGenesisPoB(t, 1926)
+	poa, _ := newGenesisPoB(t, 1926)
+	poa.cfg.Engine = "poa"
+	if pob.DefineGenesis().Hash == poa.DefineGenesis().Hash {
+		t.Fatal("PoA and PoB share genesis identity")
 	}
 }

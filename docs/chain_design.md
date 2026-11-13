@@ -455,3 +455,30 @@ type Cash struct {
 - **[go-ecvrf](https://github.com/vechain/go-ecvrf)** — ECVRF on secp256k1 (`Secp256k1Sha256Tai`), used by the PoBuy consensus.
 - **[dcrd/dcrec/secp256k1](https://github.com/decred/dcrd)** — secp256k1 key parsing / compression, bridging yu keys to `ecdsa.PrivateKey`.
 - **Related client-side crypto** — amount ciphertext is produced off-chain in [lib/chain/src/orderbook.rs](../lib/chain/src/orderbook.rs) via Poseidon (BN254) on desktop, SHA-256 on Android; ZK proofs for deposit / settle / withdraw are produced in [lib/zk/](../lib/zk/) and verified by the three TODOs in `Deposit`, `SettleOrder`, `Withdraw`.
+
+
+## Configurable consensus
+
+`chain/cfg/core.toml` selects the startup consensus through `[consensus].engine`:
+`"pob"` (default, including older files that omit this field) or `"poa"`.
+The application registers exactly one consensus tripod, alongside the common
+`genesis`, account, orderbook and synchronizer tripods. SQL state and genesis
+balances are shared infrastructure. Configuration parse errors and unknown
+engines stop startup rather than selecting a fallback consensus.
+
+PoB retains its parameters under `[consensus]` and its L1 settings under `[ckb]`.
+Only PoB creates the CKB client, VRF, payment endpoint and L1 submission worker.
+Its producer rewards remain part of the PoB execution commit hook.
+
+PoA uses yu's `poa.NewPoa` and the `[poa]` section: `key_type`, `my_secret`,
+`block_interval` (milliseconds), `pack_num`, `pretty_log` and `[[poa.validators]]`
+entries containing a yu type-tagged `pubkey` and optional `p2p_ip` peer ID.
+The supplied single-validator configuration uses the development secret `node1`;
+replace the secret and validator list for deployment. PoA does not award PoB
+coinbase rewards or contact L1. Its key type is independent of user wallet keys.
+
+The consensus engine is committed in the common genesis block; PoB also commits
+its L1 starting height. This genesis format differs from the prior PoB-only
+format. Start this version with fresh chain and state databases. Switching an
+existing database between PoA and PoB is rejected; live consensus migration is
+not implemented.

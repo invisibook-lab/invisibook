@@ -57,9 +57,6 @@ type ProofOfBuy struct {
 	l1Submitter L1HeaderSubmitter
 	// schedule says which L1 window each batch of L2 heights is anchored in.
 	schedule AnchorSchedule
-	// GenesisRoot commits to the configured initial allocations.
-	GenesisRoot       common.Hash
-	InitializeGenesis func(*types.Block) error
 
 	// pendingFinalizations is a buffered channel for blocks whose header is
 	// yet to be submitted to L1.
@@ -102,7 +99,6 @@ func NewProofOfBuy(cfg *Config, pubkey keypair.PubKey, privkey keypair.PrivKey, 
 func (p *ProofOfBuy) InitChain() {
 	// A database carrying another chain's genesis cannot be run against:
 	// every block links back to genesis by hash.
-	p.checkGenesis()
 
 	p.reconcile()
 

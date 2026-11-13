@@ -2,6 +2,8 @@ package consensus
 
 // Config holds all configurable parameters for the Proof-of-Buy consensus.
 type Config struct {
+	// Engine selects the chain consensus at startup; changing it defines a new chain.
+	Engine string `toml:"engine"`
 	// MinPayment is the minimum L1 payment amount (decimal string), used as
 	// the fallback bid when RequireDeclaredPayment is off.
 	MinPayment string `toml:"min_payment"`
@@ -69,6 +71,7 @@ type Config struct {
 // DefaultConsensusConfig returns a Config with sensible defaults.
 func DefaultConsensusConfig() Config {
 	return Config{
+		Engine:                 "pob",
 		MinPayment:             "100",
 		RequireDeclaredPayment: true,
 		CoinbaseReward:         "0",

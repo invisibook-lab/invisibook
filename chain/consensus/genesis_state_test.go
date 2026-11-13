@@ -1,4 +1,4 @@
-package main
+package consensus
 
 import (
 	"github.com/invisibook-lab/invisibook/account"
@@ -35,12 +35,20 @@ func TestGenesisSQLCommitment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cash, _, err := registerTables(s)
+	cash, _, err := RegisterTables(s)
 	if err != nil {
 		t.Fatal(err)
 	}
 	genesis := &types.Block{Header: &types.Header{Hash: common.BytesToHash([]byte("genesis")), StateRoot: root}}
-	if err := initializeGenesis(s, cash, &cfg, genesis); err != nil {
+	consensusCfg := DefaultConsensusConfig()
+	initializer, err := NewGenesis(&consensusCfg, s, cash, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initializer.GenesisRoot != root {
+		t.Fatal("constructor computed a different genesis commitment")
+	}
+	if err := initializer.initializeState(genesis); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.InitializeState(genesis); err != nil {
@@ -54,7 +62,7 @@ func TestGenesisSQLCommitment(t *testing.T) {
 		t.Fatal(err)
 	}
 	var row account.CashScheme
-	restored, _, err := registerTables(restarted)
+	restored, _, err := RegisterTables(restarted)
 	if err != nil {
 		t.Fatal(err)
 	}
