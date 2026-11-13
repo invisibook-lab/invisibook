@@ -4,6 +4,9 @@
 # SQL state storage is configured in chain.toml under [state_sql].
 
 [consensus]
+engine = "pob"
+
+[pob]
 # The mock L1 holds no allocations, so no payment declaration can ever be
 # confirmed. Without this the node would sit out every height and never
 # produce a block, and the e2e test would have nothing to run against.

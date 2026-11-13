@@ -23,7 +23,7 @@ func buildConsensus(cfg *config.Config) (*selectedConsensus, error) {
 	if cfg.Consensus.Engine == "poa" {
 		return &selectedConsensus{tripod: poa.NewPoa(&cfg.PoA), start: func() {}}, nil
 	}
-	pub, priv, err := keypair.GenKeyPairWithSecret(keypair.Secp256k1, []byte(cfg.Consensus.MinerSecret))
+	pub, priv, err := keypair.GenKeyPairWithSecret(keypair.Secp256k1, []byte(cfg.PoB.MinerSecret))
 	if err != nil {
 		return nil, err
 	}
@@ -36,9 +36,9 @@ func buildConsensus(cfg *config.Config) (*selectedConsensus, error) {
 		return nil, err
 	}
 	book := consensus.NewPaymentBook()
-	pob := consensus.NewProofOfBuy(&cfg.Consensus, pub, priv, verifier, reader, vrf, submitter, book)
+	pob := consensus.NewProofOfBuy(&cfg.PoB, pub, priv, verifier, reader, vrf, submitter, book)
 	server := consensus.NewPaymentServer(book, verifier, consensus.MinerPubkeyHex(pub))
-	return &selectedConsensus{tripod: pob, start: func() { server.Start(cfg.Consensus.PaymentListen) }}, nil
+	return &selectedConsensus{tripod: pob, start: func() { server.Start(cfg.PoB.PaymentListen) }}, nil
 }
 
 // connectL1 constructs PoB's L1 interfaces without silently falling back on invalid CKB settings.

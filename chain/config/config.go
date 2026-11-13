@@ -24,17 +24,19 @@ import (
 //
 // Database ownership and connection settings belong to yu in cfg/chain.toml.
 type Config struct {
-	PoA       poa.PoaConfig        `toml:"poa"`
-	Consensus consensus.Config     `toml:"consensus"`
-	OrderBook core.OrderBookConfig `toml:"orderbook"`
-	Account   account.Config       `toml:"account"`
-	CKB       ckb.Config           `toml:"ckb"`
+	PoA       poa.PoaConfig          `toml:"poa"`
+	Consensus consensus.EngineConfig `toml:"consensus"`
+	PoB       consensus.Config       `toml:"pob"`
+	OrderBook core.OrderBookConfig   `toml:"orderbook"`
+	Account   account.Config         `toml:"account"`
+	CKB       ckb.Config             `toml:"ckb"`
 }
 
 // Default returns a Config with every section at its own default.
 func Default() *Config {
 	return &Config{
-		Consensus: consensus.DefaultConsensusConfig(),
+		Consensus: consensus.EngineConfig{Engine: "pob"},
+		PoB:       consensus.DefaultConsensusConfig(),
 		OrderBook: core.DefaultOrderBookConfig(),
 		Account:   account.DefaultConfig(),
 		CKB:       ckb.DefaultConfig(),
@@ -45,8 +47,14 @@ func Default() *Config {
 // Missing fields fall back to defaults.
 func Load(path string) (*Config, error) {
 	cfg := Default()
-	if _, err := toml.DecodeFile(path, cfg); err != nil {
+	metadata, err := toml.DecodeFile(path, cfg)
+	if err != nil {
 		return nil, fmt.Errorf("failed to load core config from %s: %w", path, err)
+	}
+	for _, key := range metadata.Undecoded() {
+		if len(key) > 0 && key[0] == "consensus" {
+			return nil, fmt.Errorf("unsupported setting %s: [consensus] only accepts engine; move PoB parameters to [pob]", key.String())
+		}
 	}
 	if err := cfg.ValidateConsensus(); err != nil {
 		return nil, err
@@ -58,7 +66,7 @@ func Load(path string) (*Config, error) {
 func (c *Config) ValidateConsensus() error {
 	switch c.Consensus.Engine {
 	case "pob":
-		_, err := consensus.NewAnchorSchedule(&c.Consensus)
+		_, err := consensus.NewAnchorSchedule(&c.PoB)
 		return err
 	case "poa":
 		if c.PoA.MySecret == "" {

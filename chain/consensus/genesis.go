@@ -15,6 +15,7 @@ import (
 type Genesis struct {
 	*tripod.Tripod
 	cfg         *Config
+	engine      string
 	GenesisRoot common.Hash
 	state       *sqlstate.State
 	cash        *sqlstate.Table
@@ -22,12 +23,12 @@ type Genesis struct {
 }
 
 // NewGenesis computes the initial commitment; state and cash must use registered business schemas.
-func NewGenesis(cfg *Config, state *sqlstate.State, cash *sqlstate.Table, accountCfg *account.Config) (*Genesis, error) {
+func NewGenesis(engine string, cfg *Config, state *sqlstate.State, cash *sqlstate.Table, accountCfg *account.Config) (*Genesis, error) {
 	root, err := genesisStateRoot(accountCfg)
 	if err != nil {
 		return nil, err
 	}
-	return &Genesis{Tripod: tripod.NewTripodWithName("genesis"), cfg: cfg, GenesisRoot: root, state: state, cash: cash, accountCfg: accountCfg}, nil
+	return &Genesis{Tripod: tripod.NewTripodWithName("genesis"), cfg: cfg, engine: engine, GenesisRoot: root, state: state, cash: cash, accountCfg: accountCfg}, nil
 }
 
 // InitChain refuses a database belonging to another chain or consensus selection.
@@ -73,10 +74,10 @@ func (p *Genesis) genesisBlock() (*types.Block, error) {
 	genesis.Height = 0
 	genesis.StateRoot = p.GenesisRoot
 	n := uint64(0)
-	if p.cfg.Engine == "pob" {
+	if p.engine == "pob" {
 		n = p.cfg.AnchorGenesisL1Height
 	}
-	genesis.Extra = append(encodeGenesisL1Height(n), []byte(p.cfg.Engine)...)
+	genesis.Extra = append(encodeGenesisL1Height(n), []byte(p.engine)...)
 	encoded, err := genesis.Encode()
 	if err != nil {
 		return nil, err

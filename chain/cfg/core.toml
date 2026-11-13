@@ -4,6 +4,8 @@
 
 [consensus]
 engine = "pob" # "pob" or "poa"; fixed for the lifetime of this chain.
+
+[pob]
 min_payment     = "100"
 # Protocol behaviour is to sit out any height with no L1-confirmed declaration.
 # Turn this on together with [ckb] below: against the mock L1 no declaration

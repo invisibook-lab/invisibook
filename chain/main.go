@@ -45,7 +45,7 @@ func main() {
 	if err != nil {
 		logrus.Fatal("building consensus: ", err)
 	}
-	genesisTri, err := consensus.NewGenesis(&coreCfg.Consensus, stateDB, cash, &coreCfg.Account)
+	genesisTri, err := consensus.NewGenesis(coreCfg.Consensus.Engine, &coreCfg.PoB, stateDB, cash, &coreCfg.Account)
 	if err != nil {
 		logrus.Fatal("building genesis: ", err)
 	}

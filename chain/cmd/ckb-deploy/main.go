@@ -133,7 +133,7 @@ func deployerKey(keyFile, coreConfig string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, privkey, err := keypair.GenKeyPairWithSecret(keypair.Secp256k1, []byte(cfg.Consensus.MinerSecret))
+	_, privkey, err := keypair.GenKeyPairWithSecret(keypair.Secp256k1, []byte(cfg.PoB.MinerSecret))
 	if err != nil {
 		return nil, fmt.Errorf("deriving the miner key: %w", err)
 	}

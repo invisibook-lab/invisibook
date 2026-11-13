@@ -27,7 +27,7 @@ func TestConsensusSelection(t *testing.T) {
 	// Invalid PoB-only settings must never be used by a PoA node.
 	cfg.CKB.Enabled = true
 	cfg.CKB.RPCURL = "invalid"
-	cfg.Consensus.AnchorBatchSize = 0
+	cfg.PoB.AnchorBatchSize = 0
 	selected, err := buildConsensus(cfg)
 	if err != nil {
 		t.Fatal(err)

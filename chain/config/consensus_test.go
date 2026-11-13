@@ -6,13 +6,15 @@ import (
 	"testing"
 )
 
-// TestConsensusConfigLoading preserves old PoB configs while rejecting explicit invalid selections.
+// TestConsensusConfigLoading validates engine selection and separate PoB settings.
 func TestConsensusConfigLoading(t *testing.T) {
 	for _, tc := range []struct {
 		name, text string
 		fail       bool
 	}{
-		{"legacy", "[consensus]\nmin_payment = \"100\"\n", false},
+		{"pob", "[consensus]\nengine = \"pob\"\n[pob]\npack_num = 17\n", false},
+		{"default", "", false},
+		{"old section", "[consensus]\npack_num = 17\n", true},
 		{"unknown", "[consensus]\nengine = \"unknown\"\n", true},
 		{"malformed", "[consensus\n", true},
 		{"incomplete poa", "[consensus]\nengine = \"poa\"\n", true},
@@ -33,7 +35,10 @@ func TestConsensusConfigLoading(t *testing.T) {
 				t.Fatal(err)
 			}
 			if cfg.Consensus.Engine != "pob" {
-				t.Fatal("legacy default changed")
+				t.Fatal("default engine changed")
+			}
+			if tc.name == "pob" && cfg.PoB.PackNum != 17 {
+				t.Fatal("PoB settings were not loaded from [pob]")
 			}
 		})
 	}

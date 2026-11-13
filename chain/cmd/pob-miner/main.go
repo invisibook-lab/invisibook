@@ -355,7 +355,7 @@ func runConsole(argv []string) error {
 
 	// A console that cannot keep its openings is worse than none: losing
 	// them forfeits the prepayment.
-	store, err := miner.OpenStore(cfg.Consensus.SchedulePath)
+	store, err := miner.OpenStore(cfg.PoB.SchedulePath)
 	if err != nil {
 		return fmt.Errorf("opening the prepayment store: %w", err)
 	}
@@ -363,7 +363,7 @@ func runConsole(argv []string) error {
 	svc := miner.NewService(wallet, nodeClient, nodeClient, store, miner.Info{
 		MinerPubkey:     consensus.MinerPubkeyHex(pubkey),
 		Network:         network,
-		BlockIntervalMs: cfg.Consensus.BlockInterval,
+		BlockIntervalMs: cfg.PoB.BlockInterval,
 	})
 	// Pick up prepayments a restart interrupted.
 	svc.Resume()
@@ -371,15 +371,15 @@ func runConsole(argv []string) error {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
-	miner.NewAPI(svc, cfg.Consensus.MinerAPIToken).Mount(router)
-	fmt.Printf("miner console on http://%s/ (node %s, schedule %s)\n", *listen, *node, cfg.Consensus.SchedulePath)
+	miner.NewAPI(svc, cfg.PoB.MinerAPIToken).Mount(router)
+	fmt.Printf("miner console on http://%s/ (node %s, schedule %s)\n", *listen, *node, cfg.PoB.SchedulePath)
 	return router.Run(*listen)
 }
 
 // minerKey derives the node's miner keypair from the seed in its config, so
 // that cells this tool creates are owned by the key the node mines with.
 func minerKey(cfg *config.Config) (keypair.PubKey, keypair.PrivKey, error) {
-	pubkey, privkey, err := keypair.GenKeyPairWithSecret(keypair.Secp256k1, []byte(cfg.Consensus.MinerSecret))
+	pubkey, privkey, err := keypair.GenKeyPairWithSecret(keypair.Secp256k1, []byte(cfg.PoB.MinerSecret))
 	if err != nil {
 		return nil, nil, fmt.Errorf("deriving the miner key: %w", err)
 	}

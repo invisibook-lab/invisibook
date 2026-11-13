@@ -55,7 +55,7 @@ scripts/devnet.sh console   # CKB devnet + node + pob-miner console, no prepayme
 scripts/devnet.sh down      # stop
 ```
 
-### Configuration (`[consensus]` in `cfg/core.toml`)
+### Configuration (`[pob]` in `cfg/core.toml`)
 
 | Key | Meaning |
 | --- | --- |

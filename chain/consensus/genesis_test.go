@@ -43,7 +43,7 @@ func openGenesisPoB(chainID uint64, dsn string) (*Genesis, *blockchain.BlockChai
 	chain := blockchain.NewBlockChain(common.FullNode, &cfg.BlockChain, noTxDB{})
 
 	pobCfg := DefaultConsensusConfig()
-	p := &Genesis{Tripod: tripod.NewTripodWithName("genesis"), cfg: &pobCfg}
+	p := &Genesis{Tripod: tripod.NewTripodWithName("genesis"), cfg: &pobCfg, engine: "pob"}
 	p.SetChainEnv(&env.ChainEnv{Chain: chain})
 	return p, chain
 }
@@ -175,7 +175,7 @@ func TestCheckGenesisRefusesAnotherL1Height(t *testing.T) {
 func TestGenesisBindsConsensus(t *testing.T) {
 	pob, _ := newGenesisPoB(t, 1926)
 	poa, _ := newGenesisPoB(t, 1926)
-	poa.cfg.Engine = "poa"
+	poa.engine = "poa"
 	if pob.DefineGenesis().Hash == poa.DefineGenesis().Hash {
 		t.Fatal("PoA and PoB share genesis identity")
 	}

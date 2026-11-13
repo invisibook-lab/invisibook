@@ -466,7 +466,9 @@ The application registers exactly one consensus tripod, alongside the common
 balances are shared infrastructure. Configuration parse errors and unknown
 engines stop startup rather than selecting a fallback consensus.
 
-PoB retains its parameters under `[consensus]` and its L1 settings under `[ckb]`.
+PoB keeps its parameters under `[pob]` and its L1 settings under `[ckb]`.
+The `[consensus]` section accepts only `engine`; move PoB parameters from older
+configuration files into `[pob]`. Old placements are rejected at startup.
 Only PoB creates the CKB client, VRF, payment endpoint and L1 submission worker.
 Its producer rewards remain part of the PoB execution commit hook.
 

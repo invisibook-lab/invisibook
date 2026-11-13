@@ -41,7 +41,7 @@ func TestGenesisSQLCommitment(t *testing.T) {
 	}
 	genesis := &types.Block{Header: &types.Header{Hash: common.BytesToHash([]byte("genesis")), StateRoot: root}}
 	consensusCfg := DefaultConsensusConfig()
-	initializer, err := NewGenesis(&consensusCfg, s, cash, &cfg)
+	initializer, err := NewGenesis("pob", &consensusCfg, s, cash, &cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
